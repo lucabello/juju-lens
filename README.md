@@ -13,10 +13,12 @@ what is actually implemented today.
 
 - `juju-lens record` starts an OTLP gRPC server, writes every trace payload
   it receives as JSONL under `raw/otlp/`, and builds `index.db` on shutdown.
-  Unless `--no-set-otel` is passed, it also configures the controller's
-  `open-telemetry-*` keys via the `juju` CLI and restores the previous
-  values on clean shutdown. Stops on Ctrl-C, on SIGTERM (delivered by
-  `juju-lens stop`), on `--max-duration`, or on `--max-size`.
+  Unless `--no-set-otel` is passed, it also configures the target
+  controller's `open-telemetry-*` keys via the `juju` CLI and restores the
+  previous values on clean shutdown. The target is `--controller` when
+  set, otherwise the juju CLI's currently active controller. Stops on
+  Ctrl-C, on SIGTERM (delivered by `juju-lens stop`), on `--max-duration`,
+  or on `--max-size`.
 - `juju-lens stop <recording>` signals a running recorder (found via
   `recorder.pid` in the recording directory) with SIGTERM so it can
   shut down cleanly — useful when the recorder was started with `&` or
@@ -74,12 +76,18 @@ Recording live traces from a controller:
 just build
 
 # `record` auto-sets the controller's open-telemetry-* keys (via the
-# `juju` CLI) and restores them on clean shutdown. Pass --no-set-otel to
-# skip that and copy the printed snippet by hand.
-./bin/juju-lens record my-controller \
-    --output ./recordings/my-controller \
+# `juju` CLI) and restores them on clean shutdown. When --controller is
+# omitted the juju CLI's active controller is used, mirroring how every
+# other juju command behaves. Pass --no-set-otel to skip that and copy
+# the printed snippet by hand.
+./bin/juju-lens record my-capture \
+    --output ./recordings/my-capture \
+    --controller my-juju-controller \
     --otlp-addr 127.0.0.1:4317 \
     --max-duration 30m
+
+# The <name> argument is a label for the recording (used in the directory
+# name and stored in manifest.json); it is not passed to `juju`.
 
 # If the controller runs on a different host than the recorder, tell it
 # where to send traces with --advertise-endpoint. Common patterns:
@@ -89,12 +97,12 @@ just build
 # Start the recorder in the background, then stop it later with SIGTERM
 # via `juju-lens stop`. Stop does the same clean shutdown as Ctrl-C:
 # restores OTEL config, finalises the manifest, builds the index.
-./bin/juju-lens record my-controller --output ./recordings/my-controller &
-./bin/juju-lens stop ./recordings/my-controller
+./bin/juju-lens record my-capture --output ./recordings/my-capture &
+./bin/juju-lens stop ./recordings/my-capture
 
 # --force after --timeout sends SIGKILL. That skips OTEL restoration, so
 # you'll need to reset the controller keys by hand afterwards.
-./bin/juju-lens stop --force --timeout 5s ./recordings/my-controller
+./bin/juju-lens stop --force --timeout 5s ./recordings/my-capture
 ```
 
 Open the recording later:

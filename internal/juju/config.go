@@ -56,10 +56,11 @@ func (c *Client) Available() error {
 // restore later.
 func (c *Client) ReadOTELConfig() (map[string]string, error) {
 	// One shot: `juju controller-config --format json` prints every key
-	// currently set, so a single fetch covers all six.
+	// currently set, so a single fetch covers all six. When Controller is
+	// empty the juju CLI targets the currently active controller.
 	args := []string{"controller-config", "--format", "json"}
 	if c.Controller != "" {
-		args = append([]string{"-c", c.Controller}, args...)
+		args = append(args, "--controller", c.Controller)
 	}
 	out, err := c.run(args...)
 	if err != nil {
@@ -91,7 +92,7 @@ func (c *Client) SetOTELConfig(kv map[string]string) error {
 	}
 	args := []string{"controller-config"}
 	if c.Controller != "" {
-		args = append([]string{"-c", c.Controller}, args...)
+		args = append(args, "--controller", c.Controller)
 	}
 	// Send keys in the OTELKeys order so 'enabled' lands last.
 	set := 0
@@ -119,7 +120,7 @@ func (c *Client) UnsetOTELConfig(keys []string) error {
 	}
 	args := []string{"controller-config"}
 	if c.Controller != "" {
-		args = append([]string{"-c", c.Controller}, args...)
+		args = append(args, "--controller", c.Controller)
 	}
 	args = append(args, "--reset", strings.Join(keys, ","))
 	_, err := c.run(args...)
