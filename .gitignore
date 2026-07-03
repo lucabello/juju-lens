@@ -1,0 +1,24 @@
+# Binaries and build output
+/bin/
+/juju-lens
+/dist/
+
+# Recordings produced by the tool
+/recordings/
+
+# Test/coverage artifacts
+/coverage.out
+/coverage.html
+*.prof
+
+# Editor scratch
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# Go workspace files (never committed for single-module repos)
+go.work
+go.work.sum
