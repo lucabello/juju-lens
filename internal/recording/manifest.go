@@ -86,6 +86,17 @@ type Manifest struct {
 	// recorder does not resolve them for the manifest; it just captures
 	// what it listened on.
 	OTLPListenAddresses []string `json:"otlp_listen_addresses,omitempty"`
+
+	// PreviousOTELConfig stores the controller-config values we replaced
+	// when enabling tracing, so a graceful stop can put things back. An
+	// empty value means the key was unset before we touched it, and
+	// should be reset rather than written.
+	PreviousOTELConfig map[string]string `json:"previous_otel_config,omitempty"`
+
+	// OTELRestored is set when the recorder has successfully written the
+	// previous OTEL config back. It exists so `record` runs that crashed
+	// leave enough trace for the operator to know restoration is pending.
+	OTELRestored bool `json:"otel_restored,omitempty"`
 }
 
 // New builds a manifest with the given tool and controller identity. Started

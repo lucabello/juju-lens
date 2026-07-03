@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lucabello/juju-lens/internal/juju"
 	"github.com/lucabello/juju-lens/internal/otlpsink"
 	"github.com/lucabello/juju-lens/internal/recording"
 
@@ -17,11 +18,14 @@ import (
 )
 
 type recordFlags struct {
-	output      string
-	otlpAddr    string
-	maxDuration time.Duration
-	maxSize     int64
-	dontSetOtel bool
+	output            string
+	otlpAddr          string
+	advertiseEndpoint string
+	jujuController    string
+	sampleRatio       string
+	maxDuration       time.Duration
+	maxSize           int64
+	dontSetOtel       bool
 }
 
 func newRecordCmd() *cobra.Command {
@@ -30,11 +34,15 @@ func newRecordCmd() *cobra.Command {
 		Use:   "record <controller>",
 		Short: "Record OTLP traces and logs from a Juju controller",
 		Long: `record starts an OTLP gRPC server, writes every payload to a
-recording directory, and stops cleanly on Ctrl-C or when a cap is reached.
+recording directory, and stops cleanly on Ctrl-C, on SIGTERM (delivered
+by 'juju-lens stop'), or when a --max-* cap is reached.
 
-Milestone 1 only implements the OTLP receiver and the on-disk layout. It
-does not yet configure the controller for you or ingest juju/k8s/journal
-logs; see the VISION.md for the full scope.`,
+Unless --no-set-otel is passed, record also configures the controller's
+open-telemetry-* keys to point at itself and restores the previous values
+on shutdown. The <controller> argument is used both as the recording
+name and as the -c argument to the juju CLI; pass --juju-controller to
+target a different Juju controller than what the recording is named
+after.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRecord(cmd.Context(), args[0], *f)
@@ -42,9 +50,12 @@ logs; see the VISION.md for the full scope.`,
 	}
 	cmd.Flags().StringVarP(&f.output, "output", "o", "", "recording directory (default: ./recordings/<ts>--<controller>)")
 	cmd.Flags().StringVar(&f.otlpAddr, "otlp-addr", "127.0.0.1:4317", "address to listen on for OTLP gRPC")
+	cmd.Flags().StringVar(&f.advertiseEndpoint, "advertise-endpoint", "", "endpoint the controller should send to (defaults to --otlp-addr)")
+	cmd.Flags().StringVar(&f.jujuController, "juju-controller", "", "juju CLI controller to configure (default: whatever the CLI has selected)")
+	cmd.Flags().StringVar(&f.sampleRatio, "sample-ratio", "1.0", "value passed to open-telemetry-sample-ratio")
 	cmd.Flags().DurationVar(&f.maxDuration, "max-duration", 0, "stop recording after this duration (0 = no limit)")
 	cmd.Flags().Int64Var(&f.maxSize, "max-size", 0, "stop recording after this many bytes are written to raw/ (0 = no limit)")
-	cmd.Flags().BoolVar(&f.dontSetOtel, "no-set-otel", true, "do not touch controller open-telemetry-* config keys (default true; wiring lands in a later milestone)")
+	cmd.Flags().BoolVar(&f.dontSetOtel, "no-set-otel", false, "do not touch controller open-telemetry-* config keys")
 	return cmd
 }
 
@@ -57,9 +68,17 @@ func runRecord(ctx context.Context, controller string, f recordFlags) error {
 		return err
 	}
 
-	// The tool version/commit stamp isn't reachable from here directly;
-	// synth-side commands use "-" and record uses whatever build info was
-	// baked into the top-level command. Keep it simple for M1.
+	// Refuse to overwrite an in-flight recording. Two recorders writing
+	// the same raw/ would produce corrupt JSONL.
+	if pid, err := recording.ReadPidFile(layout.PidFile()); err == nil && recording.PidAlive(pid) {
+		return fmt.Errorf("another recorder (PID %d) is already writing to %s; stop it with `juju-lens stop %s`",
+			pid, layout.Root, layout.Root)
+	}
+	if err := recording.WritePidFile(layout.PidFile(), os.Getpid()); err != nil {
+		return fmt.Errorf("writing pid file: %w", err)
+	}
+	defer recording.RemovePidFile(layout.PidFile())
+
 	man := recording.New("juju-lens", "record", "", controller)
 	if err := man.Save(layout.Root); err != nil {
 		return fmt.Errorf("writing initial manifest: %w", err)
@@ -84,19 +103,21 @@ func runRecord(ctx context.Context, controller string, f recordFlags) error {
 	}
 	man.OTLPListenAddresses = []string{server.Addr()}
 	man.AddSource(recording.SourceStatus{Name: "otlp-grpc", Kind: "otlp-grpc", Started: time.Now().UTC()})
+
+	// Auto-configure the controller unless the user opted out. Anything
+	// non-fatal (missing juju CLI, unreadable config) degrades to a
+	// warning and manual instructions, so `record` works even off-grid.
+	restore := configureOTEL(controller, f, server.Addr(), man)
+	defer restore(man, layout)
+
 	if err := man.Save(layout.Root); err != nil {
 		return fmt.Errorf("updating manifest: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "juju-lens: recording %q; OTLP gRPC on %s\n", controller, server.Addr())
-	if f.dontSetOtel {
-		fmt.Fprintf(os.Stderr, "juju-lens: point the controller at this endpoint manually, e.g.\n"+
-			"  juju controller-config \\\n"+
-			"    open-telemetry-enabled=true \\\n"+
-			"    open-telemetry-endpoint=%s \\\n"+
-			"    open-telemetry-insecure=true \\\n"+
-			"    open-telemetry-sample-ratio=1.0\n", server.Addr())
-	}
+	fmt.Fprintf(os.Stderr, "juju-lens: recording %q; OTLP gRPC on %s (pid %d)\n",
+		controller, server.Addr(), os.Getpid())
+	fmt.Fprintf(os.Stderr, "juju-lens: stop this recording with `juju-lens stop %s` (or SIGTERM/SIGINT)\n",
+		layout.Root)
 
 	// Signal handling and optional caps live off the main goroutine so
 	// Serve() can block cleanly. Any of these firing calls GracefulStop.
@@ -104,7 +125,7 @@ func runRecord(ctx context.Context, controller string, f recordFlags) error {
 	defer cancel()
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigCh)
 
 	endReason := recording.EndReasonUnknown
@@ -178,4 +199,76 @@ func runRecord(ctx context.Context, controller string, f recordFlags) error {
 		return serveErr
 	}
 	return nil
+}
+
+// configureOTEL applies open-telemetry-* controller config (unless the
+// user opted out or the juju CLI is unavailable) and returns a function
+// that restores the previous values. The returned closure is safe to call
+// multiple times; a no-op restoration still updates the manifest so the
+// operator can tell restoration ran.
+func configureOTEL(controllerArg string, f recordFlags, boundAddr string, man *recording.Manifest) func(*recording.Manifest, recording.Layout) {
+	if f.dontSetOtel {
+		printManualOTEL(boundAddr, f)
+		return func(*recording.Manifest, recording.Layout) {}
+	}
+	target := f.jujuController
+	if target == "" {
+		target = controllerArg
+	}
+	jc := juju.New(target)
+	if err := jc.Available(); err != nil {
+		fmt.Fprintf(os.Stderr, "juju-lens: juju CLI not available, skipping auto-configure (%v)\n", err)
+		printManualOTEL(boundAddr, f)
+		return func(*recording.Manifest, recording.Layout) {}
+	}
+	prev, err := jc.ReadOTELConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "juju-lens: could not read current OTEL config, skipping auto-configure (%v)\n", err)
+		printManualOTEL(boundAddr, f)
+		return func(*recording.Manifest, recording.Layout) {}
+	}
+	man.PreviousOTELConfig = prev
+	endpoint := f.advertiseEndpoint
+	if endpoint == "" {
+		endpoint = boundAddr
+	}
+	toSet := map[string]string{
+		"open-telemetry-enabled":      "true",
+		"open-telemetry-endpoint":     endpoint,
+		"open-telemetry-insecure":     "true",
+		"open-telemetry-sample-ratio": f.sampleRatio,
+	}
+	if err := jc.SetOTELConfig(toSet); err != nil {
+		fmt.Fprintf(os.Stderr, "juju-lens: auto-configure failed (%v)\n", err)
+		printManualOTEL(boundAddr, f)
+		return func(*recording.Manifest, recording.Layout) {}
+	}
+	fmt.Fprintf(os.Stderr, "juju-lens: configured controller %q to send OTLP to %s\n", target, endpoint)
+	return func(finalMan *recording.Manifest, layout recording.Layout) {
+		if err := jc.RestoreOTELConfig(prev); err != nil {
+			fmt.Fprintf(os.Stderr, "juju-lens: could not restore OTEL config (%v); saved previous values in %s\n",
+				err, layout.Manifest())
+			return
+		}
+		finalMan.OTELRestored = true
+		if err := finalMan.Save(layout.Root); err != nil {
+			fmt.Fprintf(os.Stderr, "juju-lens: could not update manifest after restore: %v\n", err)
+		}
+		fmt.Fprintf(os.Stderr, "juju-lens: restored previous OTEL config on controller %q\n", target)
+	}
+}
+
+// printManualOTEL is the fallback instruction block for when the recorder
+// cannot (or was told not to) drive the juju CLI itself.
+func printManualOTEL(boundAddr string, f recordFlags) {
+	endpoint := f.advertiseEndpoint
+	if endpoint == "" {
+		endpoint = boundAddr
+	}
+	fmt.Fprintf(os.Stderr, "juju-lens: point the controller at this endpoint manually, e.g.\n"+
+		"  juju controller-config \\\n"+
+		"    open-telemetry-enabled=true \\\n"+
+		"    open-telemetry-endpoint=%s \\\n"+
+		"    open-telemetry-insecure=true \\\n"+
+		"    open-telemetry-sample-ratio=%s\n", endpoint, f.sampleRatio)
 }

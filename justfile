@@ -93,6 +93,12 @@ record CONTROLLER="local":
     mkdir -p "${out%/*}"
     go run ./cmd/juju-lens record {{CONTROLLER}} --output "${out}"
 
+# Signal a running recorder to stop cleanly (restores OTEL config,
+# finalises manifest, builds index).
+[group("run")]
+stop RECORDING:
+    go run ./cmd/juju-lens stop {{RECORDING}}
+
 # Generate a synthetic recording (for viewer development)
 [group("run")]
 synth SCENARIO="trivial" OUT="recordings/synth-{{SCENARIO}}":

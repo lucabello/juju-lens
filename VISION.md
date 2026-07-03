@@ -477,6 +477,7 @@ Each milestone ends with a working, useful tool.
    - bubbletea skeleton with the three-column layout: apps sidebar (from spans), timeline (event list), details pane (span attrs).
    - Model picker if the recording has >1 model.
    - **Status pane (right column)** with two independent sections: **Applications** (leader-set app status per application) and **Units** (per-unit status). Latest-known values only; recomputes on selection change from the snapshot store. Sets up the plumbing (`app-status:*`, `unit-status:*` snapshot scopes; extractors) that M4 fills with real data derived from spans.
+   - **Recorder lifecycle**: auto-configure the controller's `open-telemetry-*` keys via the `juju` CLI on start and restore them on clean shutdown (opt-out with `--no-set-otel`); write a `recorder.pid` file; add `juju-lens stop <recording>` so background recorders can be signalled without shell job control.
 3. **M3 — Log ingest** *(≈3 days)*
    - `juju debug-log --tail` ingester with `trace_id`/`span_id` extraction.
    - Details pane shows correlated logs for the selected event.
@@ -484,9 +485,9 @@ Each milestone ends with a working, useful tool.
    - Databag/state snapshotter driven by `CommitHookChanges` and friends.
    - Relations sidebar with expandable databag history and diff mode.
    - Upgrade the Status pane from "latest known" (M2) to **true point-in-time**: press `s` on any timeline event to see application and unit statuses exactly as they would have appeared in `juju status` at that instant, walking backward from the cursor to the nearest snapshot per scope.
-5. **M5 — Auto-configure + follow mode** *(≈2 days)*
-   - `record` sets/restores `open-telemetry-*` controller config with `--no-set-otel` opt-out.
+5. **M5 — Follow mode** *(≈2 days)*
    - `view --follow` for live recordings.
+   - Switch the `record` indexer from post-hoc to incremental so `view --follow` can tail growing recordings.
 6. **M6 — K8s + machine log ingesters** *(≈1 week)*
    - Kubernetes shared informer per model, dynamic pod log followers.
    - `juju ssh` + `journalctl -f -o json` ingester with dynamic host discovery.

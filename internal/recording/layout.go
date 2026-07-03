@@ -56,6 +56,10 @@ func (l Layout) DerivedDir() string { return filepath.Join(l.Root, "derived") }
 // build one, but the path is stable so later milestones can find it.
 func (l Layout) IndexDB() string { return filepath.Join(l.Root, "index.db") }
 
+// PidFile is where the active recorder writes its PID. `juju-lens stop`
+// reads this file to send SIGTERM without needing shell job control.
+func (l Layout) PidFile() string { return filepath.Join(l.Root, "recorder.pid") }
+
 // OTLPTracesFile returns the JSONL file that OTLP trace requests are appended
 // to during hour h. h is a UTC "2006-01-02T15" string.
 func (l Layout) OTLPTracesFile(hour string) string {

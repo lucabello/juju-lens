@@ -5,15 +5,22 @@ controller and its models emit, then plays it back offline in a TUI where
 events, state changes, and logs are correlated by time and by trace.
 
 See [VISION.md](./VISION.md) for the full design; this README documents
-what is actually implemented today (milestone M1).
+what is actually implemented today.
 
 ## Status
 
 **Milestone M2 — SQLite index + three-column TUI.** Working:
 
 - `juju-lens record` starts an OTLP gRPC server, writes every trace payload
-  it receives as JSONL under `raw/otlp/`, builds `index.db` on shutdown,
-  and stops cleanly on Ctrl-C, on `--max-duration`, or on `--max-size`.
+  it receives as JSONL under `raw/otlp/`, and builds `index.db` on shutdown.
+  Unless `--no-set-otel` is passed, it also configures the controller's
+  `open-telemetry-*` keys via the `juju` CLI and restores the previous
+  values on clean shutdown. Stops on Ctrl-C, on SIGTERM (delivered by
+  `juju-lens stop`), on `--max-duration`, or on `--max-size`.
+- `juju-lens stop <recording>` signals a running recorder (found via
+  `recorder.pid` in the recording directory) with SIGTERM so it can
+  shut down cleanly — useful when the recorder was started with `&` or
+  in a systemd unit. `--force --timeout 5s` escalates to SIGKILL.
 - `juju-lens synth trivial` writes a byte-for-byte reproducible synthetic
   recording that mimics two Juju applications (grafana, prometheus) forming
   one relation, sets a workload status on each unit, and sets the leader's
@@ -35,10 +42,10 @@ what is actually implemented today (milestone M1).
 
 Not yet implemented (see VISION.md for milestone plan):
 
-- Auto-configuring the controller's `open-telemetry-*` keys.
 - Ingesting `juju debug-log`, Kubernetes pod logs, `journalctl`, `snap logs`.
 - Point-in-time status reconstruction at the cursor (M4 upgrades the pane
   from "latest known" to "walk backward from cursor to nearest snapshot").
+- Agent status alongside workload/app status.
 - Databag / secret snapshotter, relations sidebar with diff mode.
 - Split view, filter overlay, follow mode.
 
@@ -61,22 +68,33 @@ just synth trivial /tmp/rec-trivial
 just view /tmp/rec-trivial
 ```
 
-Recording live traces from a controller (manual OTEL config for M1):
+Recording live traces from a controller:
 
 ```bash
 just build
+
+# `record` auto-sets the controller's open-telemetry-* keys (via the
+# `juju` CLI) and restores them on clean shutdown. Pass --no-set-otel to
+# skip that and copy the printed snippet by hand.
 ./bin/juju-lens record my-controller \
     --output ./recordings/my-controller \
     --otlp-addr 127.0.0.1:4317 \
     --max-duration 30m
 
-# In another shell, tell the controller to send traces here.
-# The record command prints the exact snippet to copy.
-juju controller-config \
-    open-telemetry-enabled=true \
-    open-telemetry-endpoint=127.0.0.1:4317 \
-    open-telemetry-insecure=true \
-    open-telemetry-sample-ratio=1.0
+# If the controller runs on a different host than the recorder, tell it
+# where to send traces with --advertise-endpoint. Common patterns:
+#   - k8s controller: kubectl port-forward, then --otlp-addr 127.0.0.1:4317
+#   - remote host:    SSH reverse tunnel, then --advertise-endpoint <host>:4317
+
+# Start the recorder in the background, then stop it later with SIGTERM
+# via `juju-lens stop`. Stop does the same clean shutdown as Ctrl-C:
+# restores OTEL config, finalises the manifest, builds the index.
+./bin/juju-lens record my-controller --output ./recordings/my-controller &
+./bin/juju-lens stop ./recordings/my-controller
+
+# --force after --timeout sends SIGKILL. That skips OTEL restoration, so
+# you'll need to reset the controller keys by hand afterwards.
+./bin/juju-lens stop --force --timeout 5s ./recordings/my-controller
 ```
 
 Open the recording later:
@@ -100,10 +118,11 @@ Viewer keys:
 
 ```
 cmd/juju-lens/        # tiny main; delegates to internal/cli
-internal/cli/         # cobra subcommands (record, synth, index, view, version)
+internal/cli/         # cobra subcommands (record, stop, synth, index, view, version)
 internal/index/       # SQLite index: schema, span/snapshot writers, extractors
+internal/juju/        # thin wrapper around the juju CLI (OTEL config get/set)
 internal/otlpsink/    # embedded OTLP gRPC receiver + JSON writer helper
-internal/recording/   # on-disk layout, manifest, rotating writer, span reader
+internal/recording/   # on-disk layout, manifest, rotating writer, span reader, pid file
 internal/synth/       # deterministic OTLP scenario generator
 internal/viewer/      # bubbletea TUI (3-column layout + model picker)
 VISION.md             # full design document
@@ -118,7 +137,9 @@ is a build artifact and can be re-created at any time with
 
 ```
 recordings/2026-07-03T14-30-12--mycontroller/
-├── manifest.json                       # controller, models, versions, sources, end reason
+├── manifest.json                       # controller, models, versions, sources, end reason,
+│                                       # previous OTEL config for restoration
+├── recorder.pid                        # PID of the running recorder (removed on clean exit)
 ├── index.db                            # SQLite (WAL); rebuildable from raw/
 ├── raw/
 │   └── otlp/
@@ -134,6 +155,7 @@ just install      # go install into $GOBIN
 just release      # cross-compile linux/darwin × amd64/arm64 → ./dist/
 just run -- version
 just record my-controller
+just stop /path/to/recording  # SIGTERM the background recorder
 just synth trivial /tmp/rec
 just index /tmp/rec           # rebuild index.db from raw/
 just view /tmp/rec
