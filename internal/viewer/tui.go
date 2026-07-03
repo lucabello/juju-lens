@@ -1,17 +1,26 @@
 // Package viewer implements the bubbletea TUI shown by `juju-lens view`.
 //
-// M1 keeps it deliberately minimal: a scrollable timeline of every span in
-// the recording, with a details pane that shows the selected span's
-// attributes and a manifest summary. The layout is a two-pane split so we
-// have somewhere to grow: later milestones will fill the sidebars with
-// applications, machines, models, relations, and correlated logs.
+// M2 introduces a three-column layout backed by the SQLite index:
+//
+//   - Left column   — apps sidebar (apps -> units tree).
+//   - Centre column — timeline of spans (top) and details of the selection
+//     (bottom).
+//   - Right column  — status pane with two independent sections
+//     (Applications, Units) reconstructed from the "latest known" snapshot
+//     at the timeline cursor. M4 will upgrade the pane to true point-in-time
+//     reconstruction.
+//
+// The Model owns the SQLite handle and routes messages to the individual
+// panes; each pane is a small struct with its own render function. Queries
+// happen on the event-loop goroutine for now because M2 recordings are
+// small; later milestones will move heavy queries into commands.
 package viewer
 
 import (
 	"fmt"
-	"strings"
-	"time"
+	"sort"
 
+	"github.com/lucabello/juju-lens/internal/index"
 	"github.com/lucabello/juju-lens/internal/recording"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -28,11 +37,19 @@ func Run(dir string) error {
 	if err != nil {
 		return fmt.Errorf("loading manifest at %s: %w", dir, err)
 	}
-	spans, err := recording.LoadSpans(dir)
+	layout := recording.NewLayout(dir)
+	db, err := index.Open(layout.IndexDB())
 	if err != nil {
-		return fmt.Errorf("loading spans: %w", err)
+		return fmt.Errorf("opening index (run `juju-lens index %s`): %w", dir, err)
 	}
-	m := newModel(dir, man, spans)
+	defer db.Close()
+
+	models, err := db.Models()
+	if err != nil {
+		return fmt.Errorf("listing models: %w", err)
+	}
+
+	m := newModel(dir, man, db, models)
 	prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = prog.Run()
 	return err
@@ -40,52 +57,101 @@ func Run(dir string) error {
 
 // keymap groups the keybindings so bubbles/help can render them.
 type keymap struct {
-	Up, Down, PageUp, PageDown, Home, End, Quit key.Binding
+	Up, Down, PageUp, PageDown, Home, End key.Binding
+	Tab, ModelPick, Quit                  key.Binding
 }
 
 func defaultKeymap() keymap {
 	return keymap{
-		Up:       key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
-		Down:     key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
-		PageUp:   key.NewBinding(key.WithKeys("pgup", "b"), key.WithHelp("PgUp", "page up")),
-		PageDown: key.NewBinding(key.WithKeys("pgdown", " ", "f"), key.WithHelp("PgDn", "page down")),
-		Home:     key.NewBinding(key.WithKeys("home", "g"), key.WithHelp("Home", "top")),
-		End:      key.NewBinding(key.WithKeys("end", "G"), key.WithHelp("End", "bottom")),
-		Quit:     key.NewBinding(key.WithKeys("q", "esc", "ctrl+c"), key.WithHelp("q", "quit")),
+		Up:        key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Down:      key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		PageUp:    key.NewBinding(key.WithKeys("pgup", "b"), key.WithHelp("PgUp", "page up")),
+		PageDown:  key.NewBinding(key.WithKeys("pgdown", " ", "f"), key.WithHelp("PgDn", "page down")),
+		Home:      key.NewBinding(key.WithKeys("home", "g"), key.WithHelp("Home", "top")),
+		End:       key.NewBinding(key.WithKeys("end", "G"), key.WithHelp("End", "bottom")),
+		Tab:       key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "cycle focus")),
+		ModelPick: key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "pick model")),
+		Quit:      key.NewBinding(key.WithKeys("q", "esc", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
 func (k keymap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.PageDown, k.Home, k.End, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.PageDown, k.Home, k.End, k.Tab, k.ModelPick, k.Quit}
 }
 
 func (k keymap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
+		{k.Tab, k.ModelPick, k.Quit}}
 }
+
+// paneID identifies the focusable centre-column selection surface. The
+// sidebars render but do not (yet) take focus in M2; the timeline drives
+// all queries.
+type paneID int
+
+const (
+	paneTimeline paneID = iota
+)
 
 type model struct {
 	dir      string
 	manifest *recording.Manifest
-	spans    []recording.SpanRow
+	db       *index.DB
+
+	allModels    []index.Model
+	activeModel  index.Model // zero-value means "all models"
+	spans        []recording.SpanRow
+	appTree      appTree
+	appStatuses  map[string]statusValue // app -> latest known status
+	unitStatuses map[string]statusValue // unit -> latest known status
 
 	cursor  int
+	focus   paneID
 	width   int
 	height  int
 	details viewport.Model
 	help    help.Model
 	keys    keymap
 	ready   bool
+
+	picker *modelPicker // non-nil while the picker overlay is active
 }
 
-func newModel(dir string, man *recording.Manifest, spans []recording.SpanRow) *model {
-	return &model{
-		dir:      dir,
-		manifest: man,
-		spans:    spans,
-		details:  viewport.New(0, 0),
-		help:     help.New(),
-		keys:     defaultKeymap(),
+func newModel(dir string, man *recording.Manifest, db *index.DB, models []index.Model) *model {
+	m := &model{
+		dir:       dir,
+		manifest:  man,
+		db:        db,
+		allModels: models,
+		details:   viewport.New(0, 0),
+		help:      help.New(),
+		keys:      defaultKeymap(),
+		focus:     paneTimeline,
 	}
+	// Auto-open the picker if there is more than one model, otherwise
+	// select the single one silently.
+	if len(models) > 1 {
+		m.picker = newModelPicker(models)
+	} else if len(models) == 1 {
+		m.setActiveModel(models[0])
+	}
+	return m
+}
+
+// setActiveModel refreshes every derived view when the model context
+// changes (recording load, model picker selection, etc.).
+func (m *model) setActiveModel(mm index.Model) {
+	m.activeModel = mm
+	spans, err := m.db.Spans(mm.ID)
+	if err != nil {
+		spans = nil
+	}
+	m.spans = spans
+	m.cursor = 0
+	m.appTree = buildAppTree(spans)
+	m.appStatuses = latestByScope(m.db, mm.ID, string(index.KindAppStatus), "app-status:")
+	m.unitStatuses = latestByScope(m.db, mm.ID, string(index.KindUnitStatus), "unit-status:")
+	m.refreshDetails()
 }
 
 func (m *model) Init() tea.Cmd { return nil }
@@ -99,9 +165,29 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshDetails()
 		m.ready = true
 	case tea.KeyMsg:
+		// The picker eats every keystroke while it's up.
+		if m.picker != nil {
+			done, chosen := m.picker.update(msg)
+			if done {
+				m.picker = nil
+				if chosen != nil {
+					m.setActiveModel(*chosen)
+				} else if m.activeModel.ID == 0 && len(m.allModels) > 0 {
+					// User cancelled without ever choosing; fall back
+					// to the first model so the TUI has something to
+					// show.
+					m.setActiveModel(m.allModels[0])
+				}
+			}
+			return m, nil
+		}
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
+		case key.Matches(msg, m.keys.ModelPick):
+			if len(m.allModels) > 1 {
+				m.picker = newModelPicker(m.allModels)
+			}
 		case key.Matches(msg, m.keys.Up):
 			m.moveCursor(-1)
 		case key.Matches(msg, m.keys.Down):
@@ -138,42 +224,60 @@ func (m *model) moveCursor(delta int) {
 	m.refreshDetails()
 }
 
-func (m *model) layout() {
-	m.details.Width = detailsWidth(m.width)
-	m.details.Height = max(1, m.height-headerHeight-footerHeight-1)
+func (m *model) View() string {
+	if !m.ready {
+		return "loading recording..."
+	}
+	if m.picker != nil {
+		return m.picker.view(m.width, m.height)
+	}
+	header := m.renderHeader()
+	footer := m.help.View(m.keys)
+
+	if len(m.spans) == 0 {
+		body := lipgloss.NewStyle().
+			Padding(2, 4).
+			Render(fmt.Sprintf("Recording contains no spans yet.\n\nDirectory: %s", m.dir))
+		return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	}
+
+	apps := m.renderAppsPane()
+	centre := m.renderCentreColumn()
+	status := m.renderStatusPane()
+	body := lipgloss.JoinHorizontal(lipgloss.Top, apps, centre, status)
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
-// timelineWidth / detailsWidth pick a 55/45 split for the two panes with
-// sensible minima. All numbers include the box borders.
-func timelineWidth(total int) int {
-	w := (total * 55) / 100
-	if w < 30 {
-		w = 30
+func (m *model) renderHeader() string {
+	activeName := "?"
+	if m.activeModel.Name != "" {
+		activeName = m.activeModel.Name
 	}
-	if w > total-20 {
-		w = total - 20
+	allNames := []string{}
+	for _, mm := range m.allModels {
+		allNames = append(allNames, mm.Name)
 	}
-	if w < 0 {
-		w = 0
+	sort.Strings(allNames)
+	modelsSummary := activeName
+	if len(m.allModels) > 1 {
+		modelsSummary = fmt.Sprintf("%s (of %d — press m)", activeName, len(m.allModels))
 	}
-	return w
+	controller := "?"
+	if m.manifest != nil {
+		controller = m.manifest.Controller.Name
+	}
+	title := fmt.Sprintf("juju-lens · %s · model: %s · spans: %d",
+		controller, modelsSummary, len(m.spans))
+	return styleHeader.Width(m.width).Render(title)
 }
 
-func detailsWidth(total int) int {
-	w := total - timelineWidth(total)
-	if w < 0 {
-		w = 0
+// currentSpan returns the span under the cursor, or the zero SpanRow when
+// the recording is empty.
+func (m *model) currentSpan() recording.SpanRow {
+	if len(m.spans) == 0 {
+		return recording.SpanRow{}
 	}
-	return w
-}
-
-const (
-	headerHeight = 3 // one line of title + top border/padding
-	footerHeight = 2 // one line of help + separator
-)
-
-func (m *model) timelineHeight() int {
-	return max(1, m.height-headerHeight-footerHeight-1)
+	return m.spans[m.cursor]
 }
 
 // Styles
@@ -189,161 +293,34 @@ var (
 	styleDetailsBox = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			Padding(0, 1)
+	styleAppsBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			Padding(0, 1)
+	styleStatusBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			Padding(0, 1)
 	styleSelected = lipgloss.NewStyle().
 			Reverse(true)
 	styleHook = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("6"))
 	styleUnit = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("4"))
+	styleApp = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("5")).
+			Bold(true)
 	styleDim = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("8"))
 	styleErr = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("1")).
 			Bold(true)
+	styleOK = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("2"))
+	styleWarn = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("3"))
+	styleSection = lipgloss.NewStyle().
+			Bold(true).
+			Underline(true)
 )
-
-func (m *model) View() string {
-	if !m.ready {
-		return "loading recording..."
-	}
-	if len(m.spans) == 0 {
-		return m.emptyView()
-	}
-	header := m.renderHeader()
-	timeline := m.renderTimeline()
-	details := m.renderDetails()
-	body := lipgloss.JoinHorizontal(lipgloss.Top, timeline, details)
-	footer := m.help.View(m.keys)
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
-}
-
-func (m *model) emptyView() string {
-	msg := lipgloss.NewStyle().
-		Padding(2, 4).
-		Render(fmt.Sprintf("Recording contains no spans yet.\n\nDirectory: %s", m.dir))
-	return lipgloss.JoinVertical(lipgloss.Left,
-		m.renderHeader(),
-		msg,
-		m.help.View(m.keys),
-	)
-}
-
-func (m *model) renderHeader() string {
-	models := "?"
-	if m.manifest != nil {
-		names := []string{}
-		for _, x := range m.manifest.Models {
-			names = append(names, x.Name)
-		}
-		if len(names) > 0 {
-			models = strings.Join(names, ", ")
-		}
-	}
-	controller := "?"
-	if m.manifest != nil {
-		controller = m.manifest.Controller.Name
-	}
-	title := fmt.Sprintf("juju-lens · %s · models: %s · spans: %d",
-		controller, models, len(m.spans))
-	return styleHeader.Width(m.width).Render(title)
-}
-
-func (m *model) renderTimeline() string {
-	w := timelineWidth(m.width)
-	h := m.timelineHeight()
-	rows := make([]string, 0, len(m.spans))
-
-	// Compute a sliding window so the cursor is visible.
-	start := 0
-	if m.cursor >= h {
-		start = m.cursor - h + 1
-	}
-	end := start + h
-	if end > len(m.spans) {
-		end = len(m.spans)
-	}
-
-	for i := start; i < end; i++ {
-		sp := m.spans[i]
-		hook := sp.Hook
-		if hook == "" {
-			hook = "-"
-		}
-		unit := sp.Unit
-		if unit == "" {
-			unit = "?"
-		}
-		line := fmt.Sprintf("%s %-14s %s %s",
-			formatTime(sp.Start),
-			styleUnit.Render(truncate(unit, 14)),
-			styleHook.Render(truncate(hook, 22)),
-			truncate(sp.Name, max(0, w-52)),
-		)
-		if i == m.cursor {
-			line = styleSelected.Width(max(0, w-4)).Render(line)
-		}
-		rows = append(rows, line)
-	}
-
-	// Pad the box to the requested height so the layout doesn't reflow.
-	for len(rows) < h {
-		rows = append(rows, "")
-	}
-	inner := strings.Join(rows, "\n")
-	return styleTimelineBox.Width(w).Height(h + 2).Render(inner)
-}
-
-func (m *model) renderDetails() string {
-	w := detailsWidth(m.width)
-	h := m.timelineHeight()
-	m.details.Width = max(0, w-4)
-	m.details.Height = h
-	return styleDetailsBox.Width(w).Height(h + 2).Render(m.details.View())
-}
-
-func (m *model) refreshDetails() {
-	if len(m.spans) == 0 {
-		m.details.SetContent("")
-		return
-	}
-	sp := m.spans[m.cursor]
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n\n", lipgloss.NewStyle().Bold(true).Render(sp.Name))
-	fmt.Fprintf(&b, "  span:     %s\n", sp.SpanID)
-	fmt.Fprintf(&b, "  trace:    %s\n", sp.TraceID)
-	if sp.ParentSpanID != "" {
-		fmt.Fprintf(&b, "  parent:   %s\n", sp.ParentSpanID)
-	} else {
-		fmt.Fprintf(&b, "  parent:   %s\n", styleDim.Render("(root)"))
-	}
-	fmt.Fprintf(&b, "  service:  %s\n", withDim(sp.Service))
-	fmt.Fprintf(&b, "  unit:     %s\n", withDim(sp.Unit))
-	fmt.Fprintf(&b, "  model:    %s\n", withDim(sp.Model))
-	fmt.Fprintf(&b, "  start:    %s\n", sp.Start.Format(time.RFC3339Nano))
-	fmt.Fprintf(&b, "  duration: %s\n", sp.Duration())
-	statusStyle := styleDim
-	if sp.StatusCode == "STATUS_CODE_ERROR" {
-		statusStyle = styleErr
-	}
-	fmt.Fprintf(&b, "  status:   %s\n", statusStyle.Render(sp.StatusCode))
-	if sp.StatusMsg != "" {
-		fmt.Fprintf(&b, "  message:  %s\n", sp.StatusMsg)
-	}
-	if len(sp.Attrs) > 0 {
-		fmt.Fprintf(&b, "\n%s\n", lipgloss.NewStyle().Bold(true).Render("attributes"))
-		// Attributes in a stable order (alphabetical) for reproducibility.
-		keys := make([]string, 0, len(sp.Attrs))
-		for k := range sp.Attrs {
-			keys = append(keys, k)
-		}
-		sortStrings(keys)
-		for _, k := range keys {
-			fmt.Fprintf(&b, "  %s = %s\n", k, sp.Attrs[k])
-		}
-	}
-	m.details.SetContent(b.String())
-	m.details.GotoTop()
-}
 
 func withDim(s string) string {
 	if s == "" {
@@ -352,36 +329,15 @@ func withDim(s string) string {
 	return s
 }
 
-func formatTime(t time.Time) string {
-	return t.UTC().Format("15:04:05.000")
-}
-
-func truncate(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	if len([]rune(s)) <= n {
-		return s
-	}
-	rs := []rune(s)
-	if n <= 1 {
-		return string(rs[:n])
-	}
-	return string(rs[:n-1]) + "…"
-}
-
-func sortStrings(s []string) {
-	// Small inline sort; standard library sort would work equally well,
-	// but avoiding the dependency keeps the tui file self-contained.
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j-1] > s[j]; j-- {
-			s[j-1], s[j] = s[j], s[j-1]
-		}
-	}
-}
-
 func max(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b

@@ -32,6 +32,7 @@ func newRootCmd(bi BuildInfo) *cobra.Command {
 		newVersionCmd(bi),
 		newRecordCmd(),
 		newSynthCmd(),
+		newIndexCmd(),
 		newViewCmd(),
 	)
 	return root

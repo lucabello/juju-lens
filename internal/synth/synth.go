@@ -255,6 +255,23 @@ func generateTrivial(opts Options) *tracepb.ExportTraceServiceRequest {
 			strAttr("juju.relation", "grafana-source"),
 			strAttr("databag.write", `{"ingress-address":"10.1.2.3"}`),
 		),
+		// grafana/0 is the leader and sets both its unit status and the
+		// application status. The two are independent state in Juju and
+		// each becomes its own snapshot scope.
+		grafanaB.span("jujuc.status-set", nil, 5*time.Millisecond,
+			strAttr("juju.tool", "status-set"),
+			strAttr("juju.unit", "grafana/0"),
+			strAttr("juju.status.kind", "workload"),
+			strAttr("juju.status.workload.value", "active"),
+			strAttr("juju.status.workload.message", "Ready"),
+		),
+		grafanaB.span("jujuc.status-set --application", nil, 5*time.Millisecond,
+			strAttr("juju.tool", "status-set"),
+			strAttr("juju.unit", "grafana/0"),
+			strAttr("juju.status.kind", "application"),
+			strAttr("juju.status.application.value", "active"),
+			strAttr("juju.status.application.message", "All units ready"),
+		),
 	)
 
 	prometheusSpans := []*tv1.Span{
@@ -289,6 +306,23 @@ func generateTrivial(opts Options) *tracepb.ExportTraceServiceRequest {
 			strAttr("juju.relation", "grafana-source"),
 			strAttr("juju.remote.unit", "grafana/0"),
 			intAttr("juju.relation.id", 3),
+		),
+		// prometheus/0 sets its own workload status and (as leader of its
+		// application) sets the prometheus app status too. Status "waiting"
+		// is deliberately distinct from grafana so the pane has variety.
+		prometheusB.span("jujuc.status-set", nil, 5*time.Millisecond,
+			strAttr("juju.tool", "status-set"),
+			strAttr("juju.unit", "prometheus/0"),
+			strAttr("juju.status.kind", "workload"),
+			strAttr("juju.status.workload.value", "waiting"),
+			strAttr("juju.status.workload.message", "waiting for grafana"),
+		),
+		prometheusB.span("jujuc.status-set --application", nil, 5*time.Millisecond,
+			strAttr("juju.tool", "status-set"),
+			strAttr("juju.unit", "prometheus/0"),
+			strAttr("juju.status.kind", "application"),
+			strAttr("juju.status.application.value", "waiting"),
+			strAttr("juju.status.application.message", "waiting for peers"),
 		),
 	}
 

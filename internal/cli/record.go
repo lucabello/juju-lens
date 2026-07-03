@@ -164,6 +164,14 @@ func runRecord(ctx context.Context, controller string, f recordFlags) error {
 	if err := man.Save(layout.Root); err != nil {
 		return fmt.Errorf("finalising manifest: %w", err)
 	}
+	// Build the SQLite index once the raw files are closed. Recording is
+	// the authoritative source; the index is derived and re-buildable via
+	// `juju-lens index`. Failure here is logged but not fatal, so a
+	// corrupt raw file never loses the on-disk recording.
+	if err := runIndex(layout.Root); err != nil {
+		fmt.Fprintf(os.Stderr, "juju-lens: indexing recording failed: %v (run `juju-lens index %s` to retry)\n",
+			err, layout.Root)
+	}
 	fmt.Fprintf(os.Stderr, "juju-lens: recording saved to %s (traces=%d logs=%d metrics=%d)\n",
 		layout.Root, sinks.TraceCount(), sinks.LogCount(), sinks.MetricCount())
 	if serveErr != nil && !errors.Is(serveErr, context.Canceled) {

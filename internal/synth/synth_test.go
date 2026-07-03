@@ -77,6 +77,7 @@ func TestGenerateTrivialShape(t *testing.T) {
 	// Every span must have a hook attribute and a non-empty trace id.
 	total := 0
 	joinedCount := 0
+	statusSetCount := 0
 	for _, rs := range req.ResourceSpans {
 		for _, ss := range rs.ScopeSpans {
 			for _, sp := range ss.Spans {
@@ -87,14 +88,23 @@ func TestGenerateTrivialShape(t *testing.T) {
 				if strings.Contains(sp.Name, "relation-joined") {
 					joinedCount++
 				}
+				for _, a := range sp.Attributes {
+					if a.Key == "juju.tool" && a.Value.GetStringValue() == "status-set" {
+						statusSetCount++
+					}
+				}
 			}
 		}
 	}
-	if total < 10 {
-		t.Fatalf("expected at least 10 spans, got %d", total)
+	if total < 14 {
+		t.Fatalf("expected at least 14 spans, got %d", total)
 	}
 	if joinedCount != 2 {
 		t.Fatalf("expected 2 relation-joined spans, got %d", joinedCount)
+	}
+	// Two units × (unit-status + app-status) = 4 status-set spans.
+	if statusSetCount != 4 {
+		t.Fatalf("expected 4 status-set spans (2 units × workload+application), got %d", statusSetCount)
 	}
 }
 

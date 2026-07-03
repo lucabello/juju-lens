@@ -103,6 +103,11 @@ synth SCENARIO="trivial" OUT="recordings/synth-{{SCENARIO}}":
 view RECORDING:
     go run ./cmd/juju-lens view {{RECORDING}}
 
+# Rebuild the SQLite index for a recording from its raw/ tree
+[group("run")]
+index RECORDING:
+    go run ./cmd/juju-lens index {{RECORDING}}
+
 # End-to-end smoke test: synth a recording and open it in the viewer
 [group("run")]
 demo: build
