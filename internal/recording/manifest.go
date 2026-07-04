@@ -36,7 +36,7 @@ const (
 // SourceStatus captures whether an ingester ran successfully.
 type SourceStatus struct {
 	Name    string    `json:"name"`
-	Kind    string    `json:"kind"` // "otlp-grpc", "otlp-http", "juju-debug-log", "k8s", "journal", "snap", "synth"
+	Kind    string    `json:"kind"` // "rpc", "juju-debug-log", "k8s", "journal", "snap", "synth"
 	Started time.Time `json:"started"`
 	Stopped time.Time `json:"stopped,omitempty"`
 	Records int64     `json:"records,omitempty"`
@@ -82,21 +82,16 @@ type Manifest struct {
 	// Sources records every ingester that ran. The list is append-only.
 	Sources []SourceStatus `json:"sources,omitempty"`
 
-	// OTLPListenAddresses is what we told Juju to send traces to. The
-	// recorder does not resolve them for the manifest; it just captures
-	// what it listened on.
-	OTLPListenAddresses []string `json:"otlp_listen_addresses,omitempty"`
+	// AttachMode is how the recorder reached the target processes' TLS
+	// boundary: "ssh" (machine controllers), "kubectl-debug" or "daemonset"
+	// (k8s), or "local" when the probe ran on this host. The viewer surfaces
+	// it so an operator can tell how a recording was produced. The recorder
+	// never mutates the controller, so there is nothing to restore.
+	AttachMode string `json:"attach_mode,omitempty"`
 
-	// PreviousOTELConfig stores the controller-config values we replaced
-	// when enabling tracing, so a graceful stop can put things back. An
-	// empty value means the key was unset before we touched it, and
-	// should be reset rather than written.
-	PreviousOTELConfig map[string]string `json:"previous_otel_config,omitempty"`
-
-	// OTELRestored is set when the recorder has successfully written the
-	// previous OTEL config back. It exists so `record` runs that crashed
-	// leave enough trace for the operator to know restoration is pending.
-	OTELRestored bool `json:"otel_restored,omitempty"`
+	// AttachTargets lists the hosts/nodes the probe was attached on, for
+	// operator visibility. Empty for synthetic recordings.
+	AttachTargets []string `json:"attach_targets,omitempty"`
 }
 
 // New builds a manifest with the given tool and controller identity. Started

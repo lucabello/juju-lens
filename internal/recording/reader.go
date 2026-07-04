@@ -2,23 +2,27 @@ package recording
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"io"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
-	tracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
-	"google.golang.org/protobuf/encoding/protojson"
+	"github.com/lucabello/juju-lens/internal/wire"
 )
 
-// SpanRow is the flattened, viewer-friendly projection of an OTLP span. M1
-// keeps this deliberately small; later milestones can add columns without
-// breaking on-disk compatibility since the raw payloads are the source of
-// truth.
+// SpanRow is the flattened, viewer-friendly projection of one synthesised RPC
+// span. In the eBPF/RPC approach a span is a single captured Juju API call:
+// start = the write (request) timestamp, end = the matching read (response)
+// timestamp, name = "<facade>.<method>". The raw envelope is the source of
+// truth; SpanRow is derived and re-buildable, so columns can grow without
+// breaking on-disk compatibility.
 type SpanRow struct {
 	TraceID      string // hex
 	SpanID       string // hex
@@ -26,162 +30,257 @@ type SpanRow struct {
 	Name         string
 	Start        time.Time
 	End          time.Time
-	StatusCode   string // "OK", "ERROR", "UNSET"
+	StatusCode   string // "OK" or "ERROR"
 	StatusMsg    string
-	Service      string            // resource attr "service.name"
-	Model        string            // resource attr "juju.model"
-	Unit         string            // resource attr "juju.unit" or span attr "executor.unit"
-	Hook         string            // span attr "juju.hook" (if set)
-	Relation     string            // span attr "juju.relation" (if set)
-	Attrs        map[string]string // flattened for the details pane
+	Service      string            // coarse origin: "agent", "jujuc", ...
+	Controller   string            // controller name the agent belongs to
+	Model        string            // model name the connection was attributed to
+	ModelUUID    string            // model UUID
+	App          string            // application the RPC came from
+	Unit         string            // agent tag the RPC came from
+	Hook         string            // set by extractors when derivable
+	Relation     string            // set by extractors when derivable
+	RawFile      string            // raw/rpc/<model>/calls-*.jsonl this came from (relative to root)
+	RawOffset    int64             // byte offset of the request line within RawFile
+	Attrs        map[string]string // flattened envelope fields for the details pane
 }
 
 // Duration is a convenience for the viewer.
 func (s SpanRow) Duration() time.Duration { return s.End.Sub(s.Start) }
 
-// LoadSpans reads every OTLP trace file under the recording's raw/otlp/
-// directory and returns spans in wall-clock order. Files whose contents are
-// not valid OTLP-JSON are skipped with a warning to stderr; a hand-copied
-// recording never crashes the viewer.
+// LoadSpans reads every per-model calls file under raw/rpc/, pairs each
+// request with its response by (pid, conn, request-id), and returns the
+// synthesised spans in wall-clock order. Files with unreadable lines are
+// tolerated line-by-line: a bad line is skipped with a warning rather than
+// failing the whole recording.
 func LoadSpans(root string) ([]SpanRow, error) {
 	l := NewLayout(root)
-	var rows []SpanRow
-	entries, err := os.ReadDir(l.OTLPDir())
+	rpcRoot := filepath.Join(l.RawDir(), "rpc")
+	modelDirs, err := os.ReadDir(rpcRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return rows, nil
+			return nil, nil
 		}
-		return nil, fmt.Errorf("reading %s: %w", l.OTLPDir(), err)
+		return nil, fmt.Errorf("reading %s: %w", rpcRoot, err)
 	}
-	// Consider only trace files; ignore logs/metrics for M1.
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasPrefix(e.Name(), "traces-") || !strings.HasSuffix(e.Name(), ".jsonl") {
+
+	p := newPairer()
+	for _, md := range modelDirs {
+		if !md.IsDir() {
 			continue
 		}
-		got, err := loadSpanFile(filepath.Join(l.OTLPDir(), e.Name()))
+		dir := filepath.Join(rpcRoot, md.Name())
+		files, err := os.ReadDir(dir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "juju-lens: skipping %s: %v\n", e.Name(), err)
+			fmt.Fprintf(os.Stderr, "juju-lens: skipping %s: %v\n", dir, err)
 			continue
 		}
-		rows = append(rows, got...)
+		names := make([]string, 0, len(files))
+		for _, f := range files {
+			if !f.IsDir() && strings.HasPrefix(f.Name(), "calls-") && strings.HasSuffix(f.Name(), ".jsonl") {
+				names = append(names, f.Name())
+			}
+		}
+		sort.Strings(names) // hour-keyed names sort into chronological order
+		for _, name := range names {
+			rel, _ := filepath.Rel(root, filepath.Join(dir, name))
+			if err := p.consumeFile(filepath.Join(dir, name), rel); err != nil {
+				fmt.Fprintf(os.Stderr, "juju-lens: skipping %s: %v\n", name, err)
+			}
+		}
 	}
+	rows := p.finish()
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Start.Before(rows[j].Start) })
 	return rows, nil
 }
 
-var unmarshalOpts = protojson.UnmarshalOptions{DiscardUnknown: true}
+// pairer accumulates outstanding requests keyed by (pid, conn, request-id) and
+// emits a SpanRow when the matching response arrives. Requests without a
+// response (recorder stopped mid-flight) are flushed as zero-duration spans at
+// finish() so nothing captured is silently dropped.
+type pairer struct {
+	pending map[reqKey]SpanRow
+	rows    []SpanRow
+}
 
-func loadSpanFile(path string) ([]SpanRow, error) {
+type reqKey struct {
+	pid  int
+	conn uint64
+	rid  uint64
+}
+
+func newPairer() *pairer { return &pairer{pending: map[reqKey]SpanRow{}} }
+
+func (p *pairer) consumeFile(path, rel string) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1<<16), 16<<20)
-
-	var rows []SpanRow
-	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
+	r := bufio.NewReader(f)
+	var offset int64
+	for {
+		line, err := r.ReadBytes('\n')
+		lineOffset := offset
+		offset += int64(len(line))
+		trimmed := line
+		if n := len(trimmed); n > 0 && trimmed[n-1] == '\n' {
+			trimmed = trimmed[:n-1]
 		}
-		var req tracepb.ExportTraceServiceRequest
-		if err := unmarshalOpts.Unmarshal(line, &req); err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
-		}
-		rows = append(rows, flatten(&req)...)
-	}
-	if err := scanner.Err(); err != nil && err != io.EOF {
-		return nil, err
-	}
-	return rows, nil
-}
-
-func flatten(req *tracepb.ExportTraceServiceRequest) []SpanRow {
-	var rows []SpanRow
-	for _, rs := range req.GetResourceSpans() {
-		service := ""
-		model := ""
-		unit := ""
-		for _, a := range rs.GetResource().GetAttributes() {
-			switch a.Key {
-			case "service.name":
-				service = a.Value.GetStringValue()
-			case "juju.model":
-				model = a.Value.GetStringValue()
-			case "juju.unit":
-				unit = a.Value.GetStringValue()
+		if len(trimmed) > 0 {
+			cm, uerr := wire.UnmarshalLine(trimmed)
+			if uerr == nil {
+				p.add(cm, rel, lineOffset)
 			}
 		}
-		for _, ss := range rs.GetScopeSpans() {
-			for _, sp := range ss.GetSpans() {
-				row := SpanRow{
-					TraceID:      hex.EncodeToString(sp.GetTraceId()),
-					SpanID:       hex.EncodeToString(sp.GetSpanId()),
-					ParentSpanID: hex.EncodeToString(sp.GetParentSpanId()),
-					Name:         sp.GetName(),
-					Start:        time.Unix(0, int64(sp.GetStartTimeUnixNano())).UTC(),
-					End:          time.Unix(0, int64(sp.GetEndTimeUnixNano())).UTC(),
-					StatusCode:   sp.GetStatus().GetCode().String(),
-					StatusMsg:    sp.GetStatus().GetMessage(),
-					Service:      service,
-					Model:        model,
-					Unit:         unit,
-					Attrs:        map[string]string{},
-				}
-				for _, a := range sp.GetAttributes() {
-					v := attrString(a.GetValue())
-					row.Attrs[a.Key] = v
-					switch a.Key {
-					case "juju.hook":
-						row.Hook = v
-					case "juju.relation":
-						row.Relation = v
-					case "executor.unit":
-						if row.Unit == "" {
-							row.Unit = v
-						}
-					}
-				}
-				rows = append(rows, row)
-			}
+		if err != nil {
+			break // io.EOF or a real read error; either way we're done
 		}
 	}
-	return rows
+	return nil
 }
 
-func attrString(v *commonAny) string {
-	if v == nil {
-		return ""
-	}
-	switch val := v.GetValue().(type) {
-	case *commonAnyString:
-		return val.StringValue
-	case *commonAnyBool:
-		if val.BoolValue {
-			return "true"
+func (p *pairer) add(cm wire.CapturedMessage, rawFile string, offset int64) {
+	key := reqKey{pid: cm.PID, conn: cm.Conn, rid: cm.Msg.RequestID}
+	if cm.Msg.IsRequest() {
+		row := SpanRow{
+			Name:       spanName(cm.Msg),
+			Start:      cm.Ts.UTC(),
+			End:        cm.Ts.UTC(),
+			Service:    serviceOf(cm),
+			Controller: cm.Controller,
+			Model:      cm.Model,
+			ModelUUID:  cm.ModelUUID,
+			App:        cm.App,
+			Unit:       cm.Unit,
+			StatusCode: "OK",
+			RawFile:    rawFile,
+			RawOffset:  offset,
+			Attrs:      envelopeAttrs(cm.Msg),
 		}
-		return "false"
-	case *commonAnyInt:
-		return fmt.Sprintf("%d", val.IntValue)
-	case *commonAnyDouble:
-		return fmt.Sprintf("%g", val.DoubleValue)
+		row.TraceID, row.SpanID = spanIDs(cm.Msg, key)
+		p.pending[key] = row
+		return
+	}
+	// Response half: close out the pending request if we have it.
+	row, ok := p.pending[key]
+	if !ok {
+		return // orphan response (recorder started mid-connection); ignore
+	}
+	delete(p.pending, key)
+	row.End = cm.Ts.UTC()
+	if row.End.Before(row.Start) {
+		row.End = row.Start
+	}
+	if cm.Msg.Error != "" {
+		row.StatusCode = "ERROR"
+		row.StatusMsg = cm.Msg.Error
+		row.Attrs["error"] = cm.Msg.Error
+		if cm.Msg.ErrorCode != "" {
+			row.Attrs["error-code"] = cm.Msg.ErrorCode
+		}
+	}
+	if len(cm.Msg.Response) > 0 {
+		row.Attrs["response"] = compactJSON(cm.Msg.Response)
+	}
+	p.rows = append(p.rows, row)
+}
+
+func (p *pairer) finish() []SpanRow {
+	for _, row := range p.pending {
+		p.rows = append(p.rows, row)
+	}
+	p.pending = map[reqKey]SpanRow{}
+	return p.rows
+}
+
+// spanName is "<facade>.<method>", falling back gracefully when one part is
+// missing so a partially-decoded envelope still gets a readable label.
+func spanName(e wire.Envelope) string {
+	switch {
+	case e.Type != "" && e.Request != "":
+		return e.Type + "." + e.Request
+	case e.Request != "":
+		return e.Request
+	case e.Type != "":
+		return e.Type
 	default:
-		// Anything else stringifies through its protobuf representation.
-		return fmt.Sprintf("%v", v)
+		return "(rpc)"
 	}
 }
 
-// The reader intentionally re-declares these OTLP common types as thin
-// aliases so it does not need to import the deeply nested common/v1 package
-// name in every helper. The aliases keep the flatten() function readable.
-type (
-	commonAny       = otelCommonAny
-	commonAnyString = otelCommonAnyString
-	commonAnyBool   = otelCommonAnyBool
-	commonAnyInt    = otelCommonAnyInt
-	commonAnyDouble = otelCommonAnyDouble
-)
+// serviceOf gives a coarse origin label for the details pane. The probe knows
+// the target binary; until it plumbs that through we distinguish jujuc hook
+// tools (their own facade) from ordinary agent API calls.
+func serviceOf(cm wire.CapturedMessage) string {
+	if cm.Msg.Type == "JujucServer" || strings.HasPrefix(cm.Msg.Type, "Jujuc") {
+		return "jujuc"
+	}
+	return "agent"
+}
+
+// spanIDs returns the span's trace/span ids. When the wire envelope carries
+// them (upstream tracing on) they are used verbatim; otherwise they are
+// synthesised deterministically from the request key so re-indexing the same
+// raw data yields identical ids.
+func spanIDs(e wire.Envelope, key reqKey) (traceID, spanID string) {
+	if e.SpanID != "" {
+		traceID = e.TraceID
+		if traceID == "" {
+			traceID = e.SpanID
+		}
+		return traceID, e.SpanID
+	}
+	h := fnv.New64a()
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], uint64(key.pid))
+	h.Write(buf[:])
+	binary.LittleEndian.PutUint64(buf[:], key.conn)
+	h.Write(buf[:])
+	binary.LittleEndian.PutUint64(buf[:], key.rid)
+	h.Write(buf[:])
+	sum := h.Sum64()
+	sid := make([]byte, 8)
+	binary.BigEndian.PutUint64(sid, sum)
+	tid := make([]byte, 16)
+	binary.BigEndian.PutUint64(tid[8:], sum)
+	binary.BigEndian.PutUint64(tid[:8], uint64(key.pid))
+	return hex.EncodeToString(tid), hex.EncodeToString(sid)
+}
+
+// envelopeAttrs flattens the envelope's scalar fields for the details pane.
+// Params/response bodies are compacted so the pane stays greppable.
+func envelopeAttrs(e wire.Envelope) map[string]string {
+	m := map[string]string{
+		"facade":     e.Type,
+		"method":     e.Request,
+		"request-id": fmt.Sprintf("%d", e.RequestID),
+	}
+	if e.Version != 0 {
+		m["version"] = fmt.Sprintf("%d", e.Version)
+	}
+	if e.ID != "" {
+		m["id"] = e.ID
+	}
+	if e.TraceID != "" {
+		m["trace-id"] = e.TraceID
+	}
+	if len(e.Params) > 0 {
+		m["params"] = compactJSON(e.Params)
+	}
+	// Drop empties so the pane isn't cluttered with blank rows.
+	for k, v := range m {
+		if v == "" {
+			delete(m, k)
+		}
+	}
+	return m
+}
+
+func compactJSON(raw json.RawMessage) string {
+	var out bytes.Buffer
+	if err := json.Compact(&out, raw); err != nil {
+		return string(raw)
+	}
+	return out.String()
+}

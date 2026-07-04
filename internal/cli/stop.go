@@ -22,11 +22,10 @@ func newStopCmd() *cobra.Command {
 		Use:   "stop <recording>",
 		Short: "Signal a running recorder to stop cleanly",
 		Long: `stop reads recorder.pid from the recording directory and delivers
-SIGTERM, which triggers the same clean shutdown as Ctrl-C: OTEL config is
-restored, the manifest is finalised, and the SQLite index is built.
+SIGTERM, which triggers the same clean shutdown as Ctrl-C: the probes are
+detached, the manifest is finalised, and the SQLite index is built.
 
-Use --force to escalate to SIGKILL after the timeout; the recorder cannot
-restore controller config in that case.`,
+Use --force to escalate to SIGKILL after the timeout.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runStop(args[0], *f)
@@ -87,6 +86,6 @@ func runStop(dir string, f stopFlags) error {
 	if err := proc.Signal(syscall.SIGKILL); err != nil {
 		return fmt.Errorf("sending SIGKILL to %d: %w", pid, err)
 	}
-	fmt.Fprintf(os.Stderr, "juju-lens: SIGKILL sent to %d (controller OTEL config may not have been restored)\n", pid)
+	fmt.Fprintf(os.Stderr, "juju-lens: SIGKILL sent to %d (probes may not have detached cleanly)\n", pid)
 	return nil
 }

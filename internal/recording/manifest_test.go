@@ -24,8 +24,8 @@ func TestSuggestedDirName(t *testing.T) {
 func TestManifestSaveLoadRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	m := New("juju-lens", "0.1.0", "abc123", "mycontroller")
-	m.AddSource(SourceStatus{Name: "otlp-grpc", Kind: "otlp-grpc", Started: time.Now().UTC()})
-	m.FinishSource("otlp-grpc", nil)
+	m.AddSource(SourceStatus{Name: "rpc", Kind: "rpc", Started: time.Now().UTC()})
+	m.FinishSource("rpc", nil)
 	m.Finalize(EndReasonSynth)
 	if err := m.Save(dir); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -44,7 +44,7 @@ func TestManifestSaveLoadRoundtrip(t *testing.T) {
 	if got.EndReason != EndReasonSynth {
 		t.Fatalf("end reason lost: %s", got.EndReason)
 	}
-	if len(got.Sources) != 1 || got.Sources[0].Name != "otlp-grpc" || got.Sources[0].Stopped.IsZero() {
+	if len(got.Sources) != 1 || got.Sources[0].Name != "rpc" || got.Sources[0].Stopped.IsZero() {
 		t.Fatalf("sources lost/incomplete: %+v", got.Sources)
 	}
 }
@@ -86,7 +86,8 @@ func TestLayoutPathsAreDeterministic(t *testing.T) {
 	}{
 		{"manifest", l.Manifest(), "/tmp/rec/manifest.json"},
 		{"raw", l.RawDir(), "/tmp/rec/raw"},
-		{"otlp", l.OTLPDir(), "/tmp/rec/raw/otlp"},
+		{"rpc", l.RPCDir("default"), "/tmp/rec/raw/rpc/default"},
+		{"rpc-sanitised", l.RPCDir("evil/../name"), "/tmp/rec/raw/rpc/evil_.._name"},
 		{"juju", l.JujuDir("default"), "/tmp/rec/raw/juju/default"},
 		{"juju-sanitised", l.JujuDir("evil/../name"), "/tmp/rec/raw/juju/evil_.._name"},
 		{"k8s", l.K8sDir("m1"), "/tmp/rec/raw/k8s/m1"},
@@ -94,9 +95,7 @@ func TestLayoutPathsAreDeterministic(t *testing.T) {
 		{"snap", l.SnapDir("controller", "0"), "/tmp/rec/raw/snap/controller/0"},
 		{"derived", l.DerivedDir(), "/tmp/rec/derived"},
 		{"index", l.IndexDB(), "/tmp/rec/index.db"},
-		{"traces", l.OTLPTracesFile("2026-07-03T14"), "/tmp/rec/raw/otlp/traces-2026-07-03T14.jsonl"},
-		{"logs", l.OTLPLogsFile("2026-07-03T14"), "/tmp/rec/raw/otlp/logs-2026-07-03T14.jsonl"},
-		{"metrics", l.OTLPMetricsFile("2026-07-03T14"), "/tmp/rec/raw/otlp/metrics-2026-07-03T14.jsonl"},
+		{"calls", l.RPCFileFor("default")("2026-07-03T14"), "/tmp/rec/raw/rpc/default/calls-2026-07-03T14.jsonl"},
 	}
 	for _, tt := range tests {
 		if tt.got != tt.want {
@@ -111,7 +110,7 @@ func TestLayoutInitAndExists(t *testing.T) {
 	if err := l.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	for _, d := range []string{l.Root, l.RawDir(), l.OTLPDir(), l.DerivedDir()} {
+	for _, d := range []string{l.Root, l.RawDir(), l.DerivedDir()} {
 		st, err := os.Stat(d)
 		if err != nil || !st.IsDir() {
 			t.Errorf("expected directory at %s (err=%v)", d, err)

@@ -14,9 +14,10 @@ func newIndexCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "index <recording>",
 		Short: "Rebuild the SQLite index for a recording from its raw/ tree",
-		Long: `index reads every OTLP payload under raw/otlp/, extracts the derived
-snapshots (application/unit status today; databags and more in later
-milestones), and writes a fresh index.db at the recording root.
+		Long: `index reads every captured RPC under raw/rpc/, pairs requests with
+responses into synthesised spans, extracts the derived snapshots
+(application/unit status today; databags and more in later milestones), and
+writes a fresh index.db at the recording root.
 
 It is safe to run repeatedly. The DB is entirely rebuildable from raw/, so
 deleting it and re-indexing is the recommended way to pick up schema

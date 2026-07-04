@@ -49,16 +49,18 @@ coverage:
 # Build & Run
 # ============================================================================
 
-# Build the binary into ./bin/
+# Build the binaries into ./bin/ (juju-lens and the eBPF probe)
 [group("build")]
 build:
     mkdir -p bin
     go build -ldflags "{{LDFLAGS}}" -o bin/{{BIN}} ./cmd/juju-lens
+    go build -ldflags "{{LDFLAGS}}" -o bin/{{BIN}}-probe ./cmd/juju-lens-probe
 
-# Install the binary into $GOBIN (or $GOPATH/bin)
+# Install the binaries into $GOBIN (or $GOPATH/bin)
 [group("build")]
 install:
     go install -ldflags "{{LDFLAGS}}" ./cmd/juju-lens
+    go install -ldflags "{{LDFLAGS}}" ./cmd/juju-lens-probe
 
 # Cross-compile for common platforms into ./dist/
 [group("build")]
@@ -73,6 +75,10 @@ release:
         echo "building ${out}"
         GOOS="${os}" GOARCH="${arch}" CGO_ENABLED=0 \
             go build -trimpath -ldflags "{{LDFLAGS}} -s -w" -o "${out}" ./cmd/juju-lens
+        # The probe only functions on Linux, but the stub cross-compiles so
+        # the artifact set stays uniform.
+        GOOS="${os}" GOARCH="${arch}" CGO_ENABLED=0 \
+            go build -trimpath -ldflags "{{LDFLAGS}} -s -w" -o "${out}-probe" ./cmd/juju-lens-probe
     done
 
 # Remove build artifacts
@@ -85,7 +91,7 @@ clean:
 run *ARGS:
     go run -ldflags "{{LDFLAGS}}" ./cmd/juju-lens {{ARGS}}
 
-# Run `record` against an OTLP endpoint into a fresh recording directory
+# Run `record` (eBPF probe capture) into a fresh recording directory
 [group("run")]
 record CONTROLLER="local":
     #!/usr/bin/env bash
@@ -93,7 +99,7 @@ record CONTROLLER="local":
     mkdir -p "${out%/*}"
     go run ./cmd/juju-lens record {{CONTROLLER}} --output "${out}"
 
-# Signal a running recorder to stop cleanly (restores OTEL config,
+# Signal a running recorder to stop cleanly (detaches probes,
 # finalises manifest, builds index).
 [group("run")]
 stop RECORDING:

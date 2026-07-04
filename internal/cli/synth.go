@@ -59,21 +59,44 @@ func runSynth(ctx context.Context, sc synth.Scenario, f synthFlags) error {
 		}
 		opts.Start = t
 	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 
-	writer := recording.NewRotatingWriter(layout.OTLPTracesFile, func() time.Time {
-		if !opts.Start.IsZero() {
-			return opts.Start
-		}
-		// Match the default the synth package uses so both the file
-		// name and the span timestamps agree.
-		return time.Date(2026, 7, 3, 14, 30, 12, 0, time.UTC)
-	})
-	if err := synth.Emit(ctx, sc, opts, writer); err != nil {
-		_ = writer.Close()
+	msgs, err := synth.Generate(sc, opts)
+	if err != nil {
 		return err
 	}
-	if err := writer.Close(); err != nil {
-		return err
+
+	// One rotating writer per model. A shared cursor holds the message being
+	// written so each writer buckets it into the hour file matching its own
+	// capture time (the file name and the timestamps inside it agree).
+	var curTs time.Time
+	writers := map[string]*recording.RotatingWriter{}
+	defer func() {
+		for _, w := range writers {
+			_ = w.Close()
+		}
+	}()
+	for _, cm := range msgs {
+		curTs = cm.Ts
+		w := writers[cm.Model]
+		if w == nil {
+			w = recording.NewRotatingWriter(layout.RPCFileFor(cm.Model), func() time.Time { return curTs })
+			writers[cm.Model] = w
+		}
+		line, err := cm.MarshalLine()
+		if err != nil {
+			return fmt.Errorf("marshalling synth message: %w", err)
+		}
+		if _, err := w.WriteLine(line); err != nil {
+			return fmt.Errorf("writing synth message: %w", err)
+		}
+	}
+	for _, w := range writers {
+		if err := w.Close(); err != nil {
+			return err
+		}
 	}
 
 	man := recording.New("juju-lens", "synth", "", "synth-"+string(sc))

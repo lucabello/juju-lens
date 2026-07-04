@@ -21,56 +21,75 @@ The information is all there but scattered across tools, transient (streams get 
 
 Juju's runtime is entirely push/watcher-based already. `juju-lens` captures at those push points; it never polls the model for state.
 
-### 2.1 Primary source: OpenTelemetry traces (both Juju 3.6 and 4.x)
+### 2.1 Primary source: eBPF uprobes on the Juju API TLS boundary (both Juju 3.6 and 4.x)
 
-Juju has native OTLP tracing built in since 3.5. Once enabled via controller config, every API facade call and every uniter operation is spanned automatically:
+Every `jujud` process — controller *and* unit agents, machine *and* k8s — talks to peers over TLS via Go's `crypto/tls` package. We attach eBPF uprobes to `crypto/tls.(*Conn).Write` and `crypto/tls.(*Conn).Read` in the target process and capture bytes just before encryption and just after decryption. The result is the full, verbatim Juju API stream in plaintext, without touching Juju itself, its configuration, or its running state.
 
-- `apiserver/root.go` spans every facade RPC (client and agent).
-- `internal/worker/uniter/operation/executor.go` spans every uniter operation on every unit — this includes every hook run, tagged with `executor.state` and `executor.unit`, and `pprof.Do` labels stamp `otel.traceid` so profiles align with traces.
+The wire format on the other side of TLS is Juju's own JSON-over-websocket RPC codec (`rpc/jsoncodec/codec.go`). Every message is a self-describing envelope:
 
-Controller config keys (settable pre- or post-bootstrap):
+```go
+type inMsgV1 struct {
+    RequestId  uint64          `json:"request-id"`
+    Type       string          `json:"type"`       // facade name, e.g. "Uniter"
+    Version    int             `json:"version"`
+    Id         string          `json:"id"`
+    Request    string          `json:"request"`    // method name, e.g. "CommitHookChanges"
+    Params     json.RawMessage `json:"params"`     // full arguments
+    Error      string          `json:"error"`
+    ErrorCode  string          `json:"error-code"`
+    Response   json.RawMessage `json:"response"`
+    TraceID    string          `json:"trace-id"`   // populated when tracing is on upstream
+    SpanID     string          `json:"span-id"`
+    TraceFlags int             `json:"trace-flags"`
+}
+```
 
-- `open-telemetry-enabled`
-- `open-telemetry-endpoint`
-- `open-telemetry-insecure`
-- `open-telemetry-stack-traces`
-- `open-telemetry-sample-ratio` (default 0.10 — we set 1.0 for recording)
-- `open-telemetry-tail-sampling-threshold`
+`request-id` pairs each request with its response, so we synthesise a span per RPC (start = write timestamp, end = matching read timestamp, name = `<facade>.<method>`). `trace-id`/`span-id` propagate the caller's causal context when the upstream has tracing configured; when they are empty we fall back to per-process request-id chains.
 
-`juju-lens record` sets these to point at the recorder's embedded OTLP receiver, restores them on shutdown, and remembers the previous values.
+Why this works on both 3.6 and 4.x:
+
+- We depend only on `crypto/tls` (stdlib) and on the JSON wire format, both unchanged across Juju minor versions.
+- No controller config is read, set, or restored. The recorder is invisible to Juju.
+- The same technique attaches to the machine controller's `jujud`, the k8s controller pod's `jujud`, and the k8s unit sidecar's `containeragent` — all three are the same build (see `caas/Dockerfile`), so probe attachment code is identical.
+
+Symbol resolution on stripped release binaries uses `.gopclntab` (present in every Go binary, parseable with `debug/gosym`) — the technique demonstrated by `gojue/ecapture` for stripped Go TLS probes. Per-Go-version argument register layouts are tracked in a small table maintained by the recorder; one row per Juju Go toolchain bump.
+
+Operational requirements: Linux kernel ≥ 5.8 on the host running the target process, and `CAP_BPF` (root, or the specific capability) on the attaching process. The technique is not k8s-specific — it works anywhere Linux does — but on k8s the standard shape is either `kubectl debug node/<n> --profile=sysadmin` for one-shot recordings or a privileged DaemonSet for long-lived setups (see §4.1).
+
+Prior art we lean on: `gojue/ecapture` (Apache 2.0) is the reference implementation of Go-TLS uprobes on stripped release binaries; Pixie's `gotls` probes are structurally identical. Neither is a hard dependency — the ~200 lines of BPF C that matter are readable and vendorable.
 
 ### 2.2 Why not just talk to the Juju API?
 
-We considered building this on top of the AllWatcher / WatchAll model-events stream. This has two blocking problems, both verified against `juju/juju@main`:
+We considered building this on the AllWatcher / WatchAll model-events stream and rejected it — it is broken on both target versions:
 
 1. **Juju 4.x removed it.** `apiserver/facades/client/client/client.go:75` and `apiserver/facades/client/controller/controller.go:488` return `errors.NotImplementedf("WatchAll")` / `"WatchAllModels"`. The release notes describe a replacement "lighter event API" but it isn't implemented in main yet. On 4.x the only client-facing streams left are `WatchDebugLog` and `WatchActionsProgress`.
 2. **Even on 3.6, AllWatcher does not stream relation databag contents.** Databags live behind the Uniter facade which authenticates unit agents, not admin clients. `juju show-unit` is a one-shot inspection, not a stream.
 
-So tracing is the primary source. The Juju API is used only for the things it does well and works on both versions:
+Uprobes are the primary source. The Juju API is used only for the things it does well and works on both versions:
 
-- `Status()` once on connect and on tracer-derived model-change signals — to bootstrap the app/unit/machine inventory
+- `Status()` once on connect and on RPC-derived model-change signals — to bootstrap the app/unit/machine inventory
 - `WatchDebugLog` for the model-wide Juju log stream
 - `WatchActionsProgress` for action progress
 - Kubernetes / systemd APIs for underlying container/host logs
 
-### 2.3 What we derive from spans
+### 2.3 What we derive from captured RPCs
 
-Spans carry timing and causality. State comes from span *attributes* on write-side facade calls. The recorder builds a state history by watching these:
+Each captured RPC carries the full JSON `params` and `response` verbatim. The recorder classifies calls by `(type, request)` — the facade + method — and extracts state where relevant. Timing and causality come from `request-id` pairing (start = write, end = matching read) and from `trace-id`/`span-id` when the caller populates them.
 
-| Signal | Source span | What we snapshot |
+| Signal | Source RPC | What we snapshot |
 |---|---|---|
-| Hook fired | `runHook.Execute` (uniter) | hook kind, relation, remote unit, remote app, storage id, secret URI, exit code, duration |
-| Databag write | `UniterAPI.CommitHookChanges`, `RelationUnitSettings` in payload | per-relation, per-unit and per-app databag after each hook |
-| Relation lifecycle | `UniterAPI.EnterScope`, `LeaveScope`, `SetRelationStatus` | membership, suspended, status |
-| Unit / app status | `UniterAPI.SetStatus` and status service calls | workload/agent/app status + message |
-| Unit stored state | `UniterAPI.SetState` (client-side of `state-set`) | KV blob per unit |
-| Secrets | `SecretsManagerAPI.*` | metadata, rotation policy, grants, revisions, obsolete revisions |
-| Open ports | `UniterAPI.OpenPorts` etc. | per-endpoint port ranges |
+| Hook fired | `Uniter.CommitHookChanges` + surrounding `Uniter.Set*Status` calls | hook kind, relation, remote unit, remote app, storage id, secret URI, exit code, duration |
+| Databag write | `Uniter.CommitHookChanges` (`RelationUnitSettings`, `RelationApplicationSettings`) | per-relation, per-unit and per-app databag after each hook |
+| Relation lifecycle | `Uniter.EnterScope`, `LeaveScope`, `SetRelationStatus` | membership, suspended, status |
+| Unit / app status | Uniter status setters | workload/agent/app status + message |
+| Unit stored state | `Uniter.SetState` (server side of `state-set`) | KV blob per unit |
+| Secrets | `SecretsManager.*` | metadata, rotation policy, grants, revisions, obsolete revisions |
+| Open ports | `Uniter.OpenPorts` etc. | per-endpoint port ranges |
 | Leadership | leadership facade | leader changes, claim expiry |
 | Charm URL / mod version | uniter facade | charm upgrades |
 | Actions | action facade + `WatchActionsProgress` | id, name, params, status, results, messages |
 | Model config | model config facade | key-value changes |
-| jujuc RPCs (intra-hook) | `Jujuc.Main` per-tool | every hook tool the charm invoked, in order |
+| jujuc RPCs (intra-hook) | direct uprobe on `jujuc.(*Jujuc).Main` (see §5.1) | every hook tool the charm invoked, in order |
 
 For each write we compute a JSON diff against the previous snapshot for the same scope, hash the content, and only persist a new snapshot when the hash changes. The viewer never re-derives state; it queries the snapshots directly.
 
@@ -83,15 +102,15 @@ For every recording we pick up log sources automatically as the model evolves:
 - **`journalctl -f -o json -u <unit>`** (machine controllers) — one SSH session per host discovered via `juju ssh`, filtered to `jujud-machine-*.service`, `jujud-unit-*.service`, and `snap.juju.*.service`. When new machines appear in `Status()`, new sessions are opened.
 - **`snap logs -f <snap>`** where relevant.
 
-Logs are normalised to a common record shape and, when Juju emits `trace_id`/`span_id` in structured logs (native slog attributes since 3.5), those become first-class join keys against the trace store.
+Logs are normalised to a common record shape and, when Juju emits `trace-id`/`span-id` as slog attributes on a log line, those become first-class join keys against the RPC store (the same IDs propagate in the `trace-id`/`span-id` fields of the JSON envelope we already capture on the wire).
 
-Log ingesters start/stop dynamically as the recorder learns about new units/pods/machines from status deltas and span attributes. Nothing is hard-coded per recording.
+Log ingesters start/stop dynamically as the recorder learns about new units/pods/machines from status deltas and RPC-derived hints. Nothing is hard-coded per recording.
 
 ### 2.5 What we intentionally do not capture (v1)
 
-- **Continuous profiling** (pprof). Documented as future work; the `otel.traceid` pprof label is preserved so this is a drop-in extension.
+- **Continuous profiling** (pprof). Documented as future work; the eBPF attacher already has the target processes' PIDs so pprof spans would be a small extension.
 - **Metrics.** Not needed for the timeline; may be added later as an at-a-glance density indicator.
-- **Charm source code.** The viewer references file:line from spans/logs; it does not embed sources.
+- **Charm source code.** The viewer references file:line from logs and RPC error payloads; it does not embed sources.
 
 ## 3. On-disk format
 
@@ -102,10 +121,9 @@ recordings/2026-07-03T14-30-12--mycontroller/
 ├── manifest.json                        # controller, models, versions, sources enabled, clock offsets
 ├── index.db                             # SQLite (WAL); rebuildable from raw/
 ├── raw/
-│   ├── otlp/
-│   │   ├── traces-2026-07-03T14.jsonl   # OTLP protobufs, one message per line, JSON-encoded
-│   │   ├── logs-2026-07-03T14.jsonl
-│   │   └── metrics-2026-07-03T14.jsonl  # (future)
+│   ├── rpc/
+│   │   └── default/                      # per-model directory (model name)
+│   │       └── calls-2026-07-03T14.jsonl # captured Juju API RPCs, one message per line
 │   ├── juju/
 │   │   └── default/                     # per-model directory (model name)
 │   │       └── debug-log.jsonl
@@ -134,7 +152,7 @@ Design decisions:
 - **Plain text everywhere.** No gzipping. `raw/` files are `.jsonl` or `.log`, greppable with standard tools. This is a firm requirement — the tool must remain useful when the TUI itself misbehaves.
 - **Per-model subdirectories** under every source. A recording of a controller with three models produces three sibling folders under each source.
 - **Rotation by wall-clock hour** for high-volume raw files; a symlink `current.jsonl` points at the active file for tail-friendliness.
-- **`manifest.json`** captures everything the viewer needs to interpret the data: controller name and UUID, models observed, Juju/agent versions per model, controller version, source list with per-source status, clock offsets between sources, recording start/end, and whether the recorder set the OTEL config keys (for restoration).
+- **`manifest.json`** captures everything the viewer needs to interpret the data: controller name and UUID, models observed, Juju/agent versions per model, controller version, source list with per-source status, clock offsets between sources, recording start/end, and the attacher deployment mode used (see §4.1).
 - **The DB is a build artifact.** `juju-lens index <recording>` can rebuild `index.db` from `raw/`. This means we can evolve the schema and re-index old recordings.
 - **Size/duration caps stop the recorder cleanly.** No ring-buffer eviction — that would leave gaps mid-timeline. `--max-duration 2h` and `--max-size 500M` are hard stops; when reached the recorder writes a `manifest.json` `end_reason` field and exits.
 
@@ -153,8 +171,10 @@ CREATE TABLE spans (
   trace_id BLOB, span_id BLOB PRIMARY KEY, parent_span_id BLOB,
   model_id INTEGER,
   ts_start INTEGER, ts_end INTEGER,
-  name TEXT, service TEXT,
-  attrs_json TEXT, status TEXT
+  name TEXT,                          -- '<facade>.<method>' for RPCs, 'jujuc.<tool>' for hook tools
+  service TEXT,                       -- 'apiserver','uniter','containeragent','jujuc'
+  attrs_json TEXT, status TEXT,
+  raw_offset INTEGER, raw_file TEXT   -- pointer back to raw/rpc/*.jsonl for the full envelope
 );
 CREATE INDEX spans_ts        ON spans(model_id, ts_start);
 CREATE INDEX spans_trace     ON spans(trace_id);
@@ -194,19 +214,19 @@ CREATE TABLE inventory (              -- authoritative "what existed at time t" 
 CREATE INDEX inv_ts ON inventory(model_id, ts);
 ```
 
+The `spans` table stores synthesised spans, one per captured RPC. A span's `trace_id` and `parent_span_id` come from the wire envelope's `trace-id` fields when present; otherwise they are synthesised from the `request-id` chain within each process. This keeps the viewer's join model (§7) unchanged whether or not any upstream tracing is configured.
+
 ## 4. CLI surface
 
 ```
 juju-lens record <controller> [flags]
     --model <name>            # repeatable; default: all models
     --output <dir>            # default: ./recordings/<ts>--<controller>
-    --endpoint <host:port>    # OTLP endpoint we advertise back to Juju (auto-detected)
-    --tunnel                  # set up an SSH/kubectl port-forward automatically
+    --attach <mode>           # ssh | kubectl-debug | daemonset (default: auto-detect from controller kind)
     --max-duration <dur>      # e.g. 30m, 2h
     --max-size <size>         # e.g. 500M, 2G
-    --no-set-otel             # don't touch controller config; assume already configured
     --redact <pattern,...>    # additional key patterns to redact in databags/secrets
-    --sources debug-log,k8s,journal,snap  # opt out of specific log sources
+    --sources rpc,debug-log,k8s,journal,snap  # opt out of specific sources
 
 juju-lens view <recording> [flags]
     --model <name>            # focus on a single model at startup
@@ -214,7 +234,7 @@ juju-lens view <recording> [flags]
 
 juju-lens index <recording>   # rebuild index.db from raw/
 juju-lens verify <recording>  # sanity-check integrity, list gaps
-juju-lens export <recording> [--format=json|otlp]  # for external analysis
+juju-lens export <recording> [--format=json]  # for external analysis
 juju-lens synth <scenario>    # generate a synthetic recording for viewer development
 ```
 
@@ -222,14 +242,15 @@ juju-lens synth <scenario>    # generate a synthetic recording for viewer develo
 
 1. Parse `~/.local/share/juju` (or `JUJU_DATA`) to reach the controller with existing credentials.
 2. `Status()` for each selected model → seed inventory.
-3. Read controller config for `open-telemetry-*` keys; snapshot current values into `manifest.json`.
-4. Unless `--no-set-otel`, set `open-telemetry-enabled=true`, `open-telemetry-endpoint=<us>`, `open-telemetry-sample-ratio=1.0`, `open-telemetry-insecure=true` (unless a cert path is provided).
-5. If `--tunnel`, spawn `juju ssh -m controller 0 -R <port>:localhost:<port>` for machine controllers or `kubectl -n controller-<name> port-forward svc/controller <port>:<port>` for K8s; `--endpoint` becomes `localhost:<port>` on the controller side.
-6. Start embedded OTLP receiver (gRPC and HTTP).
-7. For each selected model, start log ingesters based on source availability.
-8. Start a background reconciler that watches `Status()` deltas (via facade watchers where available, or driven by spans on 4.x) and adds/removes log ingesters as units/pods/machines appear and disappear.
-9. Write raw payloads as they arrive; a separate indexer goroutine feeds the SQLite index.
-10. On `SIGINT`/`SIGTERM`/max-cap: stop receivers, flush indexer, restore controller OTEL config, finalize `manifest.json`.
+3. Choose an attach mode based on the controller kind (or `--attach`):
+   - **machine controllers**: open one `juju ssh` session per host holding a `jujud`/`containeragent` PID of interest and `scp` a small static Go attacher binary (`juju-lens-probe`, ~a few MB, built with `cilium/ebpf`) into a tmp path.
+   - **k8s controllers**: for each node hosting a controller pod or unit sidecar, launch a `kubectl debug node/<n> --profile=sysadmin --image=juju-lens-probe` ephemeral pod. For long-lived recordings, `--attach daemonset` applies the same image as a privileged DaemonSet on the model's nodes and cleans it up on exit.
+4. On each attach target the probe: (a) enumerates candidate PIDs (`jujud`, `containeragent`), (b) resolves `crypto/tls.(*Conn).Write`/`.Read` (plus optionally `jujuc.(*Jujuc).Main` on the same process) by reading `.gopclntab` from `/proc/<pid>/root/<binary>`, (c) attaches the uprobes, (d) streams captured `(ts, pid, direction, plaintext)` frames back over stdout/stdin as length-prefixed JSON.
+5. The recorder demultiplexes those streams into per-model `raw/rpc/<model>/calls-*.jsonl` files, pairing writes to their matching reads by `request-id`, and emits synthesised span records to the indexer.
+6. For each selected model, start log ingesters based on source availability.
+7. A background reconciler watches `Status()` deltas (via facade watchers where available, or driven by newly-seen `juju.unit`/`juju.model` values in captured RPCs on 4.x) and adds/removes attach targets and log ingesters as units/pods/machines appear and disappear.
+8. Write raw payloads as they arrive; a separate indexer goroutine feeds the SQLite index.
+9. On `SIGINT`/`SIGTERM`/max-cap: detach all uprobes, stop probe subprocesses, terminate any ephemeral debug pods / DaemonSets, flush indexer, finalize `manifest.json`.
 
 ### 4.2 `view` lifecycle
 
@@ -240,64 +261,69 @@ juju-lens synth <scenario>    # generate a synthetic recording for viewer develo
 
 ## 5. Recorder internals
 
-### 5.1 OTLP ingest
+### 5.1 eBPF attacher (`juju-lens-probe`)
 
-Embed the OpenTelemetry Collector's OTLP receiver as a library:
+A small Go binary that runs on the host containing the target process (via SSH on machine controllers; via `kubectl debug node` or a privileged DaemonSet on k8s). Uses `github.com/cilium/ebpf` for probe management — pure Go, no libbpf/BCC runtime dependency.
 
-```go
-import (
-    "go.opentelemetry.io/collector/receiver/otlpreceiver"
-    "go.opentelemetry.io/collector/consumer"
-)
-```
+For each PID of interest:
 
-We instantiate the receiver directly with a `Config` for gRPC (`:4317`) and HTTP (`:4318`), and pass our own `consumer.Traces` / `consumer.Logs` / `consumer.Metrics` implementations that:
+1. Read the target ELF at `/proc/<pid>/root/<binary>` (works uniformly for the machine-controller `jujud`, the k8s controller pod's `jujud`, and the k8s unit sidecar's `containeragent`, since all three are the same build).
+2. Locate `.gopclntab` (falling back to `.data.rel.ro.gopclntab` for PIE builds and to a magic-number scan of `.data.rel.ro` for aggressively stripped builds — the same fallback chain used by `gojue/ecapture`).
+3. Parse the pclntab with `debug/gosym` and resolve the entry addresses of `crypto/tls.(*Conn).Write`, `crypto/tls.(*Conn).Read`, and — on machine unit agents and the k8s unit sidecar — `github.com/juju/juju/internal/worker/uniter/runner/jujuc.(*Jujuc).Main`.
+4. Attach entry and return uprobes; the entry probe stashes the buffer pointer keyed by `(tgid, goroutine-id)`, the return probe reads the actual byte count and emits a `(ts, pid, direction, bytes)` event through a `perf_event_array` or `ringbuf` map.
+5. Userspace strips websocket framing (RFC 6455), reassembles fragmented frames, and JSON-decodes the resulting envelope into the `inMsgV1` shape described in §2.1.
 
-1. Append raw OTLP-encoded payload to the appropriate `raw/otlp/*.jsonl` file.
-2. Emit each record to the indexer channel.
+Go-version-specific argument register layouts are kept in a small `map[goVersion]symOffsets` table maintained by the recorder. Currently one row per Juju Go toolchain (Go 1.24, 1.25); each new juju/juju release that bumps Go adds one row after a five-minute DWARF inspection of the new toolchain.
 
-This gives us OTLP semver compatibility, retries, batching, backpressure, and the HTTP endpoint for free — all things we would spend a week reimplementing.
+On detach the probes are removed cleanly; the target process is unaffected end-to-end (this is the same operational profile as Pixie's Stirling and Grafana Beyla in production).
 
-### 5.2 Indexer
+### 5.2 RPC ingest and pairing
 
-A single goroutine drains channels from every source (OTLP traces/logs/metrics + log ingesters + Juju API events) into SQLite, batched by 100 records or 200 ms, whichever comes first. WAL mode; `synchronous=NORMAL`. The DB write is fire-and-forget from the ingesters' perspective; if the indexer falls behind, ingesters continue to write raw files and the DB catches up.
+Captured writes and reads arrive from the attacher as an interleaved stream. The ingester:
 
-### 5.3 Model / inventory reconciler
+1. Reassembles websocket frames per `(pid, conn-id)` where `conn-id` is derived from the `*Conn` pointer captured at probe time.
+2. JSON-decodes each complete message into the `inMsgV1` envelope.
+3. Buckets requests by `(pid, request-id)`; when the matching response arrives, emits a synthesised span with `name = "<type>.<request>"`, `service` derived from the source binary, `ts_start` = write timestamp, `ts_end` = read timestamp, and the full envelope written to `raw/rpc/<model>/calls-*.jsonl`.
+4. If the wire envelope carries `trace-id`/`span-id`, those become the span's IDs; otherwise IDs are synthesised deterministically from `(pid, request-id)`.
+5. Emits the raw envelope offset plus the synthesised span to the indexer channel.
+
+### 5.3 Indexer
+
+A single goroutine drains channels from every source (RPC ingest + log ingesters + Juju API events) into SQLite, batched by 100 records or 200 ms, whichever comes first. WAL mode; `synchronous=NORMAL`. The DB write is fire-and-forget from the ingesters' perspective; if the indexer falls behind, ingesters continue to write raw files and the DB catches up.
+
+### 5.4 Model / inventory reconciler
 
 Because Juju 4.x has no client-facing model watcher, we drive inventory reconciliation from two sources:
 
 - On connect: `Status()` for a full snapshot.
-- Ongoing: whenever a span with a new `service.instance.id` / `juju.unit` / `juju.model` attribute arrives, or when `debug-log` mentions a unit we don't know about, the reconciler runs a targeted `Status()` for that model.
+- Ongoing: whenever a captured RPC carries a new unit tag, model UUID, or machine id we haven't seen, or when `debug-log` mentions one, the reconciler runs a targeted `Status()` for that model.
 
 This is not polling — the reconciler runs *because* something changed, not on a timer. On 3.6 we optionally also open `WatchAll` and use its deltas as an extra signal source.
 
-### 5.4 Databag reconstruction
+### 5.5 Databag reconstruction
 
-The trickiest single piece. The recorder must produce a "before/after databag" for every hook execution. Approach:
+Databag before/after per hook is reconstructed entirely from the RPC stream:
 
-1. `runHook.Execute` span has trace attributes identifying the hook, relation id, remote unit.
-2. `CommitHookChanges` span (child, or later sibling on the controller side) carries the write batch as attributes, including `relation-unit-settings` and `relation-app-settings`.
-3. The recorder maintains an in-memory per-scope current-value map. On each `CommitHookChanges`:
-   - Compute the new value per scope.
-   - Diff against the map.
-   - If different: insert a `snapshots` row with `producing_span_id=<CommitHookChanges span>`, update the map.
+1. Match a `Uniter.CommitHookChanges` RPC to the hook it terminates — the request body itself identifies the unit, the relation, and the settings written.
+2. Maintain an in-memory per-scope current-value map, updated on every commit.
+3. Diff against the map. If different: insert a `snapshots` row with `producing_span_id` set to the synthesised RPC span for the commit, and update the map.
 4. When we cannot see a scope's initial value (recorder started mid-life), we mark it `initial=false` in the snapshot; the viewer draws that snapshot with a "state at recording start" chevron so users know it wasn't a change event.
 
-### 5.5 Log ingesters
+### 5.6 Log ingesters
 
 Each ingester is a `type Ingester interface { Run(ctx) error; Stop() }` implementation. The reconciler owns a map of `key → Ingester` and starts/stops them based on inventory diffs. Ingesters write to their own file under `raw/` and emit `LogRecord` messages to the indexer channel.
 
 Trace/span correlation for logs:
 
-- Juju's `debug-log --format=json` includes structured fields — when a log line was produced inside a spanned context, `trace_id` and `span_id` are present. The ingester copies them into the log record.
+- Juju's `debug-log --format=json` includes structured fields — when a log line was produced inside a spanned context, `trace-id` and `span-id` are present. The ingester copies them into the log record.
 - For k8s/journal/snap logs, we usually don't have trace ids. The viewer falls back to time-window + unit-name matching for those.
 
-### 5.6 Redaction
+### 5.7 Redaction
 
 `--redact` accepts a comma-separated list of glob patterns applied to databag keys, secret content keys, and log JSON fields. Defaults always redact:
 
 - `*token*`, `*password*`, `*secret*`, `*key*` (case-insensitive) in databag/secret values
-- `secret-content-*` span attributes
+- `secret-content-*` fields in captured RPC payloads
 
 Redaction happens *before* writing to `raw/` — the recording never contains the sensitive bytes on disk.
 
@@ -442,53 +468,57 @@ Filters compile to `WHERE` fragments; the timeline pane rerenders live as the us
 The viewer's mental model:
 
 - **Trace** is a causal chain rooted in some external stimulus (a `juju config`, a machine coming up, a `relation-changed` on another unit).
-- **Span** is a unit of work, either on the controller (facade call) or the agent (uniter operation, hook, jujuc RPC).
-- **Snapshot** is a state observation attached to the span that produced it.
-- **Log record** is a text observation attached to either a span (when `trace_id`/`span_id` are present) or to a time window on a unit.
+- **Span** is a synthesised unit of work — one per captured Juju API RPC, plus one per jujuc invocation on the unit side. Start/end come from the write/read timestamps captured at the TLS boundary.
+- **Snapshot** is a state observation extracted from a write-side RPC payload (`CommitHookChanges`, `SetStatus`, `SetState`, `SecretsManager.*`, …).
+- **Log record** is a text observation attached to either a span (when `trace-id`/`span-id` are present) or to a time window on a unit.
 
 The offline join is:
 
-- Span↔span by `trace_id` / `parent_span_id`.
+- Span↔span by `trace_id` / `parent_span_id` when the wire envelope carries them, or by `(pid, request-id)` chains when it doesn't.
 - Log↔span by `span_id` (exact) or by `(unit, time-window)` (fuzzy fallback).
 - Snapshot↔span by `producing_span_id`.
 - Snapshot↔time by `scope` and `ts` (viewer picks latest `ts ≤ selection`).
 
 ## 8. Non-obvious design decisions
 
-1. **Time authority.** We treat controller wall-clock (from OTEL span timestamps) as canonical. Log sources with their own clock (kubelet, journald) store both the original timestamp and an *adjusted* timestamp computed from an offset the recorder learns by comparing overlapping events. Offsets are stored per source in `manifest.json`.
-2. **Gap tolerance.** OTLP over gRPC can drop on reconnect. Each receiver stream gets a sequence number; gaps are recorded as `inventory` rows of kind `gap` and shown as red bands on the timeline so users know the recording is incomplete during those intervals.
+1. **Time authority.** We treat the eBPF timestamp (nanoseconds since boot, converted to wall-clock via a boot-time offset read once per attach) as canonical for RPC-derived spans. Log sources with their own clock (kubelet, journald) store both the original timestamp and an *adjusted* timestamp computed from an offset the recorder learns by comparing overlapping events. Offsets are stored per source in `manifest.json`.
+2. **Gap tolerance.** eBPF ring buffers can drop records under extreme load. The attacher reports drop counts per interval; drops are recorded as `inventory` rows of kind `gap` and shown as red bands on the timeline so users know the recording is incomplete during those intervals.
 3. **PII redaction is on by default** with a conservative regex. `--redact-off` requires an explicit flag.
 4. **Recording immutability.** After `record` exits, the recording is treated as immutable. If the user runs `record` again they get a new directory that may reference the old one via `manifest.json.parent`.
-5. **Version drift.** `manifest.json` records `juju.version` and `juju.schema.version` per model. Attribute extractors in the recorder are versioned (`extractors/uniter/v3_6.go`, `extractors/uniter/v4_0.go`) and selected per model.
+5. **Version drift.** `manifest.json` records `juju.version` and `juju.schema.version` per model, and the Go toolchain version of each attached binary. Attribute extractors in the recorder are versioned (`extractors/uniter/v3_6.go`, `extractors/uniter/v4_0.go`) and selected per model. Uprobe register-layout offsets are keyed by Go toolchain version.
 6. **Multi-model, multi-controller.** All storage is keyed by `(controller, model)`. The viewer can open one recording at a time but sees all models within it; a future `juju-lens merge` may combine recordings across controllers.
 7. **Deterministic test corpus.** `juju-lens synth <scenario>` produces a fully-formed recording from a YAML scenario file, used both for viewer development and regression tests.
-8. **The recorder must be safe to run in production.** It only *reads* from the controller and *sets* documented public config keys. It never touches Dqlite, never modifies application/relation state, never installs agents. On shutdown it restores the exact prior OTEL config.
+8. **The recorder never mutates the target.** It attaches read-only uprobes at the TLS boundary; it never sets controller config, never touches Dqlite, never modifies application/relation state, never installs agents. Detach is clean. This is the same operational profile as production continuous-profiling agents.
+9. **Kernel and privilege requirements are explicit.** Recording needs Linux ≥ 5.8 on the host running the target process, and `CAP_BPF` on the attacher. `juju-lens record` checks both up front and refuses with a clear message rather than partially attaching.
 
 ## 9. Milestones
 
 Each milestone ends with a working, useful tool.
 
 1. **M1 — Skeleton** *(≈2 days)*
-   - `record` starts an OTLP gRPC receiver, writes `raw/otlp/traces-*.jsonl`, writes `manifest.json`.
-   - `view` opens a recording, lists spans in a scrollable table.
+   - Standalone `juju-lens-probe` binary: attaches `crypto/tls.(*Conn).Write`/`.Read` uprobes to a given PID, emits length-prefixed `(ts, pid, dir, bytes)` JSON events on stdout. Verified against the Juju 3.6 snap's `jujud` locally.
+   - `record` invokes the probe against a machine controller over `juju ssh`, writes `raw/rpc/*.jsonl` and `manifest.json`.
+   - `view` opens a recording, lists synthesised spans in a scrollable table.
    - `synth trivial` emits a fake recording for iteration.
 2. **M2 — Index + basic layout** *(≈1 week)*
+   - Websocket-frame reassembly + JSON envelope decoder + `request-id` pairing → synthesised spans with `<facade>.<method>` names.
    - SQLite indexer with the schema above.
-   - bubbletea skeleton with the three-column layout: apps sidebar (from spans), timeline (event list), details pane (span attrs).
+   - bubbletea skeleton with the three-column layout: apps sidebar (from RPC-derived unit tags), timeline (event list), details pane (RPC envelope + timing).
    - Model picker if the recording has >1 model.
-   - **Status pane (right column)** with two independent sections: **Applications** (leader-set app status per application) and **Units** (per-unit status). Latest-known values only; recomputes on selection change from the snapshot store. Sets up the plumbing (`app-status:*`, `unit-status:*` snapshot scopes; extractors) that M4 fills with real data derived from spans.
-   - **Recorder lifecycle**: auto-configure the controller's `open-telemetry-*` keys via the `juju` CLI on start and restore them on clean shutdown (opt-out with `--no-set-otel`); write a `recorder.pid` file; add `juju-lens stop <recording>` so background recorders can be signalled without shell job control.
+   - **Status pane (right column)** with two independent sections: **Applications** (leader-set app status per application) and **Units** (per-unit status). Latest-known values only; recomputes on selection change from the snapshot store. Sets up the plumbing (`app-status:*`, `unit-status:*` snapshot scopes; extractors) that M4 fills with real data derived from captured RPCs.
+   - **Recorder lifecycle**: SSH-based attach on machine controllers with clean detach on shutdown; write a `recorder.pid` file; add `juju-lens stop <recording>` so background recorders can be signalled without shell job control.
 3. **M3 — Log ingest** *(≈3 days)*
-   - `juju debug-log --tail` ingester with `trace_id`/`span_id` extraction.
+   - `juju debug-log --tail` ingester with `trace-id`/`span-id` extraction.
    - Details pane shows correlated logs for the selected event.
 4. **M4 — Snapshots + relations pane** *(≈1 week)*
-   - Databag/state snapshotter driven by `CommitHookChanges` and friends.
+   - Databag/state snapshotter driven by `Uniter.CommitHookChanges` and friends.
    - Relations sidebar with expandable databag history and diff mode.
    - Upgrade the Status pane from "latest known" (M2) to **true point-in-time**: press `s` on any timeline event to see application and unit statuses exactly as they would have appeared in `juju status` at that instant, walking backward from the cursor to the nearest snapshot per scope.
 5. **M5 — Follow mode** *(≈2 days)*
    - `view --follow` for live recordings.
    - Switch the `record` indexer from post-hoc to incremental so `view --follow` can tail growing recordings.
-6. **M6 — K8s + machine log ingesters** *(≈1 week)*
+6. **M6 — K8s attach + K8s/machine log ingesters** *(≈1 week)*
+   - `--attach kubectl-debug` (ephemeral) and `--attach daemonset` (long-lived) modes for CAAS controllers and unit sidecars; `containeragent` binary attach in addition to `jujud`.
    - Kubernetes shared informer per model, dynamic pod log followers.
    - `juju ssh` + `journalctl -f -o json` ingester with dynamic host discovery.
 7. **M7 — Polish** *(open-ended)*
@@ -502,12 +532,14 @@ Each milestone ends with a working, useful tool.
 |---|---|
 | CLI subcommands | `github.com/spf13/cobra` |
 | Config / flags | `github.com/spf13/viper` (optional) |
-| OTLP receiver | `go.opentelemetry.io/collector/receiver/otlpreceiver` |
-| OTLP protos | `go.opentelemetry.io/proto/otlp/...` |
+| eBPF | `github.com/cilium/ebpf` (pure Go, no libbpf/BCC runtime dep) |
+| Go binary symbols | `debug/elf` + `debug/gosym` (stdlib) |
+| Reference impl for Go-TLS uprobes | `github.com/gojue/ecapture` (Apache 2.0, vendorable) |
+| Websocket frame decode | `github.com/gorilla/websocket` (same lib Juju uses on the wire) |
 | SQLite | `modernc.org/sqlite` (pure Go, no CGo) |
 | TUI | `github.com/charmbracelet/bubbletea` + `bubbles` + `lipgloss` + `bubblezone` |
 | Juju API | `github.com/juju/juju/api` (for `Status`, `WatchDebugLog`, `WatchActionsProgress`) |
-| Kubernetes | `k8s.io/client-go` (informers + pod log streams) |
+| Kubernetes | `k8s.io/client-go` (informers + pod log streams + `kubectl debug node` orchestration) |
 | SSH (machine hosts) | `golang.org/x/crypto/ssh` |
 | systemd journal (optional native) | `github.com/coreos/go-systemd/v22/sdjournal` |
 | JSON diff | `github.com/wI2L/jsondiff` |
@@ -517,13 +549,14 @@ Each milestone ends with a working, useful tool.
 ## 11. Explicit non-goals for v1
 
 - **Not a monitoring tool.** No alerting, no dashboards on live data — that's what COS + Grafana is for. `juju-lens` is a debugger's time machine.
-- **Not a charm profiler.** We don't instrument charm Python code. Charm-side visibility comes from Juju's spans around hook execution and from logs.
-- **Not a controller replacement.** We never impose configuration beyond the six OTEL keys, and only when the user asks.
+- **Not a charm profiler.** We don't instrument charm Python code. Charm-side visibility comes from captured jujuc RPCs and from logs.
+- **Not a controller replacement.** We never impose configuration on Juju itself, and we never modify state; the only side effect is attaching read-only eBPF probes to running processes.
 - **Not a remote UI.** Viewer is local TUI over a local recording. Sharing means shipping the recording directory to another machine.
 
 ## 12. Open questions
 
-- Should the recorder tolerate multiple concurrent instances against the same controller? (Probably yes — OTLP fan-out, but only one may set/restore OTEL config.)
+- Should the recorder tolerate multiple concurrent instances against the same controller? (Probably yes — each attaches its own uprobes and writes its own recording; the kernel handles concurrent attachers on the same PID cleanly.)
 - What is the right story for cross-model relations (offers)? Two recordings likely, joined in the viewer.
 - Do we want a small web UI (localhost) as an alternative to the TUI? Probably not for v1, but the SQLite index makes it trivial to bolt on later.
-- How aggressively should the reconciler run `Status()`? Every 1 s is cheap; every span-derived hint is cheaper.
+- Does Juju negotiate websocket `permessage-deflate` compression on the API socket? If so, decode after userspace zlib inflation; needs one-time confirmation against a live controller.
+- How aggressively should the reconciler run `Status()`? Every 1 s is cheap; every RPC-derived hint is cheaper.

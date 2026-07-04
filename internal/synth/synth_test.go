@@ -1,23 +1,13 @@
 package synth
 
 import (
-	"bytes"
-	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/lucabello/juju-lens/internal/wire"
 )
-
-type memWriter struct{ buf bytes.Buffer }
-
-func (m *memWriter) WriteLine(p []byte) (int, error) {
-	n, err := m.buf.Write(p)
-	if err != nil {
-		return n, err
-	}
-	nn, err := m.buf.Write([]byte{'\n'})
-	return n + nn, err
-}
 
 func TestGenerateTrivialIsDeterministic(t *testing.T) {
 	a, err := Generate(ScenarioTrivial, Options{})
@@ -28,106 +18,93 @@ func TestGenerateTrivialIsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Two calls with the default (zero-value) Options must produce the
-	// exact same tree, because Options.Start is filled in with a fixed
-	// instant.
-	if len(a.ResourceSpans) != len(b.ResourceSpans) {
-		t.Fatalf("resource spans differ in count: %d vs %d", len(a.ResourceSpans), len(b.ResourceSpans))
-	}
-	for i := range a.ResourceSpans {
-		if len(a.ResourceSpans[i].ScopeSpans) != len(b.ResourceSpans[i].ScopeSpans) {
-			t.Fatalf("scope spans differ at %d", i)
-		}
-		for j := range a.ResourceSpans[i].ScopeSpans {
-			as := a.ResourceSpans[i].ScopeSpans[j].Spans
-			bs := b.ResourceSpans[i].ScopeSpans[j].Spans
-			if len(as) != len(bs) {
-				t.Fatalf("span count differs at [%d][%d]: %d vs %d", i, j, len(as), len(bs))
-			}
-			for k := range as {
-				if as[k].Name != bs[k].Name || as[k].StartTimeUnixNano != bs[k].StartTimeUnixNano {
-					t.Fatalf("span [%d][%d][%d] not deterministic", i, j, k)
-				}
-			}
-		}
+	// Two calls with the default (zero-value) Options must produce the exact
+	// same stream, because Options.Start is filled with a fixed instant.
+	if !reflect.DeepEqual(a, b) {
+		t.Fatal("generate is not deterministic for default options")
 	}
 }
 
 func TestGenerateTrivialShape(t *testing.T) {
-	req, err := Generate(ScenarioTrivial, Options{})
+	msgs, err := Generate(ScenarioTrivial, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(req.ResourceSpans) != 2 {
-		t.Fatalf("want 2 resource spans (grafana, prometheus), got %d", len(req.ResourceSpans))
+	// Every request must be immediately followed by a matching response with
+	// the same request-id/pid/conn; requests carry a facade+method.
+	if len(msgs)%2 != 0 {
+		t.Fatalf("expected paired request/response messages, got odd count %d", len(msgs))
 	}
-	// Each resource should carry a juju.unit attribute.
-	seen := map[string]bool{}
-	for _, rs := range req.ResourceSpans {
-		for _, attr := range rs.Resource.Attributes {
-			if attr.Key == "juju.unit" {
-				seen[attr.Value.GetStringValue()] = true
+	units := map[string]bool{}
+	statusSets, appStatusSets, joined := 0, 0, 0
+	for i := 0; i < len(msgs); i += 2 {
+		req, resp := msgs[i], msgs[i+1]
+		if req.Dir != wire.DirWrite {
+			t.Fatalf("msg %d: expected request (write), got %s", i, req.Dir)
+		}
+		if resp.Dir != wire.DirRead {
+			t.Fatalf("msg %d: expected response (read), got %s", i+1, resp.Dir)
+		}
+		if req.Msg.RequestID != resp.Msg.RequestID || req.PID != resp.PID || req.Conn != resp.Conn {
+			t.Fatalf("msg %d/%d not paired: %+v / %+v", i, i+1, req.Msg, resp.Msg)
+		}
+		if !req.Msg.IsRequest() {
+			t.Fatalf("msg %d request has no facade/method", i)
+		}
+		if resp.Ts.Before(req.Ts) {
+			t.Fatalf("response %d precedes its request", i+1)
+		}
+		units[req.Unit] = true
+		switch req.Msg.Request {
+		case "SetStatus":
+			statusSets++
+		case "SetApplicationStatus":
+			appStatusSets++
+		case "CommitHookChanges":
+			if strings.Contains(string(req.Msg.Params), "relation-joined") {
+				joined++
 			}
 		}
 	}
-	if !seen["grafana/0"] || !seen["prometheus/0"] {
-		t.Fatalf("expected juju.unit for grafana/0 and prometheus/0, got %v", seen)
+	if !units["grafana/0"] || !units["prometheus/0"] {
+		t.Fatalf("expected grafana/0 and prometheus/0, got %v", units)
 	}
+	if statusSets != 2 {
+		t.Fatalf("expected 2 unit SetStatus RPCs, got %d", statusSets)
+	}
+	if appStatusSets != 2 {
+		t.Fatalf("expected 2 SetApplicationStatus RPCs, got %d", appStatusSets)
+	}
+	if joined != 2 {
+		t.Fatalf("expected 2 relation-joined commits, got %d", joined)
+	}
+}
 
-	// Every span must have a hook attribute and a non-empty trace id.
-	total := 0
-	joinedCount := 0
-	statusSetCount := 0
-	for _, rs := range req.ResourceSpans {
-		for _, ss := range rs.ScopeSpans {
-			for _, sp := range ss.Spans {
-				total++
-				if len(sp.TraceId) != 16 || len(sp.SpanId) != 8 {
-					t.Errorf("span %q has malformed ids", sp.Name)
-				}
-				if strings.Contains(sp.Name, "relation-joined") {
-					joinedCount++
-				}
-				for _, a := range sp.Attributes {
-					if a.Key == "juju.tool" && a.Value.GetStringValue() == "status-set" {
-						statusSetCount++
-					}
-				}
-			}
+func TestGenerateModelAttribution(t *testing.T) {
+	msgs, err := Generate(ScenarioTrivial, Options{ModelName: "cos"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range msgs {
+		if m.Model != "cos" {
+			t.Fatalf("message not attributed to model cos: %+v", m)
 		}
 	}
-	if total < 14 {
-		t.Fatalf("expected at least 14 spans, got %d", total)
+}
+
+func TestGenerateStartHonoured(t *testing.T) {
+	start := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	msgs, err := Generate(ScenarioTrivial, Options{Start: start})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if joinedCount != 2 {
-		t.Fatalf("expected 2 relation-joined spans, got %d", joinedCount)
-	}
-	// Two units × (unit-status + app-status) = 4 status-set spans.
-	if statusSetCount != 4 {
-		t.Fatalf("expected 4 status-set spans (2 units × workload+application), got %d", statusSetCount)
+	if msgs[0].Ts.Before(start) {
+		t.Fatalf("first message %s precedes start %s", msgs[0].Ts, start)
 	}
 }
 
 func TestGenerateUnknownScenario(t *testing.T) {
 	if _, err := Generate("does-not-exist", Options{}); err == nil {
 		t.Fatal("expected error for unknown scenario")
-	}
-}
-
-func TestEmitProducesValidJSONL(t *testing.T) {
-	w := &memWriter{}
-	if err := Emit(t.Context(), ScenarioTrivial, Options{Start: time.Unix(0, 0).UTC()}, w); err != nil {
-		t.Fatalf("Emit: %v", err)
-	}
-	lines := strings.Split(strings.TrimRight(w.buf.String(), "\n"), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("expected 1 line, got %d", len(lines))
-	}
-	var v map[string]any
-	if err := json.Unmarshal([]byte(lines[0]), &v); err != nil {
-		t.Fatalf("line is not JSON: %v", err)
-	}
-	if _, ok := v["resource_spans"]; !ok {
-		t.Fatalf("expected resource_spans key, got: %v", v)
 	}
 }

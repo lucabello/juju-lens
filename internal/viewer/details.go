@@ -39,7 +39,7 @@ func (m *model) refreshDetails() {
 	fmt.Fprintf(&b, "  start:    %s\n", sp.Start.Format(time.RFC3339Nano))
 	fmt.Fprintf(&b, "  duration: %s\n", sp.Duration())
 	statusStyle := styleDim
-	if sp.StatusCode == "STATUS_CODE_ERROR" {
+	if sp.StatusCode == "ERROR" {
 		statusStyle = styleErr
 	}
 	fmt.Fprintf(&b, "  status:   %s\n", statusStyle.Render(sp.StatusCode))

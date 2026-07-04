@@ -26,8 +26,11 @@ func (l Layout) Manifest() string { return filepath.Join(l.Root, ManifestFilenam
 // RawDir returns the path to the raw/ directory.
 func (l Layout) RawDir() string { return filepath.Join(l.Root, "raw") }
 
-// OTLPDir returns raw/otlp/, holding OTLP payloads captured verbatim.
-func (l Layout) OTLPDir() string { return filepath.Join(l.RawDir(), "otlp") }
+// RPCDir returns raw/rpc/<model>/, holding captured Juju API RPC envelopes
+// (one CapturedMessage per line) for a single model.
+func (l Layout) RPCDir(model string) string {
+	return filepath.Join(l.RawDir(), "rpc", sanitizeSegment(model))
+}
 
 // JujuDir returns raw/juju/<model>/, holding juju debug-log output per model.
 func (l Layout) JujuDir(model string) string {
@@ -60,29 +63,25 @@ func (l Layout) IndexDB() string { return filepath.Join(l.Root, "index.db") }
 // reads this file to send SIGTERM without needing shell job control.
 func (l Layout) PidFile() string { return filepath.Join(l.Root, "recorder.pid") }
 
-// OTLPTracesFile returns the JSONL file that OTLP trace requests are appended
-// to during hour h. h is a UTC "2006-01-02T15" string.
-func (l Layout) OTLPTracesFile(hour string) string {
-	return filepath.Join(l.OTLPDir(), fmt.Sprintf("traces-%s.jsonl", hour))
-}
-
-// OTLPLogsFile returns the JSONL file for OTLP log requests during hour h.
-func (l Layout) OTLPLogsFile(hour string) string {
-	return filepath.Join(l.OTLPDir(), fmt.Sprintf("logs-%s.jsonl", hour))
-}
-
-// OTLPMetricsFile returns the JSONL file for OTLP metric requests during hour h.
-func (l Layout) OTLPMetricsFile(hour string) string {
-	return filepath.Join(l.OTLPDir(), fmt.Sprintf("metrics-%s.jsonl", hour))
+// RPCFileFor returns a PathForHourFunc that names the per-hour calls file for
+// a single model: raw/rpc/<model>/calls-<hour>.jsonl. Pass the result to a
+// RotatingWriter so one writer exists per model.
+func (l Layout) RPCFileFor(model string) func(hour string) string {
+	dir := l.RPCDir(model)
+	return func(hour string) string {
+		return filepath.Join(dir, fmt.Sprintf("calls-%s.jsonl", hour))
+	}
 }
 
 // Init creates the directory skeleton for a fresh recording. It is idempotent:
 // re-running against an existing recording is fine and does not clobber files.
+// Per-model raw/rpc/<model>/ directories are created lazily by the writers as
+// models are discovered, so Init only lays down the always-present roots.
 func (l Layout) Init() error {
 	if l.Root == "" {
 		return errors.New("recording root is empty")
 	}
-	for _, d := range []string{l.Root, l.RawDir(), l.OTLPDir(), l.DerivedDir()} {
+	for _, d := range []string{l.Root, l.RawDir(), l.DerivedDir()} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return fmt.Errorf("creating %s: %w", d, err)
 		}

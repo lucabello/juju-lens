@@ -8,60 +8,42 @@ import (
 	"github.com/lucabello/juju-lens/internal/recording"
 )
 
-func TestExtractSnapshotsFromSynthShape(t *testing.T) {
+// statusSpan builds a synthesised span the way recording.LoadSpans would for a
+// Uniter status-setter RPC: facade/method/params live in Attrs.
+func statusSpan(id, method, unit string, start time.Time, params string) recording.SpanRow {
+	return recording.SpanRow{
+		SpanID: id, Model: "default", Unit: unit,
+		Start: start, End: start,
+		Name: "Uniter." + method,
+		Attrs: map[string]string{
+			"facade": "Uniter",
+			"method": method,
+			"params": params,
+		},
+	}
+}
+
+func TestExtractSnapshotsFromStatusRPCs(t *testing.T) {
 	base := time.Date(2026, 7, 3, 14, 30, 12, 0, time.UTC)
 	spans := []recording.SpanRow{
-		// A hook that doesn't set any status. Must be ignored.
+		// A hook commit that sets no status. Must be ignored.
 		{
-			SpanID: "01", Model: "default", Unit: "grafana/0",
-			Start: base, End: base.Add(100 * time.Millisecond),
-			Name: "hook: install",
-			Attrs: map[string]string{
-				"juju.hook": "install",
-			},
+			SpanID: "01", Model: "default", Unit: "grafana/0", Start: base, End: base,
+			Name:  "Uniter.CommitHookChanges",
+			Attrs: map[string]string{"facade": "Uniter", "method": "CommitHookChanges", "params": `{"changes":[]}`},
 		},
-		// Unit-status set by grafana/0.
+		statusSpan("02", "SetStatus", "grafana/0", base.Add(200*time.Millisecond),
+			`{"entities":[{"tag":"unit-grafana-0","status":"active","info":"Ready"}]}`),
+		statusSpan("03", "SetApplicationStatus", "grafana/0", base.Add(210*time.Millisecond),
+			`{"entities":[{"tag":"application-grafana","status":"active","info":"All units ready"}]}`),
+		// prometheus workload status, no message.
+		statusSpan("04", "SetStatus", "prometheus/0", base.Add(300*time.Millisecond),
+			`{"entities":[{"tag":"unit-prometheus-0","status":"waiting"}]}`),
+		// A non-Uniter facade must be ignored.
 		{
-			SpanID: "02", Model: "default", Unit: "grafana/0",
-			Start: base.Add(200 * time.Millisecond), End: base.Add(205 * time.Millisecond),
-			Name: "jujuc.status-set",
-			Attrs: map[string]string{
-				"juju.tool":                    "status-set",
-				"juju.status.kind":             "workload",
-				"juju.status.workload.value":   "active",
-				"juju.status.workload.message": "Ready",
-			},
-		},
-		// App-status set by grafana/0 as leader.
-		{
-			SpanID: "03", Model: "default", Unit: "grafana/0",
-			Start: base.Add(210 * time.Millisecond), End: base.Add(215 * time.Millisecond),
-			Name: "jujuc.status-set --application",
-			Attrs: map[string]string{
-				"juju.tool":                       "status-set",
-				"juju.status.kind":                "application",
-				"juju.status.application.value":   "active",
-				"juju.status.application.message": "All units ready",
-			},
-		},
-		// prometheus/0 workload status. No message.
-		{
-			SpanID: "04", Model: "default", Unit: "prometheus/0",
-			Start: base.Add(300 * time.Millisecond), End: base.Add(305 * time.Millisecond),
-			Name: "jujuc.status-set",
-			Attrs: map[string]string{
-				"juju.status.workload.value": "waiting",
-			},
-		},
-		// A status-set span with no unit — must be ignored so we don't
-		// invent a scope out of thin air.
-		{
-			SpanID: "05", Model: "default",
-			Start: base.Add(400 * time.Millisecond), End: base.Add(405 * time.Millisecond),
-			Name: "jujuc.status-set",
-			Attrs: map[string]string{
-				"juju.status.workload.value": "unknown",
-			},
+			SpanID: "05", Model: "default", Start: base.Add(400 * time.Millisecond), End: base.Add(400 * time.Millisecond),
+			Name:  "Client.FullStatus",
+			Attrs: map[string]string{"facade": "Client", "method": "FullStatus"},
 		},
 	}
 
@@ -70,7 +52,6 @@ func TestExtractSnapshotsFromSynthShape(t *testing.T) {
 		t.Fatalf("expected 3 snapshots, got %d: %+v", len(got), got)
 	}
 
-	// Snapshots come back time-ordered; verify shape and scope names.
 	want := []struct {
 		kind  SnapshotKind
 		scope string
@@ -82,8 +63,7 @@ func TestExtractSnapshotsFromSynthShape(t *testing.T) {
 	}
 	for i, w := range want {
 		if got[i].Kind != w.kind || got[i].Scope != w.scope {
-			t.Errorf("snap[%d] kind/scope = %s/%s, want %s/%s",
-				i, got[i].Kind, got[i].Scope, w.kind, w.scope)
+			t.Errorf("snap[%d] kind/scope = %s/%s, want %s/%s", i, got[i].Kind, got[i].Scope, w.kind, w.scope)
 		}
 		var body statusBody
 		if err := json.Unmarshal(got[i].Body, &body); err != nil {
@@ -101,23 +81,57 @@ func TestExtractSnapshotsFromSynthShape(t *testing.T) {
 	}
 }
 
-func TestExtractSnapshotsFromSynthEndToEnd(t *testing.T) {
-	// Cross-package: run the extractor over the *actual* trivial scenario
-	// via recording.LoadSpans equivalents. We hand-craft two spans that
-	// mirror the synth output.
+// SetAgentStatus (executing/idle) must extract into its own agent-status scope,
+// distinct from the workload unit-status scope, so the sidebar and Status pane
+// draw from different axes. This guards against the recorder/extractor ever
+// dropping agent status (it is not recoverable from a recording that omits it).
+func TestExtractAgentStatusScope(t *testing.T) {
 	base := time.Date(2026, 7, 3, 14, 30, 12, 0, time.UTC)
-	span := recording.SpanRow{
-		SpanID: "aa", Model: "default", Unit: "grafana/0",
-		Start: base, End: base,
-		Attrs: map[string]string{
-			"juju.status.workload.value":      "active",
-			"juju.status.workload.message":    "Ready",
-			"juju.status.application.value":   "active",
-			"juju.status.application.message": "All units ready",
-		},
+	spans := []recording.SpanRow{
+		statusSpan("01", "SetAgentStatus", "grafana/0", base,
+			`{"entities":[{"tag":"unit-grafana-0","status":"executing","info":"running config-changed hook"}]}`),
+		statusSpan("02", "SetUnitStatus", "grafana/0", base.Add(time.Second),
+			`{"entities":[{"tag":"unit-grafana-0","status":"active","info":"Ready"}]}`),
+		statusSpan("03", "SetAgentStatus", "grafana/0", base.Add(2*time.Second),
+			`{"entities":[{"tag":"unit-grafana-0","status":"idle"}]}`),
 	}
-	got := ExtractSnapshots([]recording.SpanRow{span})
-	if len(got) != 2 {
-		t.Fatalf("one span should yield unit + app snapshot, got %d", len(got))
+	got := ExtractSnapshots(spans)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 snapshots, got %d: %+v", len(got), got)
+	}
+	want := []struct {
+		kind  SnapshotKind
+		scope string
+		value string
+	}{
+		{KindAgentStatus, "agent-status:grafana/0", "executing"},
+		{KindUnitStatus, "unit-status:grafana/0", "active"},
+		{KindAgentStatus, "agent-status:grafana/0", "idle"},
+	}
+	for i, w := range want {
+		if got[i].Kind != w.kind || got[i].Scope != w.scope {
+			t.Errorf("snap[%d] kind/scope = %s/%s, want %s/%s", i, got[i].Kind, got[i].Scope, w.kind, w.scope)
+		}
+		var body statusBody
+		if err := json.Unmarshal(got[i].Body, &body); err != nil {
+			t.Fatalf("snap[%d] body not JSON: %v", i, err)
+		}
+		if body.Value != w.value {
+			t.Errorf("snap[%d] value = %s, want %s", i, body.Value, w.value)
+		}
+	}
+}
+
+func TestEntityName(t *testing.T) {
+	cases := map[string]string{
+		"unit-grafana-0":         "grafana/0",
+		"unit-nova-compute-3":    "nova-compute/3",
+		"application-prometheus": "prometheus",
+		"machine-0":              "",
+	}
+	for tag, want := range cases {
+		if got := entityName(tag); got != want {
+			t.Errorf("entityName(%q) = %q, want %q", tag, got, want)
+		}
 	}
 }

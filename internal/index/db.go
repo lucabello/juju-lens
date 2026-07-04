@@ -22,7 +22,7 @@ import (
 
 // SchemaVersion is bumped whenever the SQL below changes shape. The rebuild
 // command uses it to decide whether an existing DB can be reused.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // The full schema. Statements are executed in order.
 var schema = []string{
@@ -56,6 +56,8 @@ var schema = []string{
 	    relation       TEXT,
 	    status         TEXT,
 	    status_msg     TEXT,
+	    raw_file       TEXT,               -- calls-*.jsonl the request came from
+	    raw_offset     INTEGER,            -- byte offset of the request line
 	    attrs_json     TEXT NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS spans_by_start ON spans(ts_start)`,
@@ -122,17 +124,37 @@ func (d *DB) SQL() *sql.DB { return d.sql }
 
 // UpsertModel returns the id of a model row, inserting one if needed.
 func (d *DB) UpsertModel(name string) (int64, error) {
+	return d.UpsertModelWithUUID(name, "")
+}
+
+// UpsertModelWithUUID is UpsertModel that also records the model's UUID,
+// backfilling it on an existing row whose uuid is still NULL (the first span
+// carrying it wins). A blank uuid is ignored so callers without one are safe.
+func (d *DB) UpsertModelWithUUID(name, uuid string) (int64, error) {
 	if name == "" {
 		name = "default"
 	}
 	// Fast path: try to fetch the id first.
 	var id int64
-	err := d.sql.QueryRow(`SELECT id FROM models WHERE name = ?`, name).Scan(&id)
+	var existing sql.NullString
+	err := d.sql.QueryRow(`SELECT id, uuid FROM models WHERE name = ?`, name).Scan(&id, &existing)
 	if err == nil {
+		if uuid != "" && !existing.Valid {
+			if _, uerr := d.sql.Exec(`UPDATE models SET uuid = ? WHERE id = ?`, uuid, id); uerr != nil {
+				return 0, uerr
+			}
+		}
 		return id, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
+	}
+	if uuid != "" {
+		res, err := d.sql.Exec(`INSERT INTO models(name, uuid) VALUES (?, ?)`, name, uuid)
+		if err != nil {
+			return 0, err
+		}
+		return res.LastInsertId()
 	}
 	res, err := d.sql.Exec(`INSERT INTO models(name) VALUES (?)`, name)
 	if err != nil {
@@ -145,7 +167,7 @@ func (d *DB) UpsertModel(name string) (int64, error) {
 // the model_id is looked up (creating it if necessary) from row.Model. On
 // duplicate span_id the row is replaced.
 func (d *DB) InsertSpan(row recording.SpanRow) error {
-	modelID, err := d.UpsertModel(row.Model)
+	modelID, err := d.UpsertModelWithUUID(row.Model, row.ModelUUID)
 	if err != nil {
 		return err
 	}
@@ -156,10 +178,11 @@ func (d *DB) InsertSpan(row recording.SpanRow) error {
 	_, err = d.sql.Exec(
 		`INSERT INTO spans(span_id, trace_id, parent_span_id, model_id,
 		                   ts_start, ts_end, name, service, unit, app,
-		                   hook, relation, status, status_msg, attrs_json)
+		                   hook, relation, status, status_msg,
+		                   raw_file, raw_offset, attrs_json)
 		 VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''),
 		         NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''),
-		         NULLIF(?, ''), NULLIF(?, ''), ?)
+		         NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
 		 ON CONFLICT(span_id) DO UPDATE SET
 		     trace_id = excluded.trace_id,
 		     parent_span_id = excluded.parent_span_id,
@@ -174,11 +197,14 @@ func (d *DB) InsertSpan(row recording.SpanRow) error {
 		     relation = excluded.relation,
 		     status = excluded.status,
 		     status_msg = excluded.status_msg,
+		     raw_file = excluded.raw_file,
+		     raw_offset = excluded.raw_offset,
 		     attrs_json = excluded.attrs_json`,
 		row.SpanID, row.TraceID, row.ParentSpanID, modelID,
 		row.Start.UnixNano(), row.End.UnixNano(),
 		row.Name, row.Service, row.Unit, appOf(row.Unit),
-		row.Hook, row.Relation, row.StatusCode, row.StatusMsg, string(attrs),
+		row.Hook, row.Relation, row.StatusCode, row.StatusMsg,
+		row.RawFile, row.RawOffset, string(attrs),
 	)
 	return err
 }

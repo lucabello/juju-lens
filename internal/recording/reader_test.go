@@ -1,8 +1,11 @@
 package recording
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/lucabello/juju-lens/internal/wire"
 )
 
 func TestLoadSpansMissingDirReturnsEmpty(t *testing.T) {
@@ -16,43 +19,95 @@ func TestLoadSpansMissingDirReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestLoadSpansParsesJSONLAndSorts(t *testing.T) {
-	dir := t.TempDir()
-	l := NewLayout(dir)
-	if err := l.Init(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Two payloads produced with different start times; verify sort.
-	w := NewRotatingWriter(func(h string) string { return l.OTLPTracesFile(h) }, func() time.Time {
-		return time.Date(2026, 7, 3, 14, 0, 0, 0, time.UTC)
-	})
+// writeCalls appends the given captured messages to a model's calls file.
+func writeCalls(t *testing.T, l Layout, model string, hourTs time.Time, msgs ...wire.CapturedMessage) {
+	t.Helper()
+	w := NewRotatingWriter(l.RPCFileFor(model), func() time.Time { return hourTs })
 	defer w.Close()
-
-	// A minimally valid OTLP JSON line built by hand — enough to exercise
-	// the parser without pulling synth into the recording package.
-	late := `{"resource_spans":[{"resource":{"attributes":[{"key":"service.name","value":{"string_value":"late"}}]},"scope_spans":[{"spans":[{"trace_id":"AAAA","span_id":"BB","name":"late","start_time_unix_nano":"200","end_time_unix_nano":"300","status":{}}]}]}]}`
-	early := `{"resource_spans":[{"resource":{"attributes":[{"key":"service.name","value":{"string_value":"early"}}]},"scope_spans":[{"spans":[{"trace_id":"AAAA","span_id":"CC","name":"early","start_time_unix_nano":"100","end_time_unix_nano":"150","status":{}}]}]}]}`
-	for _, line := range []string{late, early} {
-		if _, err := w.WriteLine([]byte(line)); err != nil {
+	for _, m := range msgs {
+		line, err := m.MarshalLine()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.WriteLine(line); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func req(ts time.Time, rid uint64, facade, method, unit string) wire.CapturedMessage {
+	return wire.CapturedMessage{
+		Ts: ts, PID: 1001, Dir: wire.DirWrite, Conn: 7, Model: "default", Unit: unit,
+		Msg: wire.Envelope{RequestID: rid, Type: facade, Request: method, Params: json.RawMessage(`{}`)},
+	}
+}
+
+func resp(ts time.Time, rid uint64) wire.CapturedMessage {
+	return wire.CapturedMessage{
+		Ts: ts, PID: 1001, Dir: wire.DirRead, Conn: 7, Model: "default",
+		Msg: wire.Envelope{RequestID: rid, Response: json.RawMessage(`{}`)},
+	}
+}
+
+func TestLoadSpansPairsAndSorts(t *testing.T) {
+	dir := t.TempDir()
+	l := NewLayout(dir)
+	if err := l.Init(); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 3, 14, 0, 0, 0, time.UTC)
+
+	// Emit a "late" RPC before an "early" one to prove sorting by start time.
+	writeCalls(t, l, "default", base,
+		req(base.Add(200*time.Millisecond), 2, "Uniter", "Late", "grafana/0"),
+		resp(base.Add(300*time.Millisecond), 2),
+		req(base.Add(100*time.Millisecond), 1, "Uniter", "Early", "grafana/0"),
+		resp(base.Add(150*time.Millisecond), 1),
+	)
 
 	rows, err := LoadSpans(dir)
 	if err != nil {
 		t.Fatalf("LoadSpans: %v", err)
 	}
 	if len(rows) != 2 {
-		t.Fatalf("expected 2 spans, got %d", len(rows))
+		t.Fatalf("expected 2 paired spans, got %d", len(rows))
 	}
-	if rows[0].Name != "early" || rows[1].Name != "late" {
-		t.Fatalf("expected [early, late], got [%s, %s]", rows[0].Name, rows[1].Name)
+	if rows[0].Name != "Uniter.Early" || rows[1].Name != "Uniter.Late" {
+		t.Fatalf("expected [Uniter.Early, Uniter.Late], got [%s, %s]", rows[0].Name, rows[1].Name)
 	}
-	if rows[0].Service != "early" || rows[1].Service != "late" {
-		t.Fatalf("service.name propagation broken: %+v %+v", rows[0], rows[1])
+	// Duration is request→response.
+	if got := rows[0].Duration(); got != 50*time.Millisecond {
+		t.Fatalf("early duration = %s, want 50ms", got)
+	}
+	if rows[0].Unit != "grafana/0" || rows[0].Model != "default" {
+		t.Fatalf("attribution broken: %+v", rows[0])
+	}
+	if rows[0].RawFile == "" {
+		t.Fatalf("expected raw_file pointer to be populated")
+	}
+}
+
+func TestLoadSpansUnmatchedRequestStillEmitted(t *testing.T) {
+	dir := t.TempDir()
+	l := NewLayout(dir)
+	if err := l.Init(); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 3, 14, 0, 0, 0, time.UTC)
+	// Request with no response (recorder stopped mid-flight).
+	writeCalls(t, l, "default", base, req(base, 9, "Uniter", "Orphan", "grafana/0"))
+
+	rows, err := LoadSpans(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected the unmatched request to still yield a span, got %d", len(rows))
+	}
+	if rows[0].Start != rows[0].End {
+		t.Fatalf("unmatched request should be zero-duration, got %s..%s", rows[0].Start, rows[0].End)
 	}
 }
