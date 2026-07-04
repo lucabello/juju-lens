@@ -10,7 +10,8 @@ import (
 )
 
 func newViewCmd() *cobra.Command {
-	return &cobra.Command{
+	var follow bool
+	cmd := &cobra.Command{
 		Use:   "view <recording>",
 		Short: "Open a recording in the TUI viewer",
 		Args:  cobra.ExactArgs(1),
@@ -25,7 +26,9 @@ func newViewCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("no manifest.json under %q; is this a juju-lens recording?", dir)
 			}
-			return viewer.Run(dir)
+			return viewer.Run(dir, follow)
 		},
 	}
+	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "tail a live recording, refreshing as it grows")
+	return cmd
 }

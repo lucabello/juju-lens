@@ -19,6 +19,7 @@ package viewer
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/lucabello/juju-lens/internal/index"
 	"github.com/lucabello/juju-lens/internal/recording"
@@ -30,9 +31,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Run opens the recording at dir and blocks in the TUI until the user
-// quits. It returns nil on a clean exit.
-func Run(dir string) error {
+// Run opens the recording at dir and blocks in the TUI until the user quits.
+// When follow is true the viewer tails the (possibly still-growing) recording,
+// refreshing as `record`'s live indexer appends to index.db. It returns nil on
+// a clean exit.
+func Run(dir string, follow bool) error {
 	man, err := recording.Load(dir)
 	if err != nil {
 		return fmt.Errorf("loading manifest at %s: %w", dir, err)
@@ -50,9 +53,19 @@ func Run(dir string) error {
 	}
 
 	m := newModel(dir, man, db, models)
+	m.follow = follow
 	prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = prog.Run()
 	return err
+}
+
+// followInterval is how often follow mode re-queries the index for new data.
+const followInterval = 2 * time.Second
+
+type tickMsg struct{}
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(followInterval, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
 // keymap groups the keybindings so bubbles/help can render them.
@@ -114,6 +127,8 @@ type model struct {
 	relCursor    int                          // selected relation when the Relations pane is focused
 	pit          bool                         // point-in-time: status/relations as of the cursor
 	diff         bool                         // databag diff mode in the details pane
+	follow       bool                         // tail a live recording, refreshing on a tick
+	atTail       bool                         // cursor was at the newest span (keep following the tail)
 
 	cursor  int
 	focus   paneID
@@ -188,10 +203,69 @@ func (m *model) refreshStatus() {
 	}
 }
 
-func (m *model) Init() tea.Cmd { return nil }
+func (m *model) Init() tea.Cmd {
+	if m.follow {
+		return tickCmd()
+	}
+	return nil
+}
+
+// reload re-reads the index for the active model, picking up spans/logs/
+// snapshots the live indexer has appended. It preserves the cursor's span
+// (following the tail when the cursor was already at the newest span) so the
+// view doesn't jump around under the user.
+func (m *model) reload() {
+	// Adopt any models that appeared since we started (e.g. a new model on the
+	// followed controller).
+	if models, err := m.db.Models(); err == nil && len(models) > len(m.allModels) {
+		m.allModels = models
+		if m.activeModel.ID == 0 && len(models) > 0 {
+			m.setActiveModel(models[0])
+			return
+		}
+	}
+	if m.activeModel.ID == 0 {
+		return
+	}
+	prevLen := len(m.spans)
+	prevID := ""
+	if m.cursor < len(m.spans) {
+		prevID = m.spans[m.cursor].SpanID
+	}
+	spans, err := m.db.Spans(m.activeModel.ID)
+	if err != nil {
+		return
+	}
+	m.spans = spans
+	m.appTree = buildAppTree(spans)
+	switch {
+	case m.atTail || prevLen == 0:
+		m.cursor = max(0, len(spans)-1)
+	default:
+		// Keep the cursor on the same span if it's still there.
+		m.cursor = min(m.cursor, max(0, len(spans)-1))
+		for i, sp := range spans {
+			if sp.SpanID == prevID {
+				m.cursor = i
+				break
+			}
+		}
+	}
+	m.refreshStatus()
+	m.refreshDetails()
+}
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tickMsg:
+		// Follow tick: remember whether we were pinned to the tail, pull new
+		// data, and reschedule. Skip while the model picker is up so we don't
+		// adopt a model behind the overlay.
+		if m.picker == nil {
+			m.atTail = len(m.spans) == 0 || m.cursor == len(m.spans)-1
+			m.reload()
+		}
+		return m, tickCmd()
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height

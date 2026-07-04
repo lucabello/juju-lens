@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lucabello/juju-lens/internal/index"
 	"github.com/lucabello/juju-lens/internal/probe"
 	"github.com/lucabello/juju-lens/internal/recording"
 	"github.com/lucabello/juju-lens/internal/wire"
@@ -186,6 +187,34 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 	w := &rpcWriters{layout: layout}
 	defer w.closeAll()
 
+	// Incremental indexer: keep index.db fresh as raw/ grows so `view --follow`
+	// can tail a live recording. A final authoritative full rebuild runs at
+	// stop, so this only needs to be fresh, not perfect. idxDone signals that
+	// the goroutine has flushed and closed its handle, so the final rebuild can
+	// safely replace index.db without racing it.
+	var idxDone chan struct{}
+	if idxDB, derr := index.Open(layout.IndexDB()); derr == nil {
+		idxDone = make(chan struct{})
+		indexer := index.NewIndexer(idxDB)
+		go func() {
+			defer close(idxDone)
+			t := time.NewTicker(3 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					_ = indexer.Sync(layout.Root)
+					_ = idxDB.Close()
+					return
+				case <-t.C:
+					_ = indexer.Sync(layout.Root)
+				}
+			}
+		}()
+	} else {
+		fmt.Fprintf(os.Stderr, "juju-lens: live index disabled: %v\n", derr)
+	}
+
 	endReason := recording.EndReasonUnknown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -258,7 +287,14 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 	if err := man.Save(layout.Root); err != nil {
 		return fmt.Errorf("finalising manifest: %w", err)
 	}
-	if err := runIndex(layout.Root); err != nil {
+	// Wait for the live indexer to flush and release index.db, then rebuild it
+	// authoritatively (accurate hook labelling, no partial state). The rebuild
+	// is in-place (reset, not remove) so a `view --follow` that has the DB open
+	// sees the final data rather than being stranded on an unlinked file.
+	if idxDone != nil {
+		<-idxDone
+	}
+	if err := reindexInPlace(layout); err != nil {
 		fmt.Fprintf(os.Stderr, "juju-lens: indexing recording failed: %v (run `juju-lens index %s` to retry)\n",
 			err, layout.Root)
 	}
@@ -283,6 +319,18 @@ func describeScope(topo *jujuTopology, filter probeFilter) string {
 		return fmt.Sprintf("controller %s (%s), all models", topo.controllerName, filter.controllerUUID)
 	}
 	return "all controllers/models (unfiltered)"
+}
+
+// reindexInPlace opens the recording's existing index.db and rebuilds it in
+// place (without unlinking the file), so a concurrent `view --follow` picks up
+// the authoritative final data on its next tick.
+func reindexInPlace(layout recording.Layout) error {
+	db, err := index.Open(layout.IndexDB())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return rebuildIndex(db, layout.Root, true)
 }
 
 // buildProbeCommand constructs the exec.Cmd that runs the probe for the chosen

@@ -80,25 +80,32 @@ var (
 func ExtractSnapshots(spans []recording.SpanRow) []Snapshot {
 	var out []Snapshot
 	for _, sp := range spans {
-		facade := sp.Attrs["facade"]
-		if facade != "Uniter" {
-			continue
-		}
-		method := sp.Attrs["method"]
-		params := sp.Attrs["params"]
-		switch {
-		case unitStatusMethods[method]:
-			out = append(out, statusSnapshots(sp, params, KindUnitStatus)...)
-		case agentStatusMethods[method]:
-			out = append(out, statusSnapshots(sp, params, KindAgentStatus)...)
-		case appStatusMethods[method]:
-			out = append(out, statusSnapshots(sp, params, KindAppStatus)...)
-		case method == "CommitHookChanges":
-			out = append(out, databagSnapshots(sp, params)...)
-		}
+		out = append(out, SnapshotsForSpan(sp)...)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Ts.Before(out[j].Ts) })
 	return out
+}
+
+// SnapshotsForSpan derives the snapshots a single span produces. It is the unit
+// of extraction shared by the batch ExtractSnapshots and the incremental
+// indexer, so both paths stay identical.
+func SnapshotsForSpan(sp recording.SpanRow) []Snapshot {
+	if sp.Attrs["facade"] != "Uniter" {
+		return nil
+	}
+	method := sp.Attrs["method"]
+	params := sp.Attrs["params"]
+	switch {
+	case unitStatusMethods[method]:
+		return statusSnapshots(sp, params, KindUnitStatus)
+	case agentStatusMethods[method]:
+		return statusSnapshots(sp, params, KindAgentStatus)
+	case appStatusMethods[method]:
+		return statusSnapshots(sp, params, KindAppStatus)
+	case method == "CommitHookChanges":
+		return databagSnapshots(sp, params)
+	}
+	return nil
 }
 
 // statusSnapshots decodes a status-setter's params into one snapshot per

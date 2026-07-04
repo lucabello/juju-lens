@@ -64,7 +64,8 @@ func LoadSpans(root string) ([]SpanRow, error) {
 		return nil, fmt.Errorf("reading %s: %w", rpcRoot, err)
 	}
 
-	p := newPairer()
+	p := NewPairer()
+	var rows []SpanRow
 	for _, md := range modelDirs {
 		if !md.IsDir() {
 			continue
@@ -84,39 +85,27 @@ func LoadSpans(root string) ([]SpanRow, error) {
 		sort.Strings(names) // hour-keyed names sort into chronological order
 		for _, name := range names {
 			rel, _ := filepath.Rel(root, filepath.Join(dir, name))
-			if err := p.consumeFile(filepath.Join(dir, name), rel); err != nil {
+			done, err := consumeCallsFile(p, filepath.Join(dir, name), rel)
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "juju-lens: skipping %s: %v\n", name, err)
 			}
+			rows = append(rows, done...)
 		}
 	}
-	rows := p.finish()
+	rows = append(rows, p.Pending()...)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Start.Before(rows[j].Start) })
 	return rows, nil
 }
 
-// pairer accumulates outstanding requests keyed by (pid, conn, request-id) and
-// emits a SpanRow when the matching response arrives. Requests without a
-// response (recorder stopped mid-flight) are flushed as zero-duration spans at
-// finish() so nothing captured is silently dropped.
-type pairer struct {
-	pending map[reqKey]SpanRow
-	rows    []SpanRow
-}
-
-type reqKey struct {
-	pid  int
-	conn uint64
-	rid  uint64
-}
-
-func newPairer() *pairer { return &pairer{pending: map[reqKey]SpanRow{}} }
-
-func (p *pairer) consumeFile(path, rel string) error {
+// consumeCallsFile feeds every line of a calls file to the pairer and returns
+// the spans that completed while doing so.
+func consumeCallsFile(p *Pairer, path, rel string) ([]SpanRow, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
+	var out []SpanRow
 	r := bufio.NewReader(f)
 	var offset int64
 	for {
@@ -128,19 +117,43 @@ func (p *pairer) consumeFile(path, rel string) error {
 			trimmed = trimmed[:n-1]
 		}
 		if len(trimmed) > 0 {
-			cm, uerr := wire.UnmarshalLine(trimmed)
-			if uerr == nil {
-				p.add(cm, rel, lineOffset)
+			if cm, uerr := wire.UnmarshalLine(trimmed); uerr == nil {
+				if sp, ok := p.Feed(cm, rel, lineOffset); ok {
+					out = append(out, sp)
+				}
 			}
 		}
 		if err != nil {
 			break // io.EOF or a real read error; either way we're done
 		}
 	}
-	return nil
+	return out, nil
 }
 
-func (p *pairer) add(cm wire.CapturedMessage, rawFile string, offset int64) {
+// Pairer accumulates outstanding requests keyed by (pid, conn, request-id) and
+// emits a completed SpanRow when the matching response arrives. It is fed one
+// captured message at a time so both the batch loader (LoadSpans) and the
+// incremental indexer can share the exact same pairing logic. Requests still
+// open when the stream ends are surfaced by Pending() as zero-duration spans so
+// nothing captured is silently dropped.
+type Pairer struct {
+	pending map[reqKey]SpanRow
+}
+
+type reqKey struct {
+	pid  int
+	conn uint64
+	rid  uint64
+}
+
+// NewPairer returns an empty pairer.
+func NewPairer() *Pairer { return &Pairer{pending: map[reqKey]SpanRow{}} }
+
+// Feed processes one captured message. It returns the completed span (ok=true)
+// when a response pairs with a pending request; a request (buffered) or an
+// orphan response returns ok=false. rawFile/offset point back to the request
+// line in raw/rpc for the details pane.
+func (p *Pairer) Feed(cm wire.CapturedMessage, rawFile string, offset int64) (SpanRow, bool) {
 	key := reqKey{pid: cm.PID, conn: cm.Conn, rid: cm.Msg.RequestID}
 	if cm.Msg.IsRequest() {
 		row := SpanRow{
@@ -160,12 +173,11 @@ func (p *pairer) add(cm wire.CapturedMessage, rawFile string, offset int64) {
 		}
 		row.TraceID, row.SpanID = spanIDs(cm.Msg, key)
 		p.pending[key] = row
-		return
+		return SpanRow{}, false
 	}
-	// Response half: close out the pending request if we have it.
 	row, ok := p.pending[key]
 	if !ok {
-		return // orphan response (recorder started mid-connection); ignore
+		return SpanRow{}, false // orphan response (started mid-connection)
 	}
 	delete(p.pending, key)
 	row.End = cm.Ts.UTC()
@@ -183,15 +195,18 @@ func (p *pairer) add(cm wire.CapturedMessage, rawFile string, offset int64) {
 	if len(cm.Msg.Response) > 0 {
 		row.Attrs["response"] = compactJSON(cm.Msg.Response)
 	}
-	p.rows = append(p.rows, row)
+	return row, true
 }
 
-func (p *pairer) finish() []SpanRow {
+// Pending returns the still-open requests as zero-duration spans. It does not
+// clear them, so the incremental indexer can flush repeatedly without losing
+// track of requests that may still get a response later.
+func (p *Pairer) Pending() []SpanRow {
+	out := make([]SpanRow, 0, len(p.pending))
 	for _, row := range p.pending {
-		p.rows = append(p.rows, row)
+		out = append(out, row)
 	}
-	p.pending = map[reqKey]SpanRow{}
-	return p.rows
+	return out
 }
 
 // spanName is "<facade>.<method>", falling back gracefully when one part is

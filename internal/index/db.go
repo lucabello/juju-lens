@@ -553,6 +553,20 @@ func (d *DB) SpanCount() (int64, error) {
 	return n, err
 }
 
+// Reset deletes all indexed data (spans, snapshots, logs, models) while leaving
+// the schema and file in place. It lets a rebuild happen on the same inode, so
+// a `view --follow` process with the DB open sees the refresh instead of being
+// stranded on an unlinked file. Use os.Remove + Open instead when the schema
+// itself may have changed.
+func (d *DB) Reset() error {
+	for _, t := range []string{"log_records", "snapshots", "spans", "models"} {
+		if _, err := d.sql.Exec("DELETE FROM " + t); err != nil {
+			return fmt.Errorf("resetting %s: %w", t, err)
+		}
+	}
+	return nil
+}
+
 func (d *DB) setMeta(key, value string) error {
 	_, err := d.sql.Exec(
 		`INSERT INTO meta(key, value) VALUES (?, ?)

@@ -52,7 +52,18 @@ func runIndex(dir string) error {
 		return err
 	}
 	defer db.Close()
+	return rebuildIndex(db, dir, true)
+}
 
+// rebuildIndex performs a full, authoritative (re)build of an open index from a
+// recording's raw/ tree: it resets the DB data then loads, enriches, and writes
+// every span, snapshot and log record. Because it resets rather than recreating
+// the file, it can refresh an index other processes have open (a live
+// `view --follow`). Set verbose to log a summary.
+func rebuildIndex(db *index.DB, dir string, verbose bool) error {
+	if err := db.Reset(); err != nil {
+		return err
+	}
 	spans, err := recording.LoadSpans(dir)
 	if err != nil {
 		return err
@@ -77,7 +88,6 @@ func runIndex(dir string) error {
 			return fmt.Errorf("insert snapshot %s: %w", s.Scope, err)
 		}
 	}
-
 	logs, err := recording.LoadLogs(dir)
 	if err != nil {
 		return err
@@ -87,8 +97,9 @@ func runIndex(dir string) error {
 			return fmt.Errorf("insert log record: %w", err)
 		}
 	}
-
-	fmt.Fprintf(os.Stderr, "juju-lens: indexed %d spans, %d snapshots, %d log records into %s\n",
-		len(spans), len(snaps), len(logs), layout.IndexDB())
+	if verbose {
+		fmt.Fprintf(os.Stderr, "juju-lens: indexed %d spans, %d snapshots, %d log records\n",
+			len(spans), len(snaps), len(logs))
+	}
 	return nil
 }
