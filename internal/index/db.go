@@ -317,6 +317,49 @@ func (d *DB) LogsForSpan(modelID int64, spanID, unit string, start, end time.Tim
 	return out, rows.Err()
 }
 
+// SnapshotsByProducingSpan returns the snapshots a given span produced, of the
+// requested kind, newest scope first. It backs the M4 databag diff: for a
+// CommitHookChanges span it yields the databags that hook wrote.
+func (d *DB) SnapshotsByProducingSpan(spanID, kind string) ([]SnapshotRow, error) {
+	rows, err := d.sql.Query(
+		`SELECT scope, body_json, ts FROM snapshots
+		  WHERE producing_span_id = ? AND kind = ?
+		  ORDER BY scope`, spanID, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SnapshotRow
+	for rows.Next() {
+		var (
+			r    SnapshotRow
+			nano int64
+		)
+		if err := rows.Scan(&r.Scope, &r.Body, &nano); err != nil {
+			return nil, err
+		}
+		r.Ts = time.Unix(0, nano).UTC()
+		r.Kind = kind
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// PrevSnapshotBefore returns the snapshot body for scope strictly before ts —
+// the value that was in effect just prior to a write at ts. Empty when none.
+func (d *DB) PrevSnapshotBefore(modelID int64, scope string, ts time.Time) (string, error) {
+	var body string
+	err := d.sql.QueryRow(
+		`SELECT body_json FROM snapshots
+		  WHERE model_id = ? AND scope = ? AND ts < ?
+		  ORDER BY ts DESC LIMIT 1`,
+		modelID, scope, ts.UnixNano()).Scan(&body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return body, err
+}
+
 // LogCount returns the total number of log records in the DB.
 func (d *DB) LogCount() (int64, error) {
 	var n int64
@@ -447,6 +490,41 @@ func (d *DB) LatestPerScope(modelID int64, kind string) ([]SnapshotRow, error) {
 		         AND t.scope    = s.scope)
 		  ORDER BY s.scope`,
 		modelID, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SnapshotRow
+	for rows.Next() {
+		var (
+			r    SnapshotRow
+			nano int64
+		)
+		if err := rows.Scan(&r.Scope, &r.Body, &nano); err != nil {
+			return nil, err
+		}
+		r.Ts = time.Unix(0, nano).UTC()
+		r.Kind = kind
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// LatestPerScopeAsOf is LatestPerScope restricted to snapshots at or before ts:
+// the value each scope held at instant ts. This backs the M4 point-in-time
+// Status pane ("what would juju status have shown here?"), walking backward from
+// the cursor to the nearest snapshot per scope.
+func (d *DB) LatestPerScopeAsOf(modelID int64, kind string, ts time.Time) ([]SnapshotRow, error) {
+	rows, err := d.sql.Query(
+		`SELECT s.scope, s.body_json, s.ts FROM snapshots s
+		  WHERE s.model_id = ? AND s.kind = ? AND s.ts <= ? AND s.ts = (
+		      SELECT MAX(t.ts) FROM snapshots t
+		       WHERE t.model_id = s.model_id
+		         AND t.kind     = s.kind
+		         AND t.scope    = s.scope
+		         AND t.ts      <= ?)
+		  ORDER BY s.scope`,
+		modelID, kind, ts.UnixNano(), ts.UnixNano())
 	if err != nil {
 		return nil, err
 	}

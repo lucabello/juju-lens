@@ -16,6 +16,7 @@ const (
 	KindAppStatus   SnapshotKind = "app-status"
 	KindUnitStatus  SnapshotKind = "unit-status"
 	KindAgentStatus SnapshotKind = "agent-status"
+	KindDatabag     SnapshotKind = "databag" // relation databag (M4)
 )
 
 // Snapshot is a rebuildable point-in-time observation of Juju state derived
@@ -92,6 +93,8 @@ func ExtractSnapshots(spans []recording.SpanRow) []Snapshot {
 			out = append(out, statusSnapshots(sp, params, KindAgentStatus)...)
 		case appStatusMethods[method]:
 			out = append(out, statusSnapshots(sp, params, KindAppStatus)...)
+		case method == "CommitHookChanges":
+			out = append(out, databagSnapshots(sp, params)...)
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Ts.Before(out[j].Ts) })
@@ -130,6 +133,134 @@ func statusSnapshots(sp recording.SpanRow, params string, kind SnapshotKind) []S
 		})
 	}
 	return out
+}
+
+// RelationForSpan best-effort derives the relation a Uniter RPC concerns, from
+// the common param shapes: a top-level "relation", "relation-unit-pairs"
+// (ReadRemoteSettings), or the relation-unit-settings inside CommitHookChanges.
+// It returns "" when the span has no relation context. The result is stored on
+// the span so the timeline and relations pane can pivot on it.
+func RelationForSpan(sp recording.SpanRow) string {
+	params := sp.Attrs["params"]
+	if params == "" {
+		return ""
+	}
+	var probe struct {
+		Relation          string `json:"relation"`
+		RelationUnitPairs []struct {
+			Relation string `json:"relation"`
+		} `json:"relation-unit-pairs"`
+		Args []struct {
+			RelationUnitSettings []struct {
+				Relation string `json:"relation"`
+			} `json:"relation-unit-settings"`
+		} `json:"args"`
+	}
+	if err := json.Unmarshal([]byte(params), &probe); err != nil {
+		return ""
+	}
+	if probe.Relation != "" {
+		return relationKey(probe.Relation)
+	}
+	for _, p := range probe.RelationUnitPairs {
+		if p.Relation != "" {
+			return relationKey(p.Relation)
+		}
+	}
+	for _, a := range probe.Args {
+		for _, r := range a.RelationUnitSettings {
+			if r.Relation != "" {
+				return relationKey(r.Relation)
+			}
+		}
+	}
+	return ""
+}
+
+// commitHookChanges mirrors the parts of Uniter.CommitHookChanges we snapshot:
+// the relation databags a hook wrote. Each relation-unit-setting carries the
+// unit's own databag (settings) and, when the unit is the leader, the
+// application databag (application-settings).
+type commitHookChanges struct {
+	Args []struct {
+		Tag                  string `json:"tag"`
+		RelationUnitSettings []struct {
+			Relation            string          `json:"relation"`
+			Unit                string          `json:"unit"`
+			Settings            json.RawMessage `json:"settings"`
+			ApplicationSettings json.RawMessage `json:"application-settings"`
+		} `json:"relation-unit-settings"`
+	} `json:"args"`
+}
+
+// databagSnapshots turns a CommitHookChanges into one databag snapshot per
+// relation endpoint written: scope "databag:<relation>:<entity>" where entity
+// is a unit name (unit databag) or an application name (application databag).
+// The body is the settings object verbatim, so the viewer can render and diff
+// it. Empty/null settings are skipped so a hook that touched nothing does not
+// emit a snapshot.
+func databagSnapshots(sp recording.SpanRow, params string) []Snapshot {
+	if params == "" {
+		return nil
+	}
+	var chc commitHookChanges
+	if err := json.Unmarshal([]byte(params), &chc); err != nil {
+		return nil
+	}
+	var out []Snapshot
+	for _, arg := range chc.Args {
+		for _, rus := range arg.RelationUnitSettings {
+			rel := relationKey(rus.Relation)
+			if rel == "" {
+				continue
+			}
+			if unit := entityName(rus.Unit); unit != "" && hasContent(rus.Settings) {
+				out = append(out, databagSnap(sp, rel, unit, rus.Settings))
+			}
+			// Application databag is set by the leader; attribute it to the app.
+			if hasContent(rus.ApplicationSettings) {
+				if app := appName(entityName(rus.Unit)); app != "" {
+					out = append(out, databagSnap(sp, rel, app, rus.ApplicationSettings))
+				}
+			}
+		}
+	}
+	return out
+}
+
+func databagSnap(sp recording.SpanRow, rel, entity string, body json.RawMessage) Snapshot {
+	return Snapshot{
+		Model:           sp.Model,
+		Kind:            KindDatabag,
+		Scope:           "databag:" + rel + ":" + entity,
+		Body:            append([]byte(nil), body...),
+		Ts:              sp.Start,
+		ProducingSpanID: sp.SpanID,
+	}
+}
+
+// hasContent reports whether a raw JSON value is a non-empty object.
+func hasContent(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return s != "" && s != "null" && s != "{}"
+}
+
+// relationKey normalises a relation tag into a stable display key:
+//
+//	"relation-loki.certificates#ca.certificates" -> "loki.certificates#ca.certificates"
+//
+// Numeric relation ids (from EnterScope-style params) are returned as-is.
+func relationKey(relation string) string {
+	return strings.TrimPrefix(relation, "relation-")
+}
+
+// appName turns "grafana/0" into "grafana"; returns the input unchanged when it
+// is not a unit name.
+func appName(unit string) string {
+	if i := strings.IndexByte(unit, '/'); i >= 0 {
+		return unit[:i]
+	}
+	return unit
 }
 
 // entityName turns a Juju entity tag into a display name:

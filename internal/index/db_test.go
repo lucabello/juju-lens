@@ -249,3 +249,47 @@ func TestLogsForSpanCorrelation(t *testing.T) {
 		t.Errorf("in-window different-unit line must not correlate")
 	}
 }
+
+func TestPointInTimeAndDatabagQueries(t *testing.T) {
+	db := openTempDB(t)
+	base := time.Date(2026, 7, 4, 14, 0, 0, 0, time.UTC)
+	// Two unit-status snapshots for grafana/0 (waiting -> active) and one for
+	// prometheus/0 that only appears later.
+	_ = db.InsertSnapshot("m", base, "unit-status", "unit-status:grafana/0", `{"value":"waiting"}`, "sp1")
+	_ = db.InsertSnapshot("m", base.Add(10*time.Second), "unit-status", "unit-status:grafana/0", `{"value":"active"}`, "sp2")
+	_ = db.InsertSnapshot("m", base.Add(20*time.Second), "unit-status", "unit-status:prometheus/0", `{"value":"active"}`, "sp3")
+	// A databag written twice (diff source).
+	_ = db.InsertSnapshot("m", base, "databag", "databag:a.b#c.d:grafana/0", `{"addr":"1.1.1.1"}`, "spA")
+	_ = db.InsertSnapshot("m", base.Add(30*time.Second), "databag", "databag:a.b#c.d:grafana/0", `{"addr":"2.2.2.2"}`, "spB")
+
+	mid, _ := db.Models() // model id
+	modelID := mid[0].ID
+
+	// As of base+5s: grafana/0 is still "waiting", prometheus not present yet.
+	rows, err := db.LatestPerScopeAsOf(modelID, "unit-status", base.Add(5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Scope != "unit-status:grafana/0" {
+		t.Fatalf("as-of+5s: want only grafana/0, got %+v", rows)
+	}
+	if rows[0].Body != `{"value":"waiting"}` {
+		t.Errorf("as-of+5s grafana body = %s, want waiting", rows[0].Body)
+	}
+	// As of base+25s: both units present, grafana now active.
+	rows, _ = db.LatestPerScopeAsOf(modelID, "unit-status", base.Add(25*time.Second))
+	if len(rows) != 2 {
+		t.Fatalf("as-of+25s: want 2 scopes, got %d", len(rows))
+	}
+
+	// Databag diff source: the span spB wrote the second value; the previous
+	// value (before spB's ts) is the first.
+	snaps, _ := db.SnapshotsByProducingSpan("spB", "databag")
+	if len(snaps) != 1 || snaps[0].Body != `{"addr":"2.2.2.2"}` {
+		t.Fatalf("SnapshotsByProducingSpan(spB) = %+v", snaps)
+	}
+	prev, _ := db.PrevSnapshotBefore(modelID, "databag:a.b#c.d:grafana/0", base.Add(30*time.Second))
+	if prev != `{"addr":"1.1.1.1"}` {
+		t.Errorf("prev databag = %s, want 1.1.1.1", prev)
+	}
+}

@@ -122,6 +122,62 @@ func TestExtractAgentStatusScope(t *testing.T) {
 	}
 }
 
+func TestDatabagSnapshotsFromCommitHookChanges(t *testing.T) {
+	base := time.Date(2026, 7, 4, 14, 0, 0, 0, time.UTC)
+	params := `{"args":[{"tag":"unit-loki-0","update-network-info":false,` +
+		`"relation-unit-settings":[` +
+		`{"relation":"relation-loki.certificates#ca.certificates","unit":"unit-loki-0",` +
+		`"settings":{"csr":"PEM"},"application-settings":null},` +
+		`{"relation":"relation-prometheus.metrics-endpoint#loki.metrics-endpoint","unit":"unit-loki-0",` +
+		`"settings":{"addr":"10.0.0.1"},"application-settings":{"scrape":"cfg"}},` +
+		`{"relation":"relation-x#y","unit":"unit-loki-0","settings":{},"application-settings":null}]}]}`
+	sp := statusSpan("s1", "CommitHookChanges", "loki/0", base, params)
+	got := databagSnapshots(sp, params)
+
+	// Expect: loki/0 unit databag on both non-empty relations, plus the loki
+	// application databag on the second (application-settings present). The
+	// empty-settings third relation yields nothing.
+	want := map[string]string{
+		"databag:loki.certificates#ca.certificates:loki/0":                 `{"csr":"PEM"}`,
+		"databag:prometheus.metrics-endpoint#loki.metrics-endpoint:loki/0": `{"addr":"10.0.0.1"}`,
+		"databag:prometheus.metrics-endpoint#loki.metrics-endpoint:loki":   `{"scrape":"cfg"}`,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d databag snapshots, got %d: %+v", len(want), len(got), got)
+	}
+	for _, s := range got {
+		if s.Kind != KindDatabag {
+			t.Errorf("scope %s kind = %s, want databag", s.Scope, s.Kind)
+		}
+		wb, ok := want[s.Scope]
+		if !ok {
+			t.Errorf("unexpected scope %s", s.Scope)
+			continue
+		}
+		if string(s.Body) != wb {
+			t.Errorf("scope %s body = %s, want %s", s.Scope, s.Body, wb)
+		}
+		if s.ProducingSpanID != "s1" {
+			t.Errorf("scope %s missing producing span id", s.Scope)
+		}
+	}
+}
+
+func TestRelationForSpan(t *testing.T) {
+	cases := map[string]string{
+		`{"relation":"relation-a.b#c.d","unit":"unit-a-0"}`:                             "a.b#c.d",
+		`{"relation-unit-pairs":[{"relation":"relation-e.f#g.h","local-unit":"unit"}]}`: "e.f#g.h",
+		`{"args":[{"relation-unit-settings":[{"relation":"relation-i.j#k.l"}]}]}`:       "i.j#k.l",
+		`{"entities":[{"tag":"unit-a-0"}]}`:                                             "",
+	}
+	for params, want := range cases {
+		sp := recording.SpanRow{Attrs: map[string]string{"params": params}}
+		if got := RelationForSpan(sp); got != want {
+			t.Errorf("RelationForSpan(%s) = %q, want %q", params, got, want)
+		}
+	}
+}
+
 func TestEntityName(t *testing.T) {
 	cases := map[string]string{
 		"unit-grafana-0":         "grafana/0",

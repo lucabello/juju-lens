@@ -57,9 +57,14 @@ func runIndex(dir string) error {
 	if err != nil {
 		return err
 	}
-	for _, sp := range spans {
-		if err := db.InsertSpan(sp); err != nil {
-			return fmt.Errorf("insert span %s: %w", sp.SpanID, err)
+	for i := range spans {
+		// Enrich the span with the relation it concerns (from its params) so the
+		// timeline and relations pane can pivot on it.
+		if spans[i].Relation == "" {
+			spans[i].Relation = index.RelationForSpan(spans[i])
+		}
+		if err := db.InsertSpan(spans[i]); err != nil {
+			return fmt.Errorf("insert span %s: %w", spans[i].SpanID, err)
 		}
 	}
 	snaps := index.ExtractSnapshots(spans)

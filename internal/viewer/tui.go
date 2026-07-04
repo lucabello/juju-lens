@@ -58,30 +58,33 @@ func Run(dir string) error {
 // keymap groups the keybindings so bubbles/help can render them.
 type keymap struct {
 	Up, Down, PageUp, PageDown, Home, End key.Binding
-	Tab, ModelPick, Quit                  key.Binding
+	Tab, ModelPick, PointInTime, Diff     key.Binding
+	Quit                                  key.Binding
 }
 
 func defaultKeymap() keymap {
 	return keymap{
-		Up:        key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
-		Down:      key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
-		PageUp:    key.NewBinding(key.WithKeys("pgup", "b"), key.WithHelp("PgUp", "page up")),
-		PageDown:  key.NewBinding(key.WithKeys("pgdown", " ", "f"), key.WithHelp("PgDn", "page down")),
-		Home:      key.NewBinding(key.WithKeys("home", "g"), key.WithHelp("Home", "top")),
-		End:       key.NewBinding(key.WithKeys("end", "G"), key.WithHelp("End", "bottom")),
-		Tab:       key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "cycle focus")),
-		ModelPick: key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "pick model")),
-		Quit:      key.NewBinding(key.WithKeys("q", "esc", "ctrl+c"), key.WithHelp("q", "quit")),
+		Up:          key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Down:        key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		PageUp:      key.NewBinding(key.WithKeys("pgup", "b"), key.WithHelp("PgUp", "page up")),
+		PageDown:    key.NewBinding(key.WithKeys("pgdown", " ", "f"), key.WithHelp("PgDn", "page down")),
+		Home:        key.NewBinding(key.WithKeys("home", "g"), key.WithHelp("Home", "top")),
+		End:         key.NewBinding(key.WithKeys("end", "G"), key.WithHelp("End", "bottom")),
+		Tab:         key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "cycle focus")),
+		ModelPick:   key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "pick model")),
+		PointInTime: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "status @cursor")),
+		Diff:        key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "databag diff")),
+		Quit:        key.NewBinding(key.WithKeys("q", "esc", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
 func (k keymap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.PageDown, k.Home, k.End, k.Tab, k.ModelPick, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Tab, k.PointInTime, k.Diff, k.ModelPick, k.Quit}
 }
 
 func (k keymap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
-		{k.Tab, k.ModelPick, k.Quit}}
+		{k.Tab, k.PointInTime, k.Diff, k.ModelPick, k.Quit}}
 }
 
 // paneID identifies the focusable centre-column selection surface. The
@@ -103,8 +106,11 @@ type model struct {
 	activeModel  index.Model // zero-value means "all models"
 	spans        []recording.SpanRow
 	appTree      appTree
-	appStatuses  map[string]statusValue // app -> latest known status
-	unitStatuses map[string]statusValue // unit -> latest known status
+	appStatuses  map[string]statusValue // app -> status (latest, or as-of cursor in pit mode)
+	unitStatuses map[string]statusValue // unit -> status
+	relations    []relationSummary      // relation databags (as-of cursor in pit mode)
+	pit          bool                   // point-in-time: status/relations as of the cursor
+	diff         bool                   // databag diff mode in the details pane
 
 	cursor  int
 	focus   paneID
@@ -150,9 +156,25 @@ func (m *model) setActiveModel(mm index.Model) {
 	m.spans = spans
 	m.cursor = 0
 	m.appTree = buildAppTree(spans)
-	m.appStatuses = latestByScope(m.db, mm.ID, string(index.KindAppStatus), "app-status:")
-	m.unitStatuses = latestByScope(m.db, mm.ID, string(index.KindUnitStatus), "unit-status:")
+	m.refreshStatus()
 	m.refreshDetails()
+}
+
+// refreshStatus recomputes the Applications/Units/Relations panes. In
+// point-in-time mode (toggled with `s`) it asks for the state as it stood at
+// the selected span's timestamp; otherwise it shows the latest known value.
+func (m *model) refreshStatus() {
+	rows := func(kind string) []index.SnapshotRow {
+		if m.pit && len(m.spans) > 0 {
+			r, _ := m.db.LatestPerScopeAsOf(m.activeModel.ID, kind, m.currentSpan().Start)
+			return r
+		}
+		r, _ := m.db.LatestPerScope(m.activeModel.ID, kind)
+		return r
+	}
+	m.appStatuses = scopeMap(rows(string(index.KindAppStatus)), "app-status:")
+	m.unitStatuses = scopeMap(rows(string(index.KindUnitStatus)), "unit-status:")
+	m.relations = buildRelations(rows(string(index.KindDatabag)))
 }
 
 func (m *model) Init() tea.Cmd { return nil }
@@ -198,6 +220,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.allModels) > 1 {
 				m.picker = newModelPicker(m.allModels)
 			}
+			return m, nil
+		case key.Matches(msg, m.keys.PointInTime):
+			// Toggle point-in-time: status/relations as of the selected span.
+			m.pit = !m.pit
+			m.refreshStatus()
+			return m, nil
+		case key.Matches(msg, m.keys.Diff):
+			// Toggle databag diff mode in the details pane.
+			m.diff = !m.diff
+			m.refreshDetails()
+			return m, nil
 		}
 		// When the details pane is focused, navigation keys scroll it instead of
 		// moving the timeline cursor (so long details + correlated logs are
@@ -219,9 +252,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Home):
 			m.cursor = 0
 			m.refreshDetails()
+			if m.pit {
+				m.refreshStatus()
+			}
 		case key.Matches(msg, m.keys.End):
 			m.cursor = len(m.spans) - 1
 			m.refreshDetails()
+			if m.pit {
+				m.refreshStatus()
+			}
 		}
 		return m, nil
 	}
@@ -243,6 +282,10 @@ func (m *model) moveCursor(delta int) {
 		m.cursor = len(m.spans) - 1
 	}
 	m.refreshDetails()
+	// In point-in-time mode the Status/Relations panes track the cursor.
+	if m.pit {
+		m.refreshStatus()
+	}
 }
 
 func (m *model) View() string {
