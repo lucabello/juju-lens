@@ -22,7 +22,7 @@ import (
 
 // SchemaVersion is bumped whenever the SQL below changes shape. The rebuild
 // command uses it to decide whether an existing DB can be reused.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // The full schema. Statements are executed in order.
 var schema = []string{
@@ -82,6 +82,28 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS snap_by_scope_ts ON snapshots(model_id, scope, ts)`,
 	`CREATE INDEX IF NOT EXISTS snap_by_kind_ts  ON snapshots(model_id, kind, ts)`,
+
+	// Log records ingested from `juju debug-log` (M3). Joined to spans by
+	// span_id when a line carries one, else by (unit, ts window). Raw text lines
+	// remain the source of truth under raw/juju/; this table is rebuildable.
+	`CREATE TABLE IF NOT EXISTS log_records (
+	    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	    model_id   INTEGER REFERENCES models(id),
+	    ts         INTEGER NOT NULL,   -- unix nano
+	    source     TEXT NOT NULL,      -- 'debug-log'
+	    entity     TEXT,               -- raw juju entity tag
+	    unit       TEXT,               -- 'grafana/0' when the entity is a unit
+	    level      TEXT,
+	    module     TEXT,
+	    body       TEXT NOT NULL,
+	    trace_id   TEXT,
+	    span_id    TEXT,
+	    raw_file   TEXT,
+	    raw_line   INTEGER
+	)`,
+	`CREATE INDEX IF NOT EXISTS log_by_ts       ON log_records(model_id, ts)`,
+	`CREATE INDEX IF NOT EXISTS log_by_unit_ts  ON log_records(model_id, unit, ts)`,
+	`CREATE INDEX IF NOT EXISTS log_by_span     ON log_records(span_id)`,
 }
 
 // DB is a thin wrapper around *sql.DB carrying convenience methods for the
@@ -221,6 +243,85 @@ func (d *DB) InsertSnapshot(model string, ts time.Time, kind, scope, bodyJSON, p
 		modelID, ts.UnixNano(), kind, scope, bodyJSON, producingSpanID,
 	)
 	return err
+}
+
+// InsertLog appends one parsed debug-log record.
+func (d *DB) InsertLog(rec recording.LogRecord) error {
+	modelID, err := d.UpsertModel(rec.Model)
+	if err != nil {
+		return err
+	}
+	_, err = d.sql.Exec(
+		`INSERT INTO log_records(model_id, ts, source, entity, unit, level, module,
+		                         body, trace_id, span_id, raw_file, raw_line)
+		 VALUES (?, ?, 'debug-log', NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''),
+		         NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)`,
+		modelID, rec.Ts.UnixNano(), rec.Entity, rec.Unit, rec.Level, rec.Module,
+		rec.Message, rec.TraceID, rec.SpanID, rec.RawFile, rec.RawLine,
+	)
+	return err
+}
+
+// LogRow is one row from log_records returned to the viewer.
+type LogRow struct {
+	Ts      time.Time
+	Unit    string
+	Level   string
+	Module  string
+	Body    string
+	SpanID  string
+	Matched string // why this log correlated: "span" (exact) or "window" (fuzzy)
+}
+
+// LogsForSpan returns the log records correlated to a span, per the §7 join:
+// any line carrying the span's span_id (exact match), plus lines from the same
+// unit within [start-window, end+window] (fuzzy fallback). Results are ordered
+// by time and de-duplicated, capped at limit rows. A zero modelID searches all
+// models.
+func (d *DB) LogsForSpan(modelID int64, spanID, unit string, start, end time.Time, window time.Duration, limit int) ([]LogRow, error) {
+	lo := start.Add(-window).UnixNano()
+	hi := end.Add(window).UnixNano()
+	// One query with an OR keeps ordering and de-dup simple: match the exact
+	// span_id, or the same unit inside the time window.
+	q := `SELECT ts, COALESCE(unit,''), COALESCE(level,''), COALESCE(module,''),
+	             body, COALESCE(span_id,''),
+	             CASE WHEN span_id = ? AND ? <> '' THEN 'span' ELSE 'window' END
+	        FROM log_records
+	       WHERE (? = 0 OR model_id = ?)
+	         AND ( (span_id = ? AND ? <> '')
+	            OR (unit = ? AND ? <> '' AND ts BETWEEN ? AND ?) )
+	       ORDER BY ts
+	       LIMIT ?`
+	rows, err := d.sql.Query(q,
+		spanID, spanID,
+		modelID, modelID,
+		spanID, spanID,
+		unit, unit, lo, hi,
+		limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LogRow
+	for rows.Next() {
+		var (
+			r    LogRow
+			nano int64
+		)
+		if err := rows.Scan(&nano, &r.Unit, &r.Level, &r.Module, &r.Body, &r.SpanID, &r.Matched); err != nil {
+			return nil, err
+		}
+		r.Ts = time.Unix(0, nano).UTC()
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// LogCount returns the total number of log records in the DB.
+func (d *DB) LogCount() (int64, error) {
+	var n int64
+	err := d.sql.QueryRow(`SELECT COUNT(*) FROM log_records`).Scan(&n)
+	return n, err
 }
 
 // Model represents a row in the models table.

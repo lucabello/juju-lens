@@ -91,6 +91,7 @@ type paneID int
 
 const (
 	paneTimeline paneID = iota
+	paneDetails         // scrollable details/logs pane below the timeline
 )
 
 type model struct {
@@ -181,6 +182,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		// Tab cycles focus between the timeline and the details/logs pane.
+		if key.Matches(msg, m.keys.Tab) {
+			if m.focus == paneTimeline {
+				m.focus = paneDetails
+			} else {
+				m.focus = paneTimeline
+			}
+			return m, nil
+		}
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
@@ -188,6 +198,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.allModels) > 1 {
 				m.picker = newModelPicker(m.allModels)
 			}
+		}
+		// When the details pane is focused, navigation keys scroll it instead of
+		// moving the timeline cursor (so long details + correlated logs are
+		// reachable). Otherwise they drive the timeline selection.
+		if m.focus == paneDetails {
+			var cmd tea.Cmd
+			m.details, cmd = m.details.Update(msg)
+			return m, cmd
+		}
+		switch {
 		case key.Matches(msg, m.keys.Up):
 			m.moveCursor(-1)
 		case key.Matches(msg, m.keys.Down):
@@ -203,6 +223,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = len(m.spans) - 1
 			m.refreshDetails()
 		}
+		return m, nil
 	}
 	var cmd tea.Cmd
 	m.details, cmd = m.details.Update(msg)

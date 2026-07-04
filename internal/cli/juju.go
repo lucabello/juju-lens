@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -110,6 +111,29 @@ func resolveScope(controllerName, modelName string) (*jujuTopology, probeFilter,
 		filter.controllerUUID = topo.controllerUUID
 	}
 	return topo, filter, nil
+}
+
+// modelsToStream returns the model short-names debug-log should tail for the
+// resolved scope: the single scoped model, or every model on the scoped
+// controller. Nil when no juju topology was resolved.
+func modelsToStream(topo *jujuTopology, filter probeFilter) []string {
+	if topo == nil {
+		return nil
+	}
+	if filter.modelUUID != "" {
+		if name := topo.modelName[filter.modelUUID]; name != "" {
+			return []string{name}
+		}
+		return nil
+	}
+	out := make([]string, 0, len(topo.modelName))
+	for _, name := range topo.modelName {
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // probeFilter is the recorder-side representation of the scope; it is passed to

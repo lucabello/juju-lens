@@ -202,3 +202,50 @@ func TestSnapshotLatest(t *testing.T) {
 		t.Fatalf("prometheus row wrong: %q", byScope["unit-status:prometheus/0"])
 	}
 }
+
+func TestLogsForSpanCorrelation(t *testing.T) {
+	db := openTempDB(t)
+	base := time.Date(2026, 7, 4, 14, 0, 0, 0, time.UTC)
+	mustLog := func(rec recording.LogRecord) {
+		t.Helper()
+		if err := db.InsertLog(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// grafana/0 lines: two within the window, one far outside.
+	mustLog(recording.LogRecord{Model: "m", Ts: base.Add(-2 * time.Second), Entity: "unit-grafana-0", Unit: "grafana/0", Level: "INFO", Message: "before"})
+	mustLog(recording.LogRecord{Model: "m", Ts: base.Add(1 * time.Second), Entity: "unit-grafana-0", Unit: "grafana/0", Level: "INFO", Message: "during"})
+	mustLog(recording.LogRecord{Model: "m", Ts: base.Add(1 * time.Hour), Entity: "unit-grafana-0", Unit: "grafana/0", Level: "INFO", Message: "way later"})
+	// A different unit inside the window must NOT correlate by window.
+	mustLog(recording.LogRecord{Model: "m", Ts: base, Entity: "unit-prometheus-0", Unit: "prometheus/0", Level: "INFO", Message: "other unit"})
+	// A line carrying the span id must correlate even out of window / other unit.
+	mustLog(recording.LogRecord{Model: "m", Ts: base.Add(2 * time.Hour), Entity: "unit-prometheus-0", Unit: "prometheus/0", Level: "DEBUG", SpanID: "abc123", Message: "exact span match"})
+
+	// Span: grafana/0, 200ms around base, id abc123.
+	logs, err := db.LogsForSpan(0, "abc123", "grafana/0", base, base.Add(200*time.Millisecond), 5*time.Second, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, l := range logs {
+		got[l.Body] = l.Matched
+	}
+	if _, ok := got["before"]; !ok {
+		t.Errorf("expected 'before' (window) to correlate")
+	}
+	if _, ok := got["during"]; !ok {
+		t.Errorf("expected 'during' (window) to correlate")
+	}
+	if got["exact span match"] != "span" {
+		t.Errorf("expected span-id line marked 'span', got %q", got["exact span match"])
+	}
+	if got["during"] != "window" {
+		t.Errorf("expected same-unit window line marked 'window', got %q", got["during"])
+	}
+	if _, ok := got["way later"]; ok {
+		t.Errorf("out-of-window same-unit line must not correlate")
+	}
+	if _, ok := got["other unit"]; ok {
+		t.Errorf("in-window different-unit line must not correlate")
+	}
+}

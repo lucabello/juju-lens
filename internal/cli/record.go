@@ -30,6 +30,7 @@ type recordFlags struct {
 	sshTarget   string
 	probePath   string
 	pids        []int
+	debugLog    bool
 	maxDuration time.Duration
 	maxSize     int64
 }
@@ -67,6 +68,7 @@ Kubernetes attach (kubectl-debug, daemonset) lands in M6.`,
 	cmd.Flags().StringVar(&f.sshTarget, "ssh-target", "", "machine to 'juju ssh' into for ssh attach (e.g. 'controller/0')")
 	cmd.Flags().StringVar(&f.probePath, "probe-path", "", "path to the juju-lens-probe binary (default: next to juju-lens, then $PATH)")
 	cmd.Flags().IntSliceVar(&f.pids, "pid", nil, "restrict the probe to these PIDs (default: all jujud/containeragent)")
+	cmd.Flags().BoolVar(&f.debugLog, "debug-log", true, "also stream 'juju debug-log' for the scoped models")
 	cmd.Flags().DurationVar(&f.maxDuration, "max-duration", 0, "stop recording after this duration (0 = no limit)")
 	cmd.Flags().Int64Var(&f.maxSize, "max-size", 0, "stop recording after this many bytes of raw/ (0 = no limit)")
 	return cmd
@@ -139,6 +141,22 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Optional debug-log source: one `juju debug-log` tail per scoped model.
+	// It shares the recording's context so it stops with everything else.
+	var logIng *logIngester
+	var logWG sync.WaitGroup
+	if f.debugLog && topo != nil {
+		models := modelsToStream(topo, filter)
+		if len(models) > 0 {
+			// Controller scope (no single model pinned) also watches for models
+			// added during the recording.
+			discover := filter.modelUUID == ""
+			logIng = newLogIngester(layout, topo.controllerName, discover)
+			man.AddSource(recording.SourceStatus{Name: "debug-log", Kind: "juju-debug-log", Started: time.Now().UTC()})
+			logIng.start(ctx, &logWG, models)
+		}
+	}
 
 	stdout, err := probeCmd.StdoutPipe()
 	if err != nil {
@@ -219,6 +237,15 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 	_ = probeCmd.Process.Kill()
 	_ = probeCmd.Wait()
 
+	// Stop the debug-log streams (ctx is already cancelled, which signals them)
+	// and wait for their goroutines to flush.
+	if logIng != nil {
+		logIng.stop()
+		logWG.Wait()
+		man.FinishSource("debug-log", nil)
+		man.Sources[len(man.Sources)-1].Records = logIng.count()
+	}
+
 	if endReason == recording.EndReasonUnknown {
 		if ingestErr != nil && !errors.Is(ingestErr, context.Canceled) {
 			endReason = recording.EndReasonError
@@ -235,8 +262,12 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 		fmt.Fprintf(os.Stderr, "juju-lens: indexing recording failed: %v (run `juju-lens index %s` to retry)\n",
 			err, layout.Root)
 	}
-	fmt.Fprintf(os.Stderr, "juju-lens: recording saved to %s (%d RPC messages captured)\n",
-		layout.Root, w.count())
+	logMsg := ""
+	if logIng != nil {
+		logMsg = fmt.Sprintf(", %d debug-log lines", logIng.count())
+	}
+	fmt.Fprintf(os.Stderr, "juju-lens: recording saved to %s (%d RPC messages%s captured)\n",
+		layout.Root, w.count(), logMsg)
 	if ingestErr != nil && !errors.Is(ingestErr, context.Canceled) {
 		return ingestErr
 	}

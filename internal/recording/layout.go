@@ -37,6 +37,16 @@ func (l Layout) JujuDir(model string) string {
 	return filepath.Join(l.RawDir(), "juju", sanitizeSegment(model))
 }
 
+// JujuLogFileFor returns a PathForHourFunc naming the per-hour debug-log file
+// for a single model: raw/juju/<model>/debug-log-<hour>.log. The files hold the
+// raw `juju debug-log` text lines verbatim (greppable; the index parses them).
+func (l Layout) JujuLogFileFor(model string) func(hour string) string {
+	dir := l.JujuDir(model)
+	return func(hour string) string {
+		return filepath.Join(dir, fmt.Sprintf("debug-log-%s.log", hour))
+	}
+}
+
 // K8sDir returns raw/k8s/<model>/, holding pod logs per model.
 func (l Layout) K8sDir(model string) string {
 	return filepath.Join(l.RawDir(), "k8s", sanitizeSegment(model))

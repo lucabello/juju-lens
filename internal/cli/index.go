@@ -69,7 +69,18 @@ func runIndex(dir string) error {
 			return fmt.Errorf("insert snapshot %s: %w", s.Scope, err)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "juju-lens: indexed %d spans and %d snapshots into %s\n",
-		len(spans), len(snaps), layout.IndexDB())
+
+	logs, err := recording.LoadLogs(dir)
+	if err != nil {
+		return err
+	}
+	for _, rec := range logs {
+		if err := db.InsertLog(rec); err != nil {
+			return fmt.Errorf("insert log record: %w", err)
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "juju-lens: indexed %d spans, %d snapshots, %d log records into %s\n",
+		len(spans), len(snaps), len(logs), layout.IndexDB())
 	return nil
 }
