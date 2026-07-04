@@ -28,6 +28,12 @@ func (m *model) renderDetails(w, h int) string {
 }
 
 func (m *model) refreshDetails() {
+	// When the Relations pane is focused, the details area shows the selected
+	// relation's databags instead of the current span.
+	if m.focus == paneRelations && m.relCursor < len(m.relations) {
+		m.renderRelationDetails(m.relations[m.relCursor])
+		return
+	}
 	if len(m.spans) == 0 {
 		m.details.SetContent("")
 		return
@@ -87,6 +93,47 @@ func (m *model) refreshDetails() {
 		sort.Strings(keys)
 		for _, k := range keys {
 			fmt.Fprintf(&b, "  %s = %s\n", k, sp.Attrs[k])
+		}
+	}
+	m.details.SetContent(b.String())
+	m.details.GotoTop()
+}
+
+// renderRelationDetails shows every entity's databag on the selected relation.
+// With diff mode (`d`) each entity's databag is shown as a diff against its
+// previous value; otherwise the current key/values are listed. Point-in-time
+// mode flows through automatically, since m.databags holds the as-of rows.
+func (m *model) renderRelationDetails(rel relationSummary) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", lipgloss.NewStyle().Bold(true).Render("Relation "+strings.Join(rel.Endpoints, " ↔ ")))
+	if m.pit && len(m.spans) > 0 {
+		fmt.Fprintf(&b, "  %s\n", styleDim.Render("as of "+m.currentSpan().Start.Format("15:04:05.000")))
+	}
+	hint := "press d for diff"
+	if m.diff {
+		hint = "diff vs previous — press d for values"
+	}
+	fmt.Fprintf(&b, "  %s\n", styleDim.Render(hint))
+
+	for _, entity := range rel.Entities {
+		scope := "databag:" + rel.Key + ":" + entity
+		row, ok := m.databags[scope]
+		fmt.Fprintf(&b, "\n%s\n", styleHook.Render("  "+entity))
+		if !ok {
+			fmt.Fprintf(&b, "    %s\n", styleDim.Render("(no databag)"))
+			continue
+		}
+		cur := parseFlatMap([]byte(row.Body))
+		if m.diff {
+			prevBody, _ := m.db.PrevSnapshotBefore(m.activeModel.ID, scope, row.Ts)
+			writeDatabagDiff(&b, parseFlatMap([]byte(prevBody)), cur)
+			continue
+		}
+		if len(cur) == 0 {
+			fmt.Fprintf(&b, "    %s\n", styleDim.Render("(empty)"))
+		}
+		for _, k := range sortedKeys(cur) {
+			fmt.Fprintf(&b, "    %s = %s\n", k, oneLine(cur[k]))
 		}
 	}
 	m.details.SetContent(b.String())

@@ -5,10 +5,10 @@
 //   - Left column   — apps sidebar (apps -> units tree).
 //   - Centre column — timeline of spans (top) and details of the selection
 //     (bottom).
-//   - Right column  — status pane with two independent sections
-//     (Applications, Units) reconstructed from the "latest known" snapshot
-//     at the timeline cursor. M4 will upgrade the pane to true point-in-time
-//     reconstruction.
+//   - Right column  — status pane with Applications, Units and Relations
+//     sections. By default it shows the latest known snapshot per scope;
+//     `s` switches to point-in-time (state as of the timeline cursor). The
+//     Relations section is focusable (Tab) to inspect a relation's databags.
 //
 // The Model owns the SQLite handle and routes messages to the individual
 // panes; each pane is a small struct with its own render function. Queries
@@ -93,8 +93,9 @@ func (k keymap) FullHelp() [][]key.Binding {
 type paneID int
 
 const (
-	paneTimeline paneID = iota
-	paneDetails         // scrollable details/logs pane below the timeline
+	paneTimeline  paneID = iota
+	paneDetails          // scrollable details/logs pane below the timeline
+	paneRelations        // navigable relations list in the status column
 )
 
 type model struct {
@@ -106,11 +107,13 @@ type model struct {
 	activeModel  index.Model // zero-value means "all models"
 	spans        []recording.SpanRow
 	appTree      appTree
-	appStatuses  map[string]statusValue // app -> status (latest, or as-of cursor in pit mode)
-	unitStatuses map[string]statusValue // unit -> status
-	relations    []relationSummary      // relation databags (as-of cursor in pit mode)
-	pit          bool                   // point-in-time: status/relations as of the cursor
-	diff         bool                   // databag diff mode in the details pane
+	appStatuses  map[string]statusValue       // app -> status (latest, or as-of cursor in pit mode)
+	unitStatuses map[string]statusValue       // unit -> status
+	relations    []relationSummary            // relation databags (as-of cursor in pit mode)
+	databags     map[string]index.SnapshotRow // scope -> latest/as-of databag row
+	relCursor    int                          // selected relation when the Relations pane is focused
+	pit          bool                         // point-in-time: status/relations as of the cursor
+	diff         bool                         // databag diff mode in the details pane
 
 	cursor  int
 	focus   paneID
@@ -174,7 +177,15 @@ func (m *model) refreshStatus() {
 	}
 	m.appStatuses = scopeMap(rows(string(index.KindAppStatus)), "app-status:")
 	m.unitStatuses = scopeMap(rows(string(index.KindUnitStatus)), "unit-status:")
-	m.relations = buildRelations(rows(string(index.KindDatabag)))
+	databagRows := rows(string(index.KindDatabag))
+	m.relations = buildRelations(databagRows)
+	m.databags = map[string]index.SnapshotRow{}
+	for _, r := range databagRows {
+		m.databags[r.Scope] = r
+	}
+	if m.relCursor >= len(m.relations) {
+		m.relCursor = max(0, len(m.relations)-1)
+	}
 }
 
 func (m *model) Init() tea.Cmd { return nil }
@@ -204,13 +215,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// Tab cycles focus between the timeline and the details/logs pane.
+		// Tab cycles focus: timeline -> details -> relations -> timeline
+		// (relations is skipped when the recording has none).
 		if key.Matches(msg, m.keys.Tab) {
-			if m.focus == paneTimeline {
-				m.focus = paneDetails
-			} else {
-				m.focus = paneTimeline
-			}
+			m.cycleFocus()
 			return m, nil
 		}
 		switch {
@@ -239,6 +247,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.details, cmd = m.details.Update(msg)
 			return m, cmd
+		}
+		// The Relations pane, when focused, takes ↑/↓ to move its selection and
+		// shows the chosen relation's databags in the details pane.
+		if m.focus == paneRelations {
+			switch {
+			case key.Matches(msg, m.keys.Up):
+				m.moveRelCursor(-1)
+			case key.Matches(msg, m.keys.Down):
+				m.moveRelCursor(+1)
+			}
+			return m, nil
 		}
 		switch {
 		case key.Matches(msg, m.keys.Up):
@@ -286,6 +305,42 @@ func (m *model) moveCursor(delta int) {
 	if m.pit {
 		m.refreshStatus()
 	}
+}
+
+// cycleFocus advances the focused pane: timeline -> details -> relations ->
+// timeline, skipping the relations pane when there are no relations. The
+// details pane re-renders so it reflects the newly focused mode (span vs
+// relation databags).
+func (m *model) cycleFocus() {
+	switch m.focus {
+	case paneTimeline:
+		m.focus = paneDetails
+	case paneDetails:
+		if len(m.relations) > 0 {
+			m.focus = paneRelations
+		} else {
+			m.focus = paneTimeline
+		}
+	default:
+		m.focus = paneTimeline
+	}
+	m.refreshDetails()
+}
+
+// moveRelCursor changes the selected relation and refreshes the details pane
+// (which shows that relation's databags while the Relations pane is focused).
+func (m *model) moveRelCursor(delta int) {
+	if len(m.relations) == 0 {
+		return
+	}
+	m.relCursor += delta
+	if m.relCursor < 0 {
+		m.relCursor = 0
+	}
+	if m.relCursor >= len(m.relations) {
+		m.relCursor = len(m.relations) - 1
+	}
+	m.refreshDetails()
 }
 
 func (m *model) View() string {

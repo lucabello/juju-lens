@@ -57,6 +57,9 @@ func runIndex(dir string) error {
 	if err != nil {
 		return err
 	}
+	// Attribute each RPC to the hook the unit was running (from its SetState
+	// operations) so the timeline reads as hooks, not bare method names.
+	index.LabelHooks(spans)
 	for i := range spans {
 		// Enrich the span with the relation it concerns (from its params) so the
 		// timeline and relations pane can pivot on it.

@@ -163,8 +163,16 @@ func (m *model) renderStatusPane() string {
 
 	if len(m.relations) > 0 {
 		lines = append(lines, "")
-		lines = append(lines, styleSection.Render("Relations"))
-		lines = append(lines, relationRows(m.relations, inner)...)
+		header := "Relations"
+		if m.focus == paneRelations {
+			header += styleDim.Render("  (↑/↓ select · Tab exit)")
+		}
+		lines = append(lines, styleSection.Render(header))
+		sel := -1
+		if m.focus == paneRelations {
+			sel = m.relCursor
+		}
+		lines = append(lines, relationRows(m.relations, inner, sel)...)
 	}
 
 	body := max(1, h-2)
@@ -204,11 +212,18 @@ func statusRows(names []string, byName map[string]statusValue, inner int) []stri
 }
 
 // relationRows renders the Relations section: one line per relation showing its
-// endpoints, then a dim line listing the entities with a databag on it.
-func relationRows(rels []relationSummary, inner int) []string {
+// endpoints, then a dim line listing the entities with a databag on it. sel is
+// the index of the selected relation (-1 for none), marked with a caret.
+func relationRows(rels []relationSummary, inner, sel int) []string {
 	var out []string
-	for _, r := range rels {
-		out = append(out, truncate("  "+styleHook.Render(strings.Join(r.Endpoints, " ↔ ")), inner))
+	for i, r := range rels {
+		marker := "  "
+		eps := styleHook.Render(strings.Join(r.Endpoints, " ↔ "))
+		if i == sel {
+			marker = styleHook.Render("▸ ")
+			eps = styleSelected.Render(strings.Join(r.Endpoints, " ↔ "))
+		}
+		out = append(out, truncate(marker+eps, inner))
 		if len(r.Entities) > 0 {
 			out = append(out, truncate("      "+styleDim.Render(strings.Join(r.Entities, ", ")), inner))
 		}
