@@ -517,10 +517,11 @@ Each milestone ends with a working, useful tool.
 5. **M5 — Follow mode** *(≈2 days)*
    - `view --follow` for live recordings.
    - Switch the `record` indexer from post-hoc to incremental so `view --follow` can tail growing recordings.
-6. **M6 — K8s attach + K8s/machine log ingesters** *(≈1 week)*
-   - `--attach kubectl-debug` (ephemeral) and `--attach daemonset` (long-lived) modes for CAAS controllers and unit sidecars; `containeragent` binary attach in addition to `jujud`.
-   - Kubernetes shared informer per model, dynamic pod log followers.
-   - `juju ssh` + `journalctl -f -o json` ingester with dynamic host discovery.
+6. **M6 — K8s/machine log ingesters** *(≈3 days)*
+   - K8s workload-log ingester: `kubectl logs -f --timestamps` per workload container (the charm sidecar is skipped — debug-log already covers the container-agent), with dynamic pod/model discovery, written under `raw/k8s/<model>/<pod>/<container>/`.
+   - Machine journald ingester: `juju ssh … journalctl -f -o json` per machine with dynamic host/model discovery, written under `raw/machine/<model>/<host>/`.
+   - Both share the log-record model and correlate to spans exactly like debug-log; each reconciles on a ticker and self-heals dropped streams.
+   - Out of scope (deferred): eBPF **attach** on Kubernetes — `--attach kubectl-debug`/`--attach daemonset` modes and a shared informer for probe placement. The RPC probe already attaches to `containeragent` where it runs; only these CAAS/sidecar staging modes are deferred, since they need a probe container image and registry to test.
 7. **M7 — Polish** *(open-ended)*
    - Filter overlay, time-jump, split view, mouse support, themes, help overlay.
    - `verify`, `export`, `index` subcommands.

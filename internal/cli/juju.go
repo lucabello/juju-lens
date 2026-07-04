@@ -19,6 +19,9 @@ type jujuTopology struct {
 	controllerUUID string
 	// modelName maps a model UUID to its short name (e.g. "cos-lite").
 	modelName map[string]string
+	// modelType maps a model short name to "caas" or "iaas"; it routes each
+	// model to the right log ingester (k8s pod logs vs machine journald).
+	modelType map[string]string
 	// controllerNameByUUID maps a controller UUID to its name.
 	controllerNameByUUID map[string]string
 }
@@ -46,6 +49,7 @@ type modelsJSON struct {
 	Models []struct {
 		ShortName      string `json:"short-name"`
 		ModelUUID      string `json:"model-uuid"`
+		ModelType      string `json:"model-type"` // "caas" | "iaas"
 		ControllerUUID string `json:"controller-uuid"`
 		ControllerName string `json:"controller-name"`
 	} `json:"models"`
@@ -84,10 +88,12 @@ func resolveScope(controllerName, modelName string) (*jujuTopology, probeFilter,
 	topo := &jujuTopology{
 		controllerName:       controllerName,
 		modelName:            map[string]string{},
+		modelType:            map[string]string{},
 		controllerNameByUUID: map[string]string{},
 	}
 	for _, m := range mj.Models {
 		topo.modelName[m.ModelUUID] = m.ShortName
+		topo.modelType[m.ShortName] = m.ModelType
 		if m.ControllerUUID != "" {
 			topo.controllerUUID = m.ControllerUUID
 			topo.controllerNameByUUID[m.ControllerUUID] = m.ControllerName
@@ -136,6 +142,21 @@ func modelsToStream(topo *jujuTopology, filter probeFilter) []string {
 	return out
 }
 
+// splitByModelType partitions model short-names into CAAS and IAAS buckets
+// using the topology's model-type map, so each model is routed to the right log
+// ingester. Models of unknown type are dropped from both.
+func splitByModelType(topo *jujuTopology, models []string) (caas, iaas []string) {
+	for _, m := range models {
+		switch topo.modelType[m] {
+		case "caas":
+			caas = append(caas, m)
+		case "iaas":
+			iaas = append(iaas, m)
+		}
+	}
+	return caas, iaas
+}
+
 // probeFilter is the recorder-side representation of the scope; it is passed to
 // the probe as --controller-uuid / --model-uuid flags.
 type probeFilter struct {
@@ -164,6 +185,27 @@ func runJujuControllers() (*controllersJSON, error) {
 		return nil, fmt.Errorf("parsing juju controllers output: %w", err)
 	}
 	return &cj, nil
+}
+
+// runJujuMachines returns the machine ids of a model, sorted. It is used by the
+// journald ingester to discover which hosts to tail.
+func runJujuMachines(controller, model string) ([]string, error) {
+	out, err := runJuju("machines", "-m", controller+":"+model, "--format", "json")
+	if err != nil {
+		return nil, err
+	}
+	var mj struct {
+		Machines map[string]json.RawMessage `json:"machines"`
+	}
+	if err := json.Unmarshal(out, &mj); err != nil {
+		return nil, fmt.Errorf("parsing juju machines output: %w", err)
+	}
+	ids := make([]string, 0, len(mj.Machines))
+	for id := range mj.Machines {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 func runJujuModels(controller string) (*modelsJSON, error) {
@@ -198,12 +240,26 @@ func runJuju(args ...string) ([]byte, error) {
 // jujuCommand returns the command to run, wrapping in `sudo -u $SUDO_USER` when
 // we are root under sudo so juju reads the operator's config, not root's.
 func jujuCommand(args []string) (string, []string) {
+	return userCommand("juju", args)
+}
+
+// kubectlCommand is jujuCommand's kubectl analogue: the k8s log ingester needs
+// the operator's kubeconfig, which lives in their home, so under sudo we run
+// kubectl as $SUDO_USER too.
+func kubectlCommand(args []string) (string, []string) {
+	return userCommand("kubectl", args)
+}
+
+// userCommand wraps a client invocation in `sudo -u $SUDO_USER` when we are root
+// under sudo, so the client reads the operator's config (juju/kube) rather than
+// root's. Otherwise it runs the binary directly.
+func userCommand(bin string, args []string) (string, []string) {
 	if os.Geteuid() == 0 {
 		if u := os.Getenv("SUDO_USER"); u != "" && u != "root" {
-			return "sudo", append([]string{"-u", u, "juju"}, args...)
+			return "sudo", append([]string{"-u", u, bin}, args...)
 		}
 	}
-	return "juju", args
+	return bin, args
 }
 
 func suffix(detail string) string {

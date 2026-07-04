@@ -32,6 +32,8 @@ type recordFlags struct {
 	probePath   string
 	pids        []int
 	debugLog    bool
+	k8sLog      bool
+	machineLog  bool
 	maxDuration time.Duration
 	maxSize     int64
 }
@@ -56,7 +58,10 @@ Attach modes:
   ssh     run the probe on a machine controller over 'juju ssh' (default when
           --controller or --ssh-target is given)
 
-Kubernetes attach (kubectl-debug, daemonset) lands in M6.`,
+Alongside the RPC probe, record ingests logs for the scoped models: 'juju
+debug-log', workload-container stdout for CAAS models ('kubectl logs'), and
+machine journald for IAAS models ('juju ssh … journalctl'). Disable any of
+them with --debug-log=false / --k8s-log=false / --machine-log=false.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRecord(cmd.Context(), args[0], *f)
@@ -70,6 +75,8 @@ Kubernetes attach (kubectl-debug, daemonset) lands in M6.`,
 	cmd.Flags().StringVar(&f.probePath, "probe-path", "", "path to the juju-lens-probe binary (default: next to juju-lens, then $PATH)")
 	cmd.Flags().IntSliceVar(&f.pids, "pid", nil, "restrict the probe to these PIDs (default: all jujud/containeragent)")
 	cmd.Flags().BoolVar(&f.debugLog, "debug-log", true, "also stream 'juju debug-log' for the scoped models")
+	cmd.Flags().BoolVar(&f.k8sLog, "k8s-log", true, "also stream workload-container logs for CAAS models ('kubectl logs')")
+	cmd.Flags().BoolVar(&f.machineLog, "machine-log", true, "also stream machine journald for IAAS models ('juju ssh … journalctl')")
 	cmd.Flags().DurationVar(&f.maxDuration, "max-duration", 0, "stop recording after this duration (0 = no limit)")
 	cmd.Flags().Int64Var(&f.maxSize, "max-size", 0, "stop recording after this many bytes of raw/ (0 = no limit)")
 	return cmd
@@ -143,19 +150,32 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Optional debug-log source: one `juju debug-log` tail per scoped model.
-	// It shares the recording's context so it stops with everything else.
+	// Optional log sources, all sharing the recording's context so they stop with
+	// everything else: `juju debug-log` per model, plus per-model-type ingesters
+	// (CAAS workload logs, IAAS machine journald). Controller scope (no single
+	// model pinned) keeps discovering models added during the recording.
 	var logIng *logIngester
+	var k8sIng *k8sIngester
+	var machIng *machineIngester
 	var logWG sync.WaitGroup
-	if f.debugLog && topo != nil {
+	if topo != nil {
 		models := modelsToStream(topo, filter)
-		if len(models) > 0 {
-			// Controller scope (no single model pinned) also watches for models
-			// added during the recording.
-			discover := filter.modelUUID == ""
+		discover := filter.modelUUID == ""
+		if f.debugLog && len(models) > 0 {
 			logIng = newLogIngester(layout, topo.controllerName, discover)
 			man.AddSource(recording.SourceStatus{Name: "debug-log", Kind: "juju-debug-log", Started: time.Now().UTC()})
 			logIng.start(ctx, &logWG, models)
+		}
+		caas, iaas := splitByModelType(topo, models)
+		if f.k8sLog && (len(caas) > 0 || discover) {
+			k8sIng = newK8sIngester(layout, topo.controllerName, discover, caas)
+			man.AddSource(recording.SourceStatus{Name: "k8s-log", Kind: "k8s-logs", Started: time.Now().UTC()})
+			k8sIng.start(ctx, &logWG)
+		}
+		if f.machineLog && (len(iaas) > 0 || discover) {
+			machIng = newMachineIngester(layout, topo.controllerName, discover, iaas)
+			man.AddSource(recording.SourceStatus{Name: "machine-log", Kind: "machine-journald", Started: time.Now().UTC()})
+			machIng.start(ctx, &logWG)
 		}
 	}
 
@@ -266,13 +286,26 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 	_ = probeCmd.Process.Kill()
 	_ = probeCmd.Wait()
 
-	// Stop the debug-log streams (ctx is already cancelled, which signals them)
-	// and wait for their goroutines to flush.
+	// Stop the log ingesters (ctx is already cancelled, which signals them) and
+	// wait for their goroutines to flush.
 	if logIng != nil {
 		logIng.stop()
-		logWG.Wait()
-		man.FinishSource("debug-log", nil)
-		man.Sources[len(man.Sources)-1].Records = logIng.count()
+	}
+	if k8sIng != nil {
+		k8sIng.stop()
+	}
+	if machIng != nil {
+		machIng.stop()
+	}
+	logWG.Wait()
+	if logIng != nil {
+		man.FinishSourceRecords("debug-log", logIng.count(), nil)
+	}
+	if k8sIng != nil {
+		man.FinishSourceRecords("k8s-log", k8sIng.count(), nil)
+	}
+	if machIng != nil {
+		man.FinishSourceRecords("machine-log", machIng.count(), nil)
 	}
 
 	if endReason == recording.EndReasonUnknown {
@@ -298,9 +331,19 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 		fmt.Fprintf(os.Stderr, "juju-lens: indexing recording failed: %v (run `juju-lens index %s` to retry)\n",
 			err, layout.Root)
 	}
-	logMsg := ""
+	var logLines int64
 	if logIng != nil {
-		logMsg = fmt.Sprintf(", %d debug-log lines", logIng.count())
+		logLines += logIng.count()
+	}
+	if k8sIng != nil {
+		logLines += k8sIng.count()
+	}
+	if machIng != nil {
+		logLines += machIng.count()
+	}
+	logMsg := ""
+	if logLines > 0 {
+		logMsg = fmt.Sprintf(", %d log lines", logLines)
 	}
 	fmt.Fprintf(os.Stderr, "juju-lens: recording saved to %s (%d RPC messages%s captured)\n",
 		layout.Root, w.count(), logMsg)

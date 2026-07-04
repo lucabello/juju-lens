@@ -83,14 +83,15 @@ var schema = []string{
 	`CREATE INDEX IF NOT EXISTS snap_by_scope_ts ON snapshots(model_id, scope, ts)`,
 	`CREATE INDEX IF NOT EXISTS snap_by_kind_ts  ON snapshots(model_id, kind, ts)`,
 
-	// Log records ingested from `juju debug-log` (M3). Joined to spans by
-	// span_id when a line carries one, else by (unit, ts window). Raw text lines
-	// remain the source of truth under raw/juju/; this table is rebuildable.
+	// Log records ingested from the log sources: 'debug-log' (M3), plus 'k8s'
+	// workload-container stdout and machine 'journal' lines (M6). Joined to spans
+	// by span_id when a line carries one, else by (unit, ts window). Raw text
+	// lines remain the source of truth under raw/; this table is rebuildable.
 	`CREATE TABLE IF NOT EXISTS log_records (
 	    id         INTEGER PRIMARY KEY AUTOINCREMENT,
 	    model_id   INTEGER REFERENCES models(id),
 	    ts         INTEGER NOT NULL,   -- unix nano
-	    source     TEXT NOT NULL,      -- 'debug-log'
+	    source     TEXT NOT NULL,      -- 'debug-log' | 'k8s' | 'journal'
 	    entity     TEXT,               -- raw juju entity tag
 	    unit       TEXT,               -- 'grafana/0' when the entity is a unit
 	    level      TEXT,
@@ -245,18 +246,22 @@ func (d *DB) InsertSnapshot(model string, ts time.Time, kind, scope, bodyJSON, p
 	return err
 }
 
-// InsertLog appends one parsed debug-log record.
+// InsertLog appends one parsed log record from any source (rec.Source).
 func (d *DB) InsertLog(rec recording.LogRecord) error {
 	modelID, err := d.UpsertModel(rec.Model)
 	if err != nil {
 		return err
 	}
+	source := rec.Source
+	if source == "" {
+		source = "debug-log"
+	}
 	_, err = d.sql.Exec(
 		`INSERT INTO log_records(model_id, ts, source, entity, unit, level, module,
 		                         body, trace_id, span_id, raw_file, raw_line)
-		 VALUES (?, ?, 'debug-log', NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''),
+		 VALUES (?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''),
 		         NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)`,
-		modelID, rec.Ts.UnixNano(), rec.Entity, rec.Unit, rec.Level, rec.Module,
+		modelID, rec.Ts.UnixNano(), source, rec.Entity, rec.Unit, rec.Level, rec.Module,
 		rec.Message, rec.TraceID, rec.SpanID, rec.RawFile, rec.RawLine,
 	)
 	return err

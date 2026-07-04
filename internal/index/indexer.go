@@ -3,6 +3,7 @@ package index
 import (
 	"bytes"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -48,7 +49,7 @@ func (ix *Indexer) Sync(root string) error {
 	if err := ix.syncCalls(root, filepath.Join(l.RawDir(), "rpc")); err != nil {
 		return err
 	}
-	return ix.syncLogs(root, filepath.Join(l.RawDir(), "juju"))
+	return ix.syncLogs(root, l.RawDir())
 }
 
 // FlushPending writes the still-open requests (no response captured) as
@@ -92,23 +93,66 @@ func (ix *Indexer) syncCalls(root, rpcRoot string) error {
 	return nil
 }
 
-func (ix *Indexer) syncLogs(root, jujuRoot string) error {
-	return ix.eachModelFile(root, jujuRoot, "debug-log-", ".log", func(rel string, lines []lineAt) error {
-		model := modelOfRel(rel)
-		for _, ln := range lines {
-			rec, ok := recording.ParseDebugLogLine(string(ln.data), model)
-			if !ok {
-				continue
+func (ix *Indexer) syncLogs(root, rawDir string) error {
+	for _, kind := range []string{"juju", "k8s", "machine"} {
+		err := ix.eachLogFile(root, filepath.Join(rawDir, kind), func(rel string, lines []lineAt) error {
+			for _, ln := range lines {
+				rec, ok := recording.ParseLogLine(rel, string(ln.data))
+				if !ok {
+					continue
+				}
+				ix.lineNo[rel]++
+				rec.RawFile = rel
+				rec.RawLine = ix.lineNo[rel]
+				if err := ix.db.InsertLog(rec); err != nil {
+					return err
+				}
 			}
-			ix.lineNo[rel]++
-			rec.RawFile = rel
-			rec.RawLine = ix.lineNo[rel]
-			if err := ix.db.InsertLog(rec); err != nil {
-				return err
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// eachLogFile walks every "*.log" file under kindRoot (recursively, so the
+// deeper raw/k8s/<model>/<pod>/<container>/ layout is covered) in path order and
+// calls fn with the newly-appended complete lines of each file, advancing the
+// per-file offset. The log trees vary in depth, so unlike eachModelFile it does
+// not assume a fixed <model>/<file> shape — ParseLogLine derives identity from
+// the relative path instead.
+func (ix *Indexer) eachLogFile(root, kindRoot string, fn func(rel string, lines []lineAt) error) error {
+	var paths []string
+	err := filepath.WalkDir(kindRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
 			}
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".log") {
+			paths = append(paths, path)
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		rel, _ := filepath.Rel(root, path)
+		lines, newOff, err := readNewLines(path, ix.offsets[rel])
+		if err != nil || len(lines) == 0 {
+			continue
+		}
+		if err := fn(rel, lines); err != nil {
+			return err
+		}
+		ix.offsets[rel] = newOff
+	}
+	return nil
 }
 
 // processSpan enriches a completed span with hook + relation context and writes
@@ -228,14 +272,4 @@ func readNewLines(path string, from int64) ([]lineAt, int64, error) {
 		pos += int64(len(line))
 	}
 	return out, from + int64(len(complete)), nil
-}
-
-// modelOfRel extracts the model segment from a "raw/<kind>/<model>/<file>"
-// relative path.
-func modelOfRel(rel string) string {
-	parts := strings.Split(filepath.ToSlash(rel), "/")
-	if len(parts) >= 3 {
-		return parts[2]
-	}
-	return ""
 }

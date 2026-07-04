@@ -100,3 +100,135 @@ func TestParseDebugLogLine(t *testing.T) {
 		})
 	}
 }
+
+func TestParseK8sLogLine(t *testing.T) {
+	// Real shape from `kubectl logs --timestamps`: an RFC3339Nano prefix then the
+	// pebble-wrapped workload line.
+	line := `2026-07-04T19:13:25.277747005Z [grafana] level=info msg="ready" trace-id=00112233445566778899aabbccddeeff`
+	rec, ok := ParseK8sLogLine(line, "cos-lite", "grafana-0", "grafana")
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if rec.Source != "k8s" {
+		t.Errorf("source = %q, want k8s", rec.Source)
+	}
+	if rec.Unit != "grafana/0" {
+		t.Errorf("unit = %q, want grafana/0", rec.Unit)
+	}
+	if rec.Entity != "grafana-0" {
+		t.Errorf("entity = %q, want grafana-0", rec.Entity)
+	}
+	if rec.Module != "grafana" {
+		t.Errorf("module = %q, want grafana", rec.Module)
+	}
+	if rec.Message != `[grafana] level=info msg="ready" trace-id=00112233445566778899aabbccddeeff` {
+		t.Errorf("message = %q", rec.Message)
+	}
+	if rec.TraceID != "00112233445566778899aabbccddeeff" {
+		t.Errorf("trace-id = %q", rec.TraceID)
+	}
+	want := time.Date(2026, 7, 4, 19, 13, 25, 277747005, time.UTC)
+	if !rec.Ts.Equal(want) {
+		t.Errorf("ts = %s, want %s", rec.Ts, want)
+	}
+	// Multi-word app name still resolves.
+	if rec, _ := ParseK8sLogLine(line, "cos-lite", "prometheus-k8s-0", "prometheus"); rec.Unit != "prometheus-k8s/0" {
+		t.Errorf("unit = %q, want prometheus-k8s/0", rec.Unit)
+	}
+	if _, ok := ParseK8sLogLine("no-space-so-no-timestamp", "m", "p-0", "c"); ok {
+		t.Error("expected ok = false for a line without a timestamp field")
+	}
+	if _, ok := ParseK8sLogLine("not-a-timestamp here", "m", "p-0", "c"); ok {
+		t.Error("expected ok = false for an unparseable timestamp")
+	}
+}
+
+func TestParseJournalLine(t *testing.T) {
+	// A trimmed real `journalctl -o json` object.
+	line := `{"__REALTIME_TIMESTAMP":"1783192466043395","PRIORITY":"6","SYSLOG_IDENTIFIER":"systemd","_SYSTEMD_UNIT":"init.scope","MESSAGE":"Started user@1000.service."}`
+	rec, ok := ParseJournalLine(line, "otelcol-scrape-test", "machine-0")
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if rec.Source != "journal" {
+		t.Errorf("source = %q, want journal", rec.Source)
+	}
+	if rec.Entity != "machine-0" {
+		t.Errorf("entity = %q, want machine-0", rec.Entity)
+	}
+	if rec.Unit != "" {
+		t.Errorf("unit = %q, want empty", rec.Unit)
+	}
+	if rec.Level != "INFO" {
+		t.Errorf("level = %q, want INFO (PRIORITY 6)", rec.Level)
+	}
+	if rec.Module != "systemd" {
+		t.Errorf("module = %q, want systemd", rec.Module)
+	}
+	if rec.Message != "Started user@1000.service." {
+		t.Errorf("message = %q", rec.Message)
+	}
+	want := time.UnixMicro(1783192466043395).UTC()
+	if !rec.Ts.Equal(want) {
+		t.Errorf("ts = %s, want %s", rec.Ts, want)
+	}
+	// A binary MESSAGE (journald emits an array) is skipped, not misparsed.
+	if _, ok := ParseJournalLine(`{"__REALTIME_TIMESTAMP":"1","MESSAGE":[1,2,3]}`, "m", "h"); ok {
+		t.Error("expected ok = false for an array MESSAGE")
+	}
+	if _, ok := ParseJournalLine(`not json`, "m", "h"); ok {
+		t.Error("expected ok = false for non-JSON")
+	}
+}
+
+func TestParseLogLine(t *testing.T) {
+	cases := []struct {
+		rel    string
+		line   string
+		ok     bool
+		source string
+		model  string
+	}{
+		{
+			rel:    "raw/juju/cos-lite/debug-log-2026-07-04T19.log",
+			line:   `unit-loki-0: 2026-07-04 14:04:24.406 INFO juju.worker.uniter ran hook`,
+			ok:     true,
+			source: "debug-log",
+			model:  "cos-lite",
+		},
+		{
+			rel:    "raw/k8s/cos-lite/grafana-0/grafana/logs-2026-07-04T19.log",
+			line:   `2026-07-04T19:13:25.277Z [grafana] ready`,
+			ok:     true,
+			source: "k8s",
+			model:  "cos-lite",
+		},
+		{
+			rel:    "raw/machine/otelcol-scrape-test/machine-0/journal-2026-07-04T19.log",
+			line:   `{"__REALTIME_TIMESTAMP":"1783192466043395","MESSAGE":"hi"}`,
+			ok:     true,
+			source: "journal",
+			model:  "otelcol-scrape-test",
+		},
+		{rel: "raw/unknown/m/f.log", line: "x", ok: false},
+		{rel: "raw/k8s/cos-lite/grafana-0/logs.log", line: "x", ok: false}, // too shallow for k8s
+		{rel: "notraw/juju/m/f.log", line: "x", ok: false},
+	}
+	for _, c := range cases {
+		t.Run(c.rel, func(t *testing.T) {
+			rec, ok := ParseLogLine(c.rel, c.line)
+			if ok != c.ok {
+				t.Fatalf("ok = %v, want %v", ok, c.ok)
+			}
+			if !ok {
+				return
+			}
+			if rec.Source != c.source {
+				t.Errorf("source = %q, want %q", rec.Source, c.source)
+			}
+			if rec.Model != c.model {
+				t.Errorf("model = %q, want %q", rec.Model, c.model)
+			}
+		})
+	}
+}

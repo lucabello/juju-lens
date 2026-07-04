@@ -142,6 +142,19 @@ func (m *Manifest) FinishSource(name string, err error) {
 	m.Sources = append(m.Sources, src)
 }
 
+// FinishSourceRecords finishes a source (as FinishSource) and records how many
+// records it produced. It matches by name so callers need not track source
+// order.
+func (m *Manifest) FinishSourceRecords(name string, records int64, err error) {
+	m.FinishSource(name, err)
+	for i := len(m.Sources) - 1; i >= 0; i-- {
+		if m.Sources[i].Name == name {
+			m.Sources[i].Records = records
+			return
+		}
+	}
+}
+
 // Finalize stamps the end time and end reason. It does not write the file;
 // callers should call Save afterwards.
 func (m *Manifest) Finalize(reason EndReason) {

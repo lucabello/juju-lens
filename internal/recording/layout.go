@@ -52,9 +52,30 @@ func (l Layout) K8sDir(model string) string {
 	return filepath.Join(l.RawDir(), "k8s", sanitizeSegment(model))
 }
 
+// K8sLogFileFor names the per-hour workload-log file for one pod container:
+// raw/k8s/<model>/<pod>/<container>/logs-<hour>.log. The pod and container form
+// the two path segments ParseLogLine reads back to attribute the line to a unit
+// and container (they are DNS labels, so they never need sanitising).
+func (l Layout) K8sLogFileFor(model, pod, container string) func(hour string) string {
+	dir := filepath.Join(l.K8sDir(model), sanitizeSegment(pod), sanitizeSegment(container))
+	return func(hour string) string {
+		return filepath.Join(dir, fmt.Sprintf("logs-%s.log", hour))
+	}
+}
+
 // MachineDir returns raw/machine/<model>/<host>/, holding host journals.
 func (l Layout) MachineDir(model, host string) string {
 	return filepath.Join(l.RawDir(), "machine", sanitizeSegment(model), sanitizeSegment(host))
+}
+
+// MachineLogFileFor names the per-hour journald file for one host:
+// raw/machine/<model>/<host>/journal-<hour>.log. The host is the path segment
+// ParseLogLine reads back as the log Entity.
+func (l Layout) MachineLogFileFor(model, host string) func(hour string) string {
+	dir := l.MachineDir(model, host)
+	return func(hour string) string {
+		return filepath.Join(dir, fmt.Sprintf("journal-%s.log", hour))
+	}
 }
 
 // SnapDir returns raw/snap/<model>/<host>/, holding snap logs.
