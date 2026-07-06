@@ -129,83 +129,154 @@ func statusGlyph(value string) string {
 }
 
 func (m *model) renderStatusPane() string {
-	_, _, w := columnWidths(m.width)
-	h := m.bodyHeight()
-	inner := max(1, w-4)
+	_, w := topRowWidths(m.width)
+	h, _ := rowHeights(m.bodyHeight())
 
-	var lines []string
-	// In point-in-time mode, label the pane with the instant it reflects.
-	if m.pit && len(m.spans) > 0 {
-		lines = append(lines, styleHook.Render("● as of "+m.currentSpan().Start.Format("15:04:05.000")))
-	}
-	lines = append(lines, styleSection.Render("Applications"))
-	lines = append(lines, statusRows(m.appTree.apps, m.appStatuses, inner)...)
-	lines = append(lines, "")
-	lines = append(lines, styleSection.Render("Units"))
-	// Iterate units in stable app-major, unit-minor order so the pane
-	// reads top-down like `juju status` output.
-	units := []string{}
-	for _, app := range m.appTree.apps {
-		units = append(units, m.appTree.units[app]...)
-	}
-	// unit rows can also include units that reported status but that we
-	// haven't inferred an app for (defensive; buildAppTree already
-	// includes anything with a unit).
-	extras := []string{}
-	for u := range m.unitStatuses {
-		if !stringIn(units, u) {
-			extras = append(extras, u)
+	// Change pips: mark whatever the *selected* event changed at this instant,
+	// so scrubbing shows what moved without leaving the pane.
+	changedApp, changedUnit := "", ""
+	if ev := m.currentEvent(); ev.kind == evStatus {
+		if strings.HasPrefix(ev.summary, "app") {
+			changedApp = ev.app
+		} else {
+			changedUnit = ev.unit
 		}
 	}
-	sort.Strings(extras)
-	units = append(units, extras...)
-	lines = append(lines, statusRows(units, m.unitStatuses, inner)...)
+
+	label := "latest known"
+	if m.pit {
+		label = "as of " + m.currentTs().UTC().Format("15:04:05.000")
+	}
+	rows := []paneRow{row(styleDim.Render(label))}
+
+	// The app/unit universe comes from spans *and* snapshots, so a bootstrap-only
+	// app (one with no captured RPCs, M8) still appears.
+	apps, unitsByApp := m.statusUniverse()
+	rows = append(rows, row(styleSection.Render("Applications")))
+	rows = append(rows, appStatusRows(apps, m.appStatuses, changedApp)...)
+	rows = append(rows, row(""))
+	rows = append(rows, row(styleSection.Render("Units  ")+styleDim.Render("workload / agent")))
+	var units []string
+	for _, app := range apps {
+		units = append(units, unitsByApp[app]...)
+	}
+	rows = append(rows, m.unitStatusRows(units, changedUnit)...)
 
 	if len(m.relations) > 0 {
-		lines = append(lines, "")
+		rows = append(rows, row(""))
 		header := "Relations"
-		if m.focus == paneRelations {
-			header += styleDim.Render("  (↑/↓ select · Tab exit)")
+		if m.focus == paneStatus {
+			header += styleDim.Render("  (↑/↓ select)")
 		}
-		lines = append(lines, styleSection.Render(header))
+		rows = append(rows, row(styleSection.Render(header)))
 		sel := -1
-		if m.focus == paneRelations {
+		if m.focus == paneStatus {
 			sel = m.relCursor
 		}
-		lines = append(lines, relationRows(m.relations, inner, sel)...)
+		rows = append(rows, relationRows(m.relations, sel)...)
 	}
 
-	body := max(1, h-2)
-	for len(lines) < body {
-		lines = append(lines, "")
-	}
-	if len(lines) > body {
-		lines = lines[:body]
-	}
-	return styleStatusBox.Width(w).Height(h).Render(strings.Join(lines, "\n"))
+	return m.renderPane(paneStatus, w, h, "Status", rows)
 }
 
-// statusRows renders one row per scope. Unknown scopes are dimmed and
-// labelled so the user can tell "no snapshot yet" from "silent".
-func statusRows(names []string, byName map[string]statusValue, inner int) []string {
-	var out []string
+// statusUniverse returns the apps (sorted) and their units to show in the Status
+// pane, unioning the RPC-derived app tree with any app/unit that only has a
+// status snapshot (a bootstrap-only app, M8).
+func (m *model) statusUniverse() (apps []string, unitsByApp map[string][]string) {
+	appSet := map[string]bool{}
+	unitSet := map[string]map[string]bool{}
+	add := func(app, unit string) {
+		if app == "" {
+			return
+		}
+		appSet[app] = true
+		if unitSet[app] == nil {
+			unitSet[app] = map[string]bool{}
+		}
+		if unit != "" {
+			unitSet[app][unit] = true
+		}
+	}
+	for _, app := range m.appTree.apps {
+		add(app, "")
+		for _, u := range m.appTree.units[app] {
+			add(app, u)
+		}
+	}
+	for app := range m.appStatuses {
+		add(app, "")
+	}
+	for unit := range m.unitStatuses {
+		add(appOf(unit), unit)
+	}
+	for a := range appSet {
+		apps = append(apps, a)
+	}
+	sort.Strings(apps)
+	unitsByApp = map[string][]string{}
+	for _, a := range apps {
+		var us []string
+		for u := range unitSet[a] {
+			us = append(us, u)
+		}
+		sort.Strings(us)
+		unitsByApp[a] = us
+	}
+	return apps, unitsByApp
+}
+
+// appStatusRows renders one row per application. Unknown scopes are dimmed and
+// labelled so the user can tell "no snapshot yet" from "silent". changed names
+// an app that moved at the selected instant; it gets a ▲ pip.
+func appStatusRows(names []string, byName map[string]statusValue, changed string) []paneRow {
+	var out []paneRow
 	for _, name := range names {
+		pip := " "
+		if name == changed && changed != "" {
+			pip = styleWarn.Render("▲")
+		}
 		st, ok := byName[name]
 		if !ok || !st.Known {
-			row := fmt.Sprintf("  %s %-*s %s", "○", nameWidth(name, inner), name, styleDim.Render("unknown"))
-			out = append(out, truncate(row, inner))
+			out = append(out, row(fmt.Sprintf("%s %s %s %s",
+				pip, "○", styleText.Render(fmt.Sprintf("%-16s", name)), styleDim.Render("unknown"))))
 			continue
 		}
-		st.Since = st.Since.UTC()
 		style := statusStyleFor(st.Value)
-		row := fmt.Sprintf("  %s %-*s %s",
+		out = append(out, row(fmt.Sprintf("%s %s %s %s",
+			pip,
 			style.Render(statusGlyph(st.Value)),
-			nameWidth(name, inner),
-			name,
-			style.Render(st.Value))
-		out = append(out, truncate(row, inner))
+			styleText.Render(fmt.Sprintf("%-16s", name)),
+			style.Render(st.Value))))
 		if st.Message != "" {
-			out = append(out, truncate("      "+styleDim.Render(st.Message), inner))
+			out = append(out, row("     "+styleDim.Render(st.Message)))
+		}
+	}
+	return out
+}
+
+// unitStatusRows renders one row per unit showing both statuses juju tracks
+// separately: the workload (charm) status and the agent status (idle/executing),
+// as "workload / agent". changed names a unit that moved at the selected instant.
+func (m *model) unitStatusRows(names []string, changed string) []paneRow {
+	var out []paneRow
+	for _, name := range names {
+		pip := " "
+		if name == changed && changed != "" {
+			pip = styleWarn.Render("▲")
+		}
+		wl, known := m.unitStatuses[name]
+		glyph, workload := "○", styleDim.Render("unknown")
+		if known && wl.Known {
+			ws := statusStyleFor(wl.Value)
+			glyph, workload = ws.Render(statusGlyph(wl.Value)), ws.Render(wl.Value)
+		}
+		if agent, ok := m.agentStatuses[name]; ok && agent.Known && agent.Value != "" {
+			workload += styleDim.Render(" / ") + agentStyleFor(agent.Value).Render(agent.Value)
+		}
+		out = append(out, row(fmt.Sprintf("%s %s %s %s",
+			pip, glyph, styleText.Render(fmt.Sprintf("%-16s", name)), workload)))
+		if known && wl.Known && wl.Message != "" {
+			out = append(out, row("     "+styleDim.Render(wl.Message)))
 		}
 	}
 	return out
@@ -214,8 +285,8 @@ func statusRows(names []string, byName map[string]statusValue, inner int) []stri
 // relationRows renders the Relations section: one line per relation showing its
 // endpoints, then a dim line listing the entities with a databag on it. sel is
 // the index of the selected relation (-1 for none), marked with a caret.
-func relationRows(rels []relationSummary, inner, sel int) []string {
-	var out []string
+func relationRows(rels []relationSummary, sel int) []paneRow {
+	var out []paneRow
 	for i, r := range rels {
 		marker := "  "
 		eps := styleHook.Render(strings.Join(r.Endpoints, " ↔ "))
@@ -223,32 +294,25 @@ func relationRows(rels []relationSummary, inner, sel int) []string {
 			marker = styleHook.Render("▸ ")
 			eps = styleSelected.Render(strings.Join(r.Endpoints, " ↔ "))
 		}
-		out = append(out, truncate(marker+eps, inner))
+		out = append(out, row(marker+eps))
 		if len(r.Entities) > 0 {
-			out = append(out, truncate("      "+styleDim.Render(strings.Join(r.Entities, ", ")), inner))
+			out = append(out, row("      "+styleDim.Render(strings.Join(r.Entities, ", "))))
 		}
 	}
 	return out
 }
 
-// nameWidth caps the name column to a reasonable width so long unit names
-// don't push status text off-screen in narrow terminals.
-func nameWidth(name string, inner int) int {
-	max := 16
-	if inner < 40 {
-		max = 10
+// agentStyleFor colours the agent (executing/idle) status. idle is the resting
+// state so it stays calm; executing/allocating draw the eye; failures are red.
+func agentStyleFor(value string) lipgloss.Style {
+	switch value {
+	case "idle":
+		return styleDim
+	case "executing", "allocating", "rebooting":
+		return styleWarn
+	case "failed", "error", "lost":
+		return styleErr
+	default:
+		return styleDim
 	}
-	if len(name) < max {
-		return len(name)
-	}
-	return max
-}
-
-func stringIn(hay []string, needle string) bool {
-	for _, h := range hay {
-		if h == needle {
-			return true
-		}
-	}
-	return false
 }

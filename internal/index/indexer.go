@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/lucabello/juju-lens/internal/recording"
 	"github.com/lucabello/juju-lens/internal/wire"
@@ -23,11 +24,12 @@ import (
 // one file/tick pairs with its response in a later one, and so a hook that
 // begins in one tick labels the RPCs that follow it in the next.
 type Indexer struct {
-	db         *DB
-	pairer     *recording.Pairer
-	offsets    map[string]int64  // raw file (relative path) -> bytes consumed
-	lineNo     map[string]int    // raw file -> lines consumed (for log RawLine)
-	hookByUnit map[string]string // unit -> hook currently running
+	db            *DB
+	pairer        *recording.Pairer
+	offsets       map[string]int64  // raw file (relative path) -> bytes consumed
+	lineNo        map[string]int    // raw file -> lines consumed (for log RawLine)
+	hookByUnit    map[string]string // unit -> hook currently running
+	bootstrapDone bool              // ground-truth status seeded (M8; once per run)
 }
 
 // NewIndexer returns an indexer writing to db.
@@ -46,10 +48,37 @@ func NewIndexer(db *DB) *Indexer {
 // terminated) lines, so a half-written trailing line is left for the next Sync.
 func (ix *Indexer) Sync(root string) error {
 	l := recording.NewLayout(root)
+	// Seed ground-truth status first (M8): it must land before any RPC-derived
+	// snapshot so the content-hash dedup baseline is the bootstrap value.
+	if err := ix.syncBootstrap(root); err != nil {
+		return err
+	}
 	if err := ix.syncCalls(root, filepath.Join(l.RawDir(), "rpc")); err != nil {
 		return err
 	}
 	return ix.syncLogs(root, l.RawDir())
+}
+
+// syncBootstrap seeds baseline app/unit status from raw/status once per run.
+// The recorder writes the status file before the probe attaches, so the first
+// Sync tick picks it up ahead of any captured RPC. Stamps the snapshots at the
+// manifest's start time (backdated 1ms) so every later delta sorts after them.
+func (ix *Indexer) syncBootstrap(root string) error {
+	if ix.bootstrapDone {
+		return nil
+	}
+	ix.bootstrapDone = true
+	ts := time.Now().UTC()
+	if man, err := recording.Load(root); err == nil && !man.Started.IsZero() {
+		ts = man.Started
+	}
+	ts = ts.Add(-time.Millisecond)
+	for _, s := range LoadBootstrapSnapshots(root, ts) {
+		if err := ix.db.InsertBootstrapSnapshot(s.Model, s.Ts, string(s.Kind), s.Scope, string(s.Body)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // FlushPending writes the still-open requests (no response captured) as

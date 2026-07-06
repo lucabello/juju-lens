@@ -83,6 +83,21 @@ func (l Layout) SnapDir(model, host string) string {
 	return filepath.Join(l.RawDir(), "snap", sanitizeSegment(model), sanitizeSegment(host))
 }
 
+// StatusDir returns raw/status/<model>/, holding the ground-truth `juju status`
+// snapshot captured once at recording start (M8).
+func (l Layout) StatusDir(model string) string {
+	return filepath.Join(l.RawDir(), "status", sanitizeSegment(model))
+}
+
+// StatusBootstrapFile names the ground-truth status file for a model:
+// raw/status/<model>/bootstrap.json. It holds the verbatim `juju status
+// --format=json` output captured at recording start; the indexer seeds baseline
+// app/unit status snapshots from it so the Status pane is populated from t0
+// instead of showing every scope as "unknown".
+func (l Layout) StatusBootstrapFile(model string) string {
+	return filepath.Join(l.StatusDir(model), "bootstrap.json")
+}
+
 // DerivedDir returns the derived/ directory where cached artifacts live.
 func (l Layout) DerivedDir() string { return filepath.Join(l.Root, "derived") }
 

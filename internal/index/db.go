@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,7 +24,12 @@ import (
 
 // SchemaVersion is bumped whenever the SQL below changes shape. The rebuild
 // command uses it to decide whether an existing DB can be reused.
-const SchemaVersion = 3
+//
+// v4 (M7/M8): snapshots gain content_hash (dedup identical consecutive values,
+// so a hook that rewrote a databag without changing it emits no snapshot) and
+// origin ('rpc' | 'bootstrap', so ground-truth status seeded from `juju status`
+// at recording start is distinguishable from RPC-derived deltas).
+const SchemaVersion = 4
 
 // The full schema. Statements are executed in order.
 var schema = []string{
@@ -78,6 +85,8 @@ var schema = []string{
 	    kind              TEXT NOT NULL,   -- 'app-status', 'unit-status', 'databag', ...
 	    scope             TEXT NOT NULL,   -- e.g. 'app-status:grafana' or 'unit-status:grafana/0'
 	    body_json         TEXT NOT NULL,
+	    content_hash      TEXT,            -- hash of body_json; dedups no-op re-writes (M7)
+	    origin            TEXT NOT NULL DEFAULT 'rpc', -- 'rpc' | 'bootstrap' (M8)
 	    producing_span_id TEXT
 	)`,
 	`CREATE INDEX IF NOT EXISTS snap_by_scope_ts ON snapshots(model_id, scope, ts)`,
@@ -232,18 +241,63 @@ func (d *DB) InsertSpan(row recording.SpanRow) error {
 	return err
 }
 
-// InsertSnapshot appends a snapshot row.
+// InsertSnapshot appends an RPC-derived snapshot row, deduplicating no-op
+// writes. See insertSnapshot for the dedup semantics (M7).
 func (d *DB) InsertSnapshot(model string, ts time.Time, kind, scope, bodyJSON, producingSpanID string) error {
+	return d.insertSnapshot(model, ts, kind, scope, bodyJSON, "rpc", producingSpanID)
+}
+
+// InsertBootstrapSnapshot seeds a ground-truth snapshot captured from
+// `juju status` at recording start (M8). Bootstrap rows carry origin
+// 'bootstrap' and no producing span, and — because they sit at the earliest
+// timestamp — must be inserted before any RPC-derived snapshot so the dedup
+// baseline is correct.
+func (d *DB) InsertBootstrapSnapshot(model string, ts time.Time, kind, scope, bodyJSON string) error {
+	return d.insertSnapshot(model, ts, kind, scope, bodyJSON, "bootstrap", "")
+}
+
+// insertSnapshot writes a snapshot unless it is identical to the latest value
+// already recorded for the same (model, scope): a hook that re-commits a
+// databag verbatim, or a status setter that re-asserts the current status,
+// records nothing. This keeps "previous value" queries meaningful and lets the
+// viewer distinguish a real state change from a no-op re-write (M7).
+//
+// The dedup compares against the newest existing snapshot, so callers must
+// insert in ascending-timestamp order (bootstrap at t0 first, then RPC deltas
+// in time order) — which both the full rebuild and the incremental indexer do.
+func (d *DB) insertSnapshot(model string, ts time.Time, kind, scope, bodyJSON, origin, producingSpanID string) error {
 	modelID, err := d.UpsertModel(model)
 	if err != nil {
 		return err
 	}
+	sum := contentHash(bodyJSON)
+	var last sql.NullString
+	err = d.sql.QueryRow(
+		`SELECT content_hash FROM snapshots
+		  WHERE model_id = ? AND scope = ?
+		  ORDER BY ts DESC, id DESC LIMIT 1`,
+		modelID, scope).Scan(&last)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if last.Valid && last.String == sum {
+		return nil // unchanged since the last snapshot for this scope: skip
+	}
 	_, err = d.sql.Exec(
-		`INSERT INTO snapshots(model_id, ts, kind, scope, body_json, producing_span_id)
-		 VALUES (?, ?, ?, ?, ?, NULLIF(?, ''))`,
-		modelID, ts.UnixNano(), kind, scope, bodyJSON, producingSpanID,
+		`INSERT INTO snapshots(model_id, ts, kind, scope, body_json, content_hash, origin, producing_span_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))`,
+		modelID, ts.UnixNano(), kind, scope, bodyJSON, sum, origin, producingSpanID,
 	)
 	return err
+}
+
+// contentHash is the dedup key for a snapshot body: a stable digest of the
+// JSON. FNV-1a is plenty here — we only need equality, not cryptographic
+// resistance — and keeps the row compact.
+func contentHash(body string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(body))
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 // InsertLog appends one parsed log record from any source (rec.Source).
@@ -270,12 +324,74 @@ func (d *DB) InsertLog(rec recording.LogRecord) error {
 // LogRow is one row from log_records returned to the viewer.
 type LogRow struct {
 	Ts      time.Time
+	Source  string // "debug-log" | "k8s" | "journal"
 	Unit    string
+	Entity  string // raw entity when there is no unit (machine-0, pod name)
 	Level   string
 	Module  string
 	Body    string
 	SpanID  string
 	Matched string // why this log correlated: "span" (exact) or "window" (fuzzy)
+}
+
+// Logs returns every log record for a model in time order, capped at limit
+// (limit <= 0 means no cap). It backs the merged log-stream pane, which
+// interleaves these with timeline events by timestamp. A zero modelID returns
+// all models.
+func (d *DB) Logs(modelID int64, limit int) ([]LogRow, error) {
+	q := `SELECT ts, source, COALESCE(unit,''), COALESCE(entity,''),
+	             COALESCE(level,''), COALESCE(module,''), body, COALESCE(span_id,'')
+	        FROM log_records
+	       WHERE (? = 0 OR model_id = ?)
+	       ORDER BY ts`
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	rows, err := d.sql.Query(q, modelID, modelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LogRow
+	for rows.Next() {
+		var (
+			r    LogRow
+			nano int64
+		)
+		if err := rows.Scan(&nano, &r.Source, &r.Unit, &r.Entity, &r.Level, &r.Module, &r.Body, &r.SpanID); err != nil {
+			return nil, err
+		}
+		r.Ts = time.Unix(0, nano).UTC()
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ProducingSpanIDs returns the set of span ids that produced at least one
+// snapshot of the given kind. For kind 'databag' this is exactly the set of
+// hook spans whose commit actually changed a databag — no-op re-commits dedup
+// away and never appear — so the viewer marks only those events as databag
+// writes (M7). A zero modelID spans all models.
+func (d *DB) ProducingSpanIDs(modelID int64, kind string) (map[string]bool, error) {
+	rows, err := d.sql.Query(
+		`SELECT DISTINCT producing_span_id FROM snapshots
+		  WHERE (? = 0 OR model_id = ?) AND kind = ? AND producing_span_id IS NOT NULL`,
+		modelID, modelID, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if id != "" {
+			out[id] = true
+		}
+	}
+	return out, rows.Err()
 }
 
 // LogsForSpan returns the log records correlated to a span, per the §7 join:
@@ -288,7 +404,7 @@ func (d *DB) LogsForSpan(modelID int64, spanID, unit string, start, end time.Tim
 	hi := end.Add(window).UnixNano()
 	// One query with an OR keeps ordering and de-dup simple: match the exact
 	// span_id, or the same unit inside the time window.
-	q := `SELECT ts, COALESCE(unit,''), COALESCE(level,''), COALESCE(module,''),
+	q := `SELECT ts, source, COALESCE(unit,''), COALESCE(level,''), COALESCE(module,''),
 	             body, COALESCE(span_id,''),
 	             CASE WHEN span_id = ? AND ? <> '' THEN 'span' ELSE 'window' END
 	        FROM log_records
@@ -313,7 +429,7 @@ func (d *DB) LogsForSpan(modelID int64, spanID, unit string, start, end time.Tim
 			r    LogRow
 			nano int64
 		)
-		if err := rows.Scan(&nano, &r.Unit, &r.Level, &r.Module, &r.Body, &r.SpanID, &r.Matched); err != nil {
+		if err := rows.Scan(&nano, &r.Source, &r.Unit, &r.Level, &r.Module, &r.Body, &r.SpanID, &r.Matched); err != nil {
 			return nil, err
 		}
 		r.Ts = time.Unix(0, nano).UTC()

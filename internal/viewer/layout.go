@@ -1,98 +1,65 @@
 package viewer
 
-// layout.go owns the geometry of the three-column TUI. All width/height
-// helpers are pure functions of the outer terminal size so they can be
-// unit-tested without a running TUI.
+// layout.go owns the geometry of the two-row TUI. The top row holds Events and
+// Status side by side; the Logs stream spans the full width beneath them. All
+// width/height helpers are pure functions of the outer terminal size so they can
+// be unit-tested without a running TUI.
 
 const (
 	headerHeight = 3 // one line of title + top border/padding
 	footerHeight = 2 // one line of help + separator
 
-	minAppsWidth   = 20
-	minCentreWidth = 40
-	minStatusWidth = 24
+	minPaneWidth = 20
+	minRowHeight = 3
 
-	appsPct   = 22
-	statusPct = 30
+	eventsPct = 52 // Events vs Status within the top row
+	topPct    = 55 // top row vs Logs row, of the body height
 )
 
-// columnWidths returns (apps, centre, status) widths that sum to total. The
-// centre column takes whatever the sidebars leave behind, with sensible
-// minima applied so narrow terminals don't collapse a pane to nothing.
-func columnWidths(total int) (apps, centre, status int) {
-	if total <= 0 {
-		return 0, 0, 0
-	}
-	apps = (total * appsPct) / 100
-	status = (total * statusPct) / 100
-	if apps < minAppsWidth {
-		apps = minAppsWidth
-	}
-	if status < minStatusWidth {
-		status = minStatusWidth
-	}
-	centre = total - apps - status
-	if centre < minCentreWidth {
-		// Terminal is too narrow to satisfy all three minima. Trim the
-		// sidebars proportionally to whatever centre still needs; the
-		// alternative (fixed clipping) hides the timeline the user came
-		// for.
-		deficit := minCentreWidth - centre
-		takeFromApps := min(apps-1, deficit/2)
-		takeFromStatus := min(status-1, deficit-takeFromApps)
-		apps -= takeFromApps
-		status -= takeFromStatus
-		centre = total - apps - status
-		if centre < 0 {
-			centre = 0
-		}
-	}
-	if apps < 0 {
-		apps = 0
-	}
-	if status < 0 {
-		status = 0
-	}
-	return apps, centre, status
-}
-
-// centreSplit returns the (timeline, details) heights inside the centre
-// column. The details pane is capped at a fraction so the timeline stays
-// legible even in tall terminals.
-func centreSplit(total int) (timeline, details int) {
+// topRowWidths splits the top row into (events, status). Status takes whatever
+// Events leaves, with a floor so neither pane collapses on a narrow terminal.
+func topRowWidths(total int) (events, status int) {
 	if total <= 0 {
 		return 0, 0
 	}
-	details = total / 3
-	if details < 6 {
-		details = min(total/2, 6)
+	events = (total * eventsPct) / 100
+	if events < minPaneWidth {
+		events = min(minPaneWidth, total)
 	}
-	if details > 16 {
-		details = 16
+	status = total - events
+	if status < minPaneWidth && total > minPaneWidth {
+		status = min(minPaneWidth, total-1)
+		events = total - status
 	}
-	timeline = total - details
-	if timeline < 3 {
-		timeline = total
-		details = 0
+	return max(0, events), max(0, status)
+}
+
+// rowHeights splits the body into (top, logs). Each row keeps a minimum so a
+// short terminal still shows something in both.
+func rowHeights(total int) (top, logs int) {
+	if total <= 0 {
+		return 0, 0
 	}
-	return timeline, details
+	top = (total * topPct) / 100
+	if top < minRowHeight {
+		top = min(minRowHeight, total)
+	}
+	logs = total - top
+	if logs < minRowHeight && total > minRowHeight {
+		logs = min(minRowHeight, total-1)
+		top = total - logs
+	}
+	return max(0, top), max(0, logs)
 }
 
 func (m *model) bodyHeight() int {
 	return max(1, m.height-headerHeight-footerHeight-1)
 }
 
-func (m *model) timelineHeight() int {
-	tl, _ := centreSplit(m.bodyHeight())
-	// -2 for the surrounding border/padding.
-	return max(1, tl-2)
-}
-
-// layout syncs viewport sizes with the current window; called on every
-// WindowSizeMsg.
+// layout syncs the inspector viewport with the current window; called on every
+// WindowSizeMsg. Only the inspector overlay uses a viewport; the panes render to
+// fixed-size strings.
 func (m *model) layout() {
-	_, centre, _ := columnWidths(m.width)
-	_, det := centreSplit(m.bodyHeight())
-	m.details.Width = max(0, centre-4)
-	m.details.Height = max(1, det-2)
+	m.overlay.Width = max(0, m.width-4)
+	m.overlay.Height = max(1, m.bodyHeight()-2)
 }

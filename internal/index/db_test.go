@@ -19,6 +19,71 @@ func openTempDB(t *testing.T) *DB {
 	return db
 }
 
+// countSnapshots returns how many snapshot rows exist for a scope.
+func countSnapshots(t *testing.T, db *DB, scope string) int {
+	t.Helper()
+	var n int
+	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM snapshots WHERE scope = ?`, scope).Scan(&n); err != nil {
+		t.Fatalf("count snapshots: %v", err)
+	}
+	return n
+}
+
+// TestSnapshotDedup covers M7: a re-committed identical body records nothing,
+// but a changed body (even a revert to an earlier value) records a new row.
+func TestSnapshotDedup(t *testing.T) {
+	db := openTempDB(t)
+	base := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	const scope = "databag:a.b#c.d:prometheus/0"
+	ins := func(sec int, body string) {
+		if err := db.InsertSnapshot("m", base.Add(time.Duration(sec)*time.Second),
+			"databag", scope, body, "sp"); err != nil {
+			t.Fatalf("InsertSnapshot: %v", err)
+		}
+	}
+	ins(0, `{"addr":"1.1.1.1"}`) // first value -> recorded
+	ins(1, `{"addr":"1.1.1.1"}`) // identical re-commit -> deduped
+	ins(2, `{"addr":"1.1.1.1"}`) // identical again -> deduped
+	if got := countSnapshots(t, db, scope); got != 1 {
+		t.Fatalf("identical re-commits: want 1 snapshot, got %d", got)
+	}
+	ins(3, `{"addr":"2.2.2.2"}`) // real change -> recorded
+	if got := countSnapshots(t, db, scope); got != 2 {
+		t.Fatalf("after a real change: want 2 snapshots, got %d", got)
+	}
+	ins(4, `{"addr":"1.1.1.1"}`) // revert to an earlier value -> still a change
+	if got := countSnapshots(t, db, scope); got != 3 {
+		t.Fatalf("after reverting to an earlier value: want 3 snapshots, got %d", got)
+	}
+}
+
+// TestBootstrapThenIdenticalDelta covers M7+M8: a bootstrap snapshot at t0
+// followed by an RPC delta asserting the same value dedups, so point-in-time
+// still resolves to the bootstrap baseline rather than 'unknown'.
+func TestBootstrapThenIdenticalDelta(t *testing.T) {
+	db := openTempDB(t)
+	t0 := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	const scope = "unit-status:grafana/0"
+	if err := db.InsertBootstrapSnapshot("m", t0, "unit-status", scope, `{"value":"active"}`); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	// A later RPC re-asserts "active": no new row.
+	if err := db.InsertSnapshot("m", t0.Add(time.Minute), "unit-status", scope, `{"value":"active"}`, "sp1"); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+	if got := countSnapshots(t, db, scope); got != 1 {
+		t.Fatalf("identical delta after bootstrap: want 1 snapshot, got %d", got)
+	}
+	modelID, _ := db.UpsertModel("m")
+	rows, err := db.LatestPerScopeAsOf(modelID, "unit-status", t0.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("LatestPerScopeAsOf: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Body != `{"value":"active"}` {
+		t.Fatalf("point-in-time did not resolve to bootstrap baseline: %+v", rows)
+	}
+}
+
 func TestUpsertModelIsIdempotent(t *testing.T) {
 	db := openTempDB(t)
 	a, err := db.UpsertModel("prod")

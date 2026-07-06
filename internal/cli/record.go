@@ -160,6 +160,10 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 	var logWG sync.WaitGroup
 	if topo != nil {
 		models := modelsToStream(topo, filter)
+		// Ground-truth status bootstrap (M8): snapshot `juju status` for each
+		// scoped model before attaching the probe, so the Status pane is
+		// populated from t0 rather than all-"unknown".
+		captureStatusBootstrap(layout, topo.controllerName, models)
 		discover := filter.modelUUID == ""
 		if f.debugLog && len(models) > 0 {
 			logIng = newLogIngester(layout, topo.controllerName, discover)

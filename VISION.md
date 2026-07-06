@@ -522,7 +522,56 @@ Each milestone ends with a working, useful tool.
    - Machine journald ingester: `juju ssh … journalctl -f -o json` per machine with dynamic host/model discovery, written under `raw/machine/<model>/<host>/`.
    - Both share the log-record model and correlate to spans exactly like debug-log; each reconciles on a ticker and self-heals dropped streams.
    - Out of scope (deferred): eBPF **attach** on Kubernetes — `--attach kubectl-debug`/`--attach daemonset` modes and a shared informer for probe placement. The RPC probe already attaches to `containeragent` where it runs; only these CAAS/sidecar staging modes are deferred, since they need a probe container image and registry to test.
-7. **M7 — Polish** *(open-ended)*
+7. **M7 — True databag deltas** *(≈2 days)*
+   - Today a captured `Uniter.CommitHookChanges` carries the *entire* databag the
+     unit/app holds, not just the keys `relation-set` touched during the hook — so
+     a naive view paints every key as freshly added on every hook, and a hook that
+     rewrote identical values looks like a databag change when nothing actually
+     moved.
+   - Reconstruct a running per-scope databag in the extractor (see §5.5): keep the
+     last-known contents for each `databag:<relation>:<entity>` scope and, on each
+     commit, compute the real key-level delta (added / removed / changed) against
+     that running value rather than treating the whole payload as new.
+   - Persist a `snapshots` row only when the `content_hash` actually changes, and
+     record whether the commit was a real change so the viewer can distinguish a
+     databag *write* from a databag *no-op*.
+   - Event/timeline layer: the hook event is **always** shown — the hook still
+     fired and is navigationally relevant — but it only carries a databag-change
+     indicator (the `▲` change pip and the diff section) when the delta is
+     non-empty. A commit that rewrote identical values renders "no databag change".
+   - First-seen scopes (recorder started mid-life) seed the running value as a
+     baseline rather than reporting every key as added; the baseline snapshot is
+     marked `initial=false` per §5.5 so the viewer draws the "state at recording
+     start" chevron instead of a spurious all-added diff.
+   - Tested with a synth scenario containing a hook that `relation-set`s the values
+     it already holds (expected: event present, zero databag delta) and one that
+     changes a single key (expected: exactly one `~changed` line).
+8. **M8 — Ground-truth status bootstrap** *(≈2 days)*
+   - At recording start the snapshot store is empty, so every application and unit
+     renders `unknown` in the Status pane until an RPC happens to carry a status —
+     which for a quiet model can be minutes away, or never. The reconstructed
+     `juju status` ribbon is blank at exactly the moment the user opens the
+     recording.
+   - `record` (and `watch`) already call the Juju API `Status()` on connect to seed
+     inventory (§2.2; §4.1 step 2). Extend that bootstrap to also write baseline
+     `app-status:*` and `unit-status:*` snapshots (and, where cheap, `leadership`
+     and relation membership) at the recording's start timestamp, giving the
+     snapshot store a known-good floor to reconstruct from.
+   - Tag bootstrap snapshots with their provenance (`source=status-api`) so they are
+     distinguishable from RPC-derived deltas. Captured-RPC status deltas then apply
+     on top, and point-in-time reconstruction walks back to the bootstrap baseline
+     instead of falling off the end of history into `unknown`.
+   - Ordering: bootstrap snapshots carry `ts` = recording start (the earliest
+     possible instant) so every later delta sorts after them and the
+     "latest snapshot with `ts ≤ selection`" query never picks a stale delta over a
+     newer bootstrap value.
+   - `watch` (record + follow in one process) shares the same bootstrap path, so a
+     freshly-started live session shows real statuses immediately rather than a
+     screenful of `unknown` that fills in as traffic arrives.
+   - Tested with a synth scenario whose recorder "starts mid-life": assert the
+     Status pane shows the bootstrapped values from `t0`, and that a later status
+     RPC overrides exactly one scope while the others retain their baseline.
+9. **M9 — Polish** *(open-ended)*
    - Filter overlay, time-jump, split view, mouse support, themes, help overlay.
    - `verify`, `export`, `index` subcommands.
    - Documentation, demo GIFs, packaging as a snap.

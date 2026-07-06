@@ -12,138 +12,83 @@ import (
 	"github.com/lucabello/juju-lens/internal/recording"
 )
 
-// renderDetails renders the currently-selected span's attributes inside a
-// bordered viewport. The viewport itself is a member of the model so the
-// user can scroll long attribute lists independently.
-func (m *model) renderDetails(w, h int) string {
-	m.details.Width = max(0, w-4)
-	m.details.Height = max(1, h-2)
-	box := styleDetailsBox
-	// Highlight the border when the details pane holds focus, so it is obvious
-	// that navigation keys now scroll it (Tab toggles).
-	if m.focus == paneDetails {
-		box = box.BorderForeground(lipgloss.Color("4"))
-	}
-	return box.Width(w).Height(h).Render(m.details.View())
+// renderOverlayFrame draws the inspector overlay over the body. It is opened
+// with `enter` on an event and shows everything behind that event — the databag
+// it wrote, the RPCs it collapsed, and the logs that carried its span id.
+func (m *model) renderOverlayFrame() string {
+	h := m.bodyHeight()
+	m.overlay.Width = max(0, m.width-4)
+	m.overlay.Height = max(1, h-2)
+	box := styleBox.BorderForeground(lipgloss.Color("4"))
+	return box.Width(m.width).Height(h).Render(m.overlay.View())
 }
 
-func (m *model) refreshDetails() {
-	// When the Relations pane is focused, the details area shows the selected
-	// relation's databags instead of the current span.
-	if m.focus == paneRelations && m.relCursor < len(m.relations) {
-		m.renderRelationDetails(m.relations[m.relCursor])
-		return
-	}
-	if len(m.spans) == 0 {
-		m.details.SetContent("")
-		return
-	}
-	sp := m.currentSpan()
+// renderOverlay fills the overlay viewport with the selected event's detail.
+func (m *model) renderOverlay() {
+	ev := m.currentEvent()
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n", lipgloss.NewStyle().Bold(true).Render(sp.Name))
 
-	// Compact header: status · duration · start, then unit/model/service. Kept
-	// short so the correlated logs below sit near the top of the pane.
+	title := fmt.Sprintf("Inspector · %s", ev.summary)
+	fmt.Fprintf(&b, "%s\n", styleApp.Render(title))
+	fmt.Fprintf(&b, "%s\n", styleDim.Render("esc close · d diff · ↑/↓ scroll"))
+
 	statusStyle := styleOK
-	if sp.StatusCode == "ERROR" {
-		statusStyle = styleErr
-	}
-	fmt.Fprintf(&b, "  %s · %s · %s\n", statusStyle.Render(sp.StatusCode), sp.Duration(), sp.Start.Format("15:04:05.000"))
-	loc := make([]string, 0, 3)
-	if sp.Unit != "" {
-		loc = append(loc, "unit "+styleUnit.Render(sp.Unit))
-	}
-	if sp.Model != "" {
-		loc = append(loc, "model "+sp.Model)
-	}
-	if sp.Service != "" {
-		loc = append(loc, "service "+sp.Service)
-	}
-	if len(loc) > 0 {
-		fmt.Fprintf(&b, "  %s\n", strings.Join(loc, " · "))
-	}
-	if sp.StatusMsg != "" {
-		fmt.Fprintf(&b, "  %s\n", styleErr.Render(sp.StatusMsg))
-	}
-
-	// Trace context is shown only when the wire envelope actually carried it
-	// (real Juju tracing). Otherwise the ids are synthesised per-RPC from
-	// (pid, conn, request-id) and would imply a causal chain we don't
-	// reconstruct, so we hide them rather than mislead.
-	if traceID := sp.Attrs["trace-id"]; traceID != "" {
-		fmt.Fprintf(&b, "  trace: %s\n", traceID)
-		if sp.ParentSpanID != "" {
-			fmt.Fprintf(&b, "  parent: %s\n", sp.ParentSpanID)
+	statusCode := "OK"
+	sp, ok := m.spanByID(ev.spanID)
+	if ok {
+		if sp.StatusCode == "ERROR" {
+			statusStyle, statusCode = styleErr, "ERROR"
+		}
+		loc := make([]string, 0, 3)
+		if ev.unit != "" {
+			loc = append(loc, "unit "+styleUnit.Render(ev.unit))
+		}
+		if sp.Model != "" {
+			loc = append(loc, "model "+sp.Model)
+		}
+		fmt.Fprintf(&b, "\n%s · %s · %s\n", statusStyle.Render(statusCode), sp.Duration(), ev.ts.UTC().Format("15:04:05.000"))
+		if len(loc) > 0 {
+			fmt.Fprintf(&b, "%s\n", strings.Join(loc, " · "))
+		}
+		if ev.detail != "" {
+			fmt.Fprintf(&b, "%s\n", styleWarn.Render(ev.detail))
 		}
 	}
 
-	// Databags this span wrote (CommitHookChanges), with `d` toggling a diff
-	// against the previous value of each relation databag.
-	m.renderDatabags(&b, sp)
-	// Correlated logs come before the (often large) attributes blob so they are
-	// visible the moment a span is selected, without scrolling past a big
-	// params payload.
-	m.renderCorrelatedLogs(&b, sp)
-	if len(sp.Attrs) > 0 {
-		fmt.Fprintf(&b, "\n%s\n", lipgloss.NewStyle().Bold(true).Render("attributes"))
-		keys := make([]string, 0, len(sp.Attrs))
-		for k := range sp.Attrs {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			fmt.Fprintf(&b, "  %s = %s\n", k, sp.Attrs[k])
-		}
+	if ok && ev.hasDatabag {
+		m.renderDatabags(&b, sp)
 	}
-	m.details.SetContent(b.String())
-	m.details.GotoTop()
+	if ok {
+		m.renderNetwork(&b, sp)
+		m.renderCorrelatedLogs(&b, sp)
+	}
+	m.overlay.SetContent(b.String())
+	m.overlay.GotoTop()
 }
 
-// renderRelationDetails shows every entity's databag on the selected relation.
-// With diff mode (`d`) each entity's databag is shown as a diff against its
-// previous value; otherwise the current key/values are listed. Point-in-time
-// mode flows through automatically, since m.databags holds the as-of rows.
-func (m *model) renderRelationDetails(rel relationSummary) {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n", lipgloss.NewStyle().Bold(true).Render("Relation "+strings.Join(rel.Endpoints, " ↔ ")))
-	if m.pit && len(m.spans) > 0 {
-		fmt.Fprintf(&b, "  %s\n", styleDim.Render("as of "+m.currentSpan().Start.Format("15:04:05.000")))
+// renderNetwork lists the RPC behind the event: facade.method, timing, and the
+// verbatim params/response envelope fields. This is the "Network" view — the
+// raw traffic, demoted from the timeline to a drill-down.
+func (m *model) renderNetwork(b *strings.Builder, sp recording.SpanRow) {
+	fmt.Fprintf(b, "\n%s\n", lipgloss.NewStyle().Bold(true).Render("network"))
+	fmt.Fprintf(b, "  %s\n", sp.Name)
+	if len(sp.Attrs) == 0 {
+		return
 	}
-	hint := "press d for diff"
-	if m.diff {
-		hint = "diff vs previous — press d for values"
+	keys := make([]string, 0, len(sp.Attrs))
+	for k := range sp.Attrs {
+		keys = append(keys, k)
 	}
-	fmt.Fprintf(&b, "  %s\n", styleDim.Render(hint))
-
-	for _, entity := range rel.Entities {
-		scope := "databag:" + rel.Key + ":" + entity
-		row, ok := m.databags[scope]
-		fmt.Fprintf(&b, "\n%s\n", styleHook.Render("  "+entity))
-		if !ok {
-			fmt.Fprintf(&b, "    %s\n", styleDim.Render("(no databag)"))
-			continue
-		}
-		cur := parseFlatMap([]byte(row.Body))
-		if m.diff {
-			prevBody, _ := m.db.PrevSnapshotBefore(m.activeModel.ID, scope, row.Ts)
-			writeDatabagDiff(&b, parseFlatMap([]byte(prevBody)), cur)
-			continue
-		}
-		if len(cur) == 0 {
-			fmt.Fprintf(&b, "    %s\n", styleDim.Render("(empty)"))
-		}
-		for _, k := range sortedKeys(cur) {
-			fmt.Fprintf(&b, "    %s = %s\n", k, oneLine(cur[k]))
-		}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(b, "  %s = %s\n", k, oneLine(sp.Attrs[k]))
 	}
-	m.details.SetContent(b.String())
-	m.details.GotoTop()
 }
 
 // renderDatabags shows the relation databags a span wrote. In diff mode (`d`)
 // each databag is rendered as a per-key diff against the value it held just
-// before this write (green +added, red -removed, yellow ~changed); otherwise
-// the current key/values are listed.
+// before this write; otherwise the current key/values are listed. Because no-op
+// commits dedup away (M7), only real changes reach this path.
 func (m *model) renderDatabags(b *strings.Builder, sp recording.SpanRow) {
 	if m.db == nil {
 		return
@@ -152,15 +97,12 @@ func (m *model) renderDatabags(b *strings.Builder, sp recording.SpanRow) {
 	if err != nil || len(snaps) == 0 {
 		return
 	}
-	title := "databags"
+	title := "databags (press d for diff)"
 	if m.diff {
 		title = "databags (diff — press d for values)"
-	} else {
-		title = "databags (press d for diff)"
 	}
 	fmt.Fprintf(b, "\n%s\n", lipgloss.NewStyle().Bold(true).Render(title))
 	for _, s := range snaps {
-		// scope = "databag:<relation>:<entity>"
 		label := strings.TrimPrefix(s.Scope, "databag:")
 		fmt.Fprintf(b, "  %s\n", styleHook.Render(label))
 		cur := parseFlatMap([]byte(s.Body))
@@ -171,8 +113,7 @@ func (m *model) renderDatabags(b *strings.Builder, sp recording.SpanRow) {
 			continue
 		}
 		prevBody, _ := m.db.PrevSnapshotBefore(m.activeModel.ID, s.Scope, sp.Start)
-		prev := parseFlatMap([]byte(prevBody))
-		writeDatabagDiff(b, prev, cur)
+		writeDatabagDiff(b, parseFlatMap([]byte(prevBody)), cur)
 	}
 }
 
@@ -200,8 +141,7 @@ func writeDatabagDiff(b *strings.Builder, prev, cur map[string]string) {
 	}
 }
 
-// parseFlatMap decodes a databag JSON object into a flat string map. Values that
-// are not plain strings are re-encoded compactly so they still diff cleanly.
+// parseFlatMap decodes a databag JSON object into a flat string map.
 func parseFlatMap(body []byte) map[string]string {
 	out := map[string]string{}
 	if len(body) == 0 {
@@ -231,8 +171,8 @@ func sortedKeys(m map[string]string) []string {
 	return ks
 }
 
-// oneLine collapses whitespace/newlines so a multi-line databag value (a PEM
-// cert, a YAML blob) stays on one details row.
+// oneLine collapses whitespace/newlines so a multi-line databag value stays on
+// one row.
 func oneLine(s string) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	if len(s) > 80 {
@@ -242,15 +182,11 @@ func oneLine(s string) string {
 }
 
 // logWindow is how far on either side of a span's timespan we pull same-unit
-// log lines for the fuzzy (unit, time-window) correlation of VISION §7. RPC
-// spans are sub-second, so a few seconds of context around them is what makes
-// the hook a charm was running at that instant legible.
+// log lines for the fuzzy (unit, time-window) correlation of VISION §7.
 const logWindow = 5 * time.Second
 
 // renderCorrelatedLogs appends the debug-log lines correlated to sp: any line
-// carrying its span-id (exact), plus same-unit lines within logWindow. Lines
-// that matched by span-id are marked so the exact join stands out from the
-// fuzzy one.
+// carrying its span-id (exact, marked »), plus same-unit lines within logWindow.
 func (m *model) renderCorrelatedLogs(b *strings.Builder, sp recording.SpanRow) {
 	if m.db == nil {
 		return
@@ -266,12 +202,13 @@ func (m *model) renderCorrelatedLogs(b *strings.Builder, sp recording.SpanRow) {
 			marker = styleHook.Render("»")
 		}
 		ts := styleDim.Render(lg.Ts.Format("15:04:05.000"))
-		fmt.Fprintf(b, "  %s %s %s %s\n", marker, ts, logLevelStyle(lg.Level).Render(fmt.Sprintf("%-7s", lg.Level)), lg.Body)
+		fmt.Fprintf(b, "  %s %s %s [%s] %s\n", marker, ts,
+			logLevelStyle(lg.Level).Render(fmt.Sprintf("%-7s", lg.Level)),
+			logSourceLabel(lg.Source), lg.Body)
 	}
 }
 
-// logLevelStyle colours a log level so ERROR/WARNING stand out while routine
-// INFO/DEBUG stay quiet.
+// logLevelStyle colours a log level so ERROR/WARNING stand out.
 func logLevelStyle(level string) lipgloss.Style {
 	switch level {
 	case "ERROR", "CRITICAL":

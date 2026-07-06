@@ -26,10 +26,10 @@ func buildModel(t *testing.T, db *index.DB, active index.Model) *model {
 	m := &model{
 		dir:     t.TempDir(),
 		db:      db,
-		details: viewport.New(0, 0),
+		overlay: viewport.New(0, 0),
 		help:    help.New(),
 		keys:    defaultKeymap(),
-		focus:   paneTimeline,
+		focus:   paneEvents,
 	}
 	m.setActiveModel(active)
 	return m

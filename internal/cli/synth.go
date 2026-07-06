@@ -99,6 +99,38 @@ func runSynth(ctx context.Context, sc synth.Scenario, f synthFlags) error {
 		}
 	}
 
+	// Synthetic debug-log stream: interleaves with the RPCs so the viewer's
+	// merged Logs pane has real content. One rotating writer per model, bucketed
+	// by the line's own hour so file name and timestamps agree.
+	if logs, lerr := synth.DebugLog(sc, opts); lerr == nil {
+		var logTs time.Time
+		lw := recording.NewRotatingWriter(layout.JujuLogFileFor(f.model), func() time.Time { return logTs })
+		for _, ll := range logs {
+			logTs = ll.Ts
+			if _, err := lw.WriteLine([]byte(ll.Text)); err != nil {
+				_ = lw.Close()
+				return fmt.Errorf("writing synth debug-log: %w", err)
+			}
+		}
+		if err := lw.Close(); err != nil {
+			return err
+		}
+	}
+
+	// Ground-truth status bootstrap (M8): write the scenario's `juju status`
+	// document so the indexer seeds baseline app/unit status and the Status pane
+	// is populated from t0. Best-effort: a scenario without a bootstrap just
+	// falls back to RPC-derived status.
+	if boot, berr := synth.BootstrapStatus(sc, opts); berr == nil {
+		dir := layout.StatusDir(f.model)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("creating status dir: %w", err)
+		}
+		if err := os.WriteFile(layout.StatusBootstrapFile(f.model), boot, 0o644); err != nil {
+			return fmt.Errorf("writing status bootstrap: %w", err)
+		}
+	}
+
 	man := recording.New("juju-lens", "synth", "", "synth-"+string(sc))
 	man.Models = []recording.ModelInfo{{Name: f.model}}
 	man.AddSource(recording.SourceStatus{

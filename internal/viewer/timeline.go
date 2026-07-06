@@ -4,65 +4,96 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/charmbracelet/lipgloss"
 )
 
-// renderCentreColumn stacks timeline + details inside the middle column.
-func (m *model) renderCentreColumn() string {
-	_, w, _ := columnWidths(m.width)
-	tlH, detH := centreSplit(m.bodyHeight())
-	tl := m.renderTimeline(w, tlH)
-	det := m.renderDetails(w, detH)
-	return lipgloss.JoinVertical(lipgloss.Left, tl, det)
-}
+// renderEventsPane draws the Events pane (top-left): the timeline of derived
+// events, the navigator that drives every other pane.
+func (m *model) renderEventsPane() string {
+	w, _ := topRowWidths(m.width)
+	h, _ := rowHeights(m.bodyHeight())
+	bodyH := max(1, h-2)
 
-func (m *model) renderTimeline(w, h int) string {
-	inner := max(1, h-2)
-	rows := make([]string, 0, len(m.spans))
+	var rows []paneRow
+	if len(m.events) == 0 {
+		rows = append(rows, row(styleDim.Render("(no events yet)")))
+	}
 
 	start := 0
-	if m.cursor >= inner {
-		start = m.cursor - inner + 1
+	if m.cursor >= bodyH {
+		start = m.cursor - bodyH + 1
 	}
-	end := start + inner
-	if end > len(m.spans) {
-		end = len(m.spans)
-	}
-
-	// -4 accounts for borders (2) and horizontal padding (2).
-	textWidth := max(10, w-4)
+	end := min(start+bodyH, len(m.events))
 	for i := start; i < end; i++ {
-		sp := m.spans[i]
-		hook := sp.Hook
-		if hook == "" {
-			hook = "-"
-		}
-		unit := sp.Unit
-		if unit == "" {
-			unit = "?"
-		}
-		// Reserve fixed widths for the leading time/unit/hook columns
-		// and give the span name whatever fits after.
-		line := fmt.Sprintf("%s %-14s %s %s",
-			formatTime(sp.Start),
-			styleUnit.Render(truncate(unit, 14)),
-			styleHook.Render(truncate(hook, 22)),
-			truncate(sp.Name, max(0, textWidth-52)),
-		)
-		if i == m.cursor {
-			line = styleSelected.Width(textWidth).Render(line)
-		}
-		rows = append(rows, line)
+		rows = append(rows, m.eventRow(i))
 	}
-	for len(rows) < inner {
-		rows = append(rows, "")
-	}
-	return styleTimelineBox.Width(w).Height(h).Render(strings.Join(rows, "\n"))
+	return m.renderPane(paneEvents, w, h, "Events", rows)
 }
 
-func formatTime(t time.Time) string {
-	return t.UTC().Format("15:04:05.000")
+// eventRow formats one event line: time · unit · glyph summary. A hook's end
+// line trails its duration and, when its commit moved a databag (M7), a ✎db pip;
+// verbose-only raw transitions read dimmed and indented beneath the hooks.
+func (m *model) eventRow(i int) paneRow {
+	ev := m.events[i]
+	unit := ev.unit
+	if unit == "" {
+		unit = "·"
+	}
+	g := ev.glyph()
+	label := ev.summary
+	if ev.verboseOnly {
+		label = "  " + label // indent raw transitions under their hook
+	}
+	suffix := m.eventSuffix(ev)
+
+	if i == m.cursor {
+		// Selected: plain text so the reverse-video bar reads clean.
+		return selRow(fmt.Sprintf("%s %-12s %s %s%s",
+			ev.ts.UTC().Format("15:04:05"), truncate(unit, 12), g, label, suffix))
+	}
+	gStyle, labelStyle := styleDim, styleText
+	switch {
+	case ev.failed:
+		gStyle = styleErr
+	case ev.verboseOnly:
+		labelStyle = styleDim
+	}
+	return row(fmt.Sprintf("%s %s %s %s%s",
+		styleDim.Render(ev.ts.UTC().Format("15:04:05")),
+		styleUnit.Render(fmt.Sprintf("%-12s", truncate(unit, 12))),
+		gStyle.Render(g),
+		labelStyle.Render(label), suffix))
+}
+
+// eventSuffix is the trailing detail on a hook row: "failed", "(running)" for a
+// hook still open at the tail of a live recording, or the run duration, plus a
+// ✎db pip when the hook changed a databag. Raw transitions carry none, keeping
+// the default view a clean time·unit·hook grid.
+func (m *model) eventSuffix(ev event) string {
+	if ev.verboseOnly {
+		return ""
+	}
+	var b strings.Builder
+	switch {
+	case ev.failed:
+		b.WriteString("  " + styleErr.Render("failed"))
+	case ev.running:
+		b.WriteString("  " + styleDim.Render("(running)"))
+	case ev.dur > 0:
+		b.WriteString("  " + styleDim.Render("("+formatDur(ev.dur)+")"))
+	}
+	if ev.hasDatabag {
+		b.WriteString(" " + styleHook.Render("✎db"))
+	}
+	return b.String()
+}
+
+// formatDur renders a hook duration compactly: milliseconds under a second,
+// else seconds with one decimal.
+func formatDur(d time.Duration) string {
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	return fmt.Sprintf("%.1fs", d.Seconds())
 }
 
 func truncate(s string, n int) string {

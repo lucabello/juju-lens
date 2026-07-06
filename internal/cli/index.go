@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/lucabello/juju-lens/internal/index"
 	"github.com/lucabello/juju-lens/internal/recording"
@@ -81,6 +82,17 @@ func rebuildIndex(db *index.DB, dir string, verbose bool) error {
 			return fmt.Errorf("insert span %s: %w", spans[i].SpanID, err)
 		}
 	}
+	// Ground-truth status bootstrap (M8): seed baseline app/unit status from the
+	// `juju status` captured at recording start, stamped just before the first
+	// captured RPC so every later delta sorts after it (and dedups against it).
+	// These MUST be inserted before the RPC-derived snapshots below so the
+	// content-hash dedup baseline is the bootstrap value, not a later delta.
+	boots := index.LoadBootstrapSnapshots(dir, bootstrapTs(dir, spans))
+	for _, s := range boots {
+		if err := db.InsertBootstrapSnapshot(s.Model, s.Ts, string(s.Kind), s.Scope, string(s.Body)); err != nil {
+			return fmt.Errorf("insert bootstrap snapshot %s: %w", s.Scope, err)
+		}
+	}
 	snaps := index.ExtractSnapshots(spans)
 	for _, s := range snaps {
 		if err := db.InsertSnapshot(s.Model, s.Ts, string(s.Kind), s.Scope,
@@ -98,8 +110,25 @@ func rebuildIndex(db *index.DB, dir string, verbose bool) error {
 		}
 	}
 	if verbose {
-		fmt.Fprintf(os.Stderr, "juju-lens: indexed %d spans, %d snapshots, %d log records\n",
-			len(spans), len(snaps), len(logs))
+		fmt.Fprintf(os.Stderr, "juju-lens: indexed %d spans, %d snapshots (%d bootstrap), %d log records\n",
+			len(spans), len(snaps), len(boots), len(logs))
 	}
 	return nil
+}
+
+// bootstrapTs is the instant to stamp ground-truth status snapshots at: just
+// before the earliest captured RPC, so they precede (and form the dedup
+// baseline for) every RPC-derived snapshot. Falls back to the manifest's start
+// time, then to now, when there are no spans. The 1ms backdate keeps the
+// bootstrap strictly before the first span so point-in-time queries never
+// return a bootstrap row tied with a real delta.
+func bootstrapTs(dir string, spans []recording.SpanRow) time.Time {
+	t := time.Now().UTC()
+	if man, err := recording.Load(dir); err == nil && !man.Started.IsZero() {
+		t = man.Started
+	}
+	if len(spans) > 0 && spans[0].Start.Before(t) {
+		t = spans[0].Start
+	}
+	return t.Add(-time.Millisecond)
 }
