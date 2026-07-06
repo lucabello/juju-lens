@@ -17,6 +17,7 @@ const (
 	KindUnitStatus  SnapshotKind = "unit-status"
 	KindAgentStatus SnapshotKind = "agent-status"
 	KindDatabag     SnapshotKind = "databag" // relation databag (M4)
+	KindConfig      SnapshotKind = "config"   // charm application config (M9)
 )
 
 // Snapshot is a rebuildable point-in-time observation of Juju state derived
@@ -104,8 +105,48 @@ func SnapshotsForSpan(sp recording.SpanRow) []Snapshot {
 		return statusSnapshots(sp, params, KindAppStatus)
 	case method == "CommitHookChanges":
 		return databagSnapshots(sp, params)
+	case method == "ConfigSettings":
+		return configSnapshots(sp)
 	}
 	return nil
+}
+
+// configSnapshots turns a Uniter.ConfigSettings RPC into a charm-config
+// snapshot. Unlike the databag/status extractors the value lives in the
+// *response* (params only names the unit), so we read Attrs["response"], whose
+// shape is {"results":[{"settings":{...}}]}. The settings object is the charm
+// config verbatim; the scope is application-wide ("config:<app>") since every
+// unit of an application reads the same config. Empty settings (subordinate or
+// config-less charms) yield nothing.
+func configSnapshots(sp recording.SpanRow) []Snapshot {
+	resp := sp.Attrs["response"]
+	if resp == "" {
+		return nil
+	}
+	var r struct {
+		Results []struct {
+			Settings json.RawMessage `json:"settings"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(resp), &r); err != nil || len(r.Results) == 0 {
+		return nil
+	}
+	settings := r.Results[0].Settings
+	if !hasContent(settings) {
+		return nil
+	}
+	app := appName(sp.Unit)
+	if app == "" {
+		return nil
+	}
+	return []Snapshot{{
+		Model:           sp.Model,
+		Kind:            KindConfig,
+		Scope:           "config:" + app,
+		Body:            append([]byte(nil), settings...),
+		Ts:              sp.Start,
+		ProducingSpanID: sp.SpanID,
+	}}
 }
 
 // statusSnapshots decodes a status-setter's params into one snapshot per
@@ -252,13 +293,29 @@ func hasContent(raw json.RawMessage) bool {
 	return s != "" && s != "null" && s != "{}"
 }
 
-// relationKey normalises a relation tag into a stable display key:
+// relationKey normalises a relation tag into a stable, canonical display key:
 //
-//	"relation-loki.certificates#ca.certificates" -> "loki.certificates#ca.certificates"
+//	"relation-loki.certificates#ca.certificates" -> "ca.certificates#loki.certificates"
 //
+// The two "app.endpoint" segments are sorted so a relation yields the same key
+// no matter which side Juju (or a bootstrap `juju show-unit`) lists first — that
+// is what lets RPC-derived and bootstrap-derived databags share one scope.
 // Numeric relation ids (from EnterScope-style params) are returned as-is.
 func relationKey(relation string) string {
-	return strings.TrimPrefix(relation, "relation-")
+	return canonicalRelationKey(strings.TrimPrefix(relation, "relation-"))
+}
+
+// canonicalRelationKey sorts the two segments of an "a.ep#b.ep" relation key.
+// Peer relations (a single segment) and any non-"#" form are returned unchanged.
+func canonicalRelationKey(key string) string {
+	a, b, ok := strings.Cut(key, "#")
+	if !ok {
+		return key
+	}
+	if a > b {
+		a, b = b, a
+	}
+	return a + "#" + b
 }
 
 // appName turns "grafana/0" into "grafana"; returns the input unchanged when it

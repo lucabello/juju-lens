@@ -143,11 +143,7 @@ func (m *model) renderStatusPane() string {
 		}
 	}
 
-	label := "latest known"
-	if m.pit {
-		label = "as of " + m.currentTs().UTC().Format("15:04:05.000")
-	}
-	rows := []paneRow{row(styleDim.Render(label))}
+	rows := []paneRow{row(styleDim.Render("as of " + m.currentTs().UTC().Format("15:04:05.000")))}
 
 	// The app/unit universe comes from spans *and* snapshots, so a bootstrap-only
 	// app (one with no captured RPCs, M8) still appears.
@@ -155,7 +151,7 @@ func (m *model) renderStatusPane() string {
 	rows = append(rows, row(styleSection.Render("Applications")))
 	rows = append(rows, appStatusRows(apps, m.appStatuses, changedApp)...)
 	rows = append(rows, row(""))
-	rows = append(rows, row(styleSection.Render("Units  ")+styleDim.Render("workload / agent")))
+	rows = append(rows, row(styleSection.Render("Units")+styleDim.Render("  workload / agent")))
 	var units []string
 	for _, app := range apps {
 		units = append(units, unitsByApp[app]...)
@@ -164,11 +160,14 @@ func (m *model) renderStatusPane() string {
 
 	if len(m.relations) > 0 {
 		rows = append(rows, row(""))
-		header := "Relations"
+		// Render the section title and the hint separately: styleSection
+		// underlines per-grapheme, which mangles any ANSI already inside the
+		// string into literal "[90m" text.
+		header := styleSection.Render("Relations")
 		if m.focus == paneStatus {
 			header += styleDim.Render("  (↑/↓ select)")
 		}
-		rows = append(rows, row(styleSection.Render(header)))
+		rows = append(rows, row(header))
 		sel := -1
 		if m.focus == paneStatus {
 			sel = m.relCursor
@@ -270,9 +269,13 @@ func (m *model) unitStatusRows(names []string, changed string) []paneRow {
 			ws := statusStyleFor(wl.Value)
 			glyph, workload = ws.Render(statusGlyph(wl.Value)), ws.Render(wl.Value)
 		}
+		// The agent (idle/executing) status is always shown, "unknown" when we
+		// never captured it, so the "workload / agent" pair is never half-empty.
+		agentPart := styleDim.Render("unknown")
 		if agent, ok := m.agentStatuses[name]; ok && agent.Known && agent.Value != "" {
-			workload += styleDim.Render(" / ") + agentStyleFor(agent.Value).Render(agent.Value)
+			agentPart = agentStyleFor(agent.Value).Render(agent.Value)
 		}
+		workload += styleDim.Render(" / ") + agentPart
 		out = append(out, row(fmt.Sprintf("%s %s %s %s",
 			pip, glyph, styleText.Render(fmt.Sprintf("%-16s", name)), workload)))
 		if known && wl.Known && wl.Message != "" {
@@ -283,31 +286,45 @@ func (m *model) unitStatusRows(names []string, changed string) []paneRow {
 }
 
 // relationRows renders the Relations section: one line per relation showing its
-// endpoints, then a dim line listing the entities with a databag on it. sel is
-// the index of the selected relation (-1 for none), marked with a caret.
+// endpoints as "app:endpoint ↔ app:endpoint". The application name is plain and
+// only the ":endpoint" carries the accent colour. sel is the index of the
+// selected relation (-1 for none), drawn as a reverse-video bar.
 func relationRows(rels []relationSummary, sel int) []paneRow {
 	var out []paneRow
 	for i, r := range rels {
-		marker := "  "
-		eps := styleHook.Render(strings.Join(r.Endpoints, " ↔ "))
+		eps := renderEndpoints(r.Endpoints)
 		if i == sel {
-			marker = styleHook.Render("▸ ")
-			eps = styleSelected.Render(strings.Join(r.Endpoints, " ↔ "))
-		}
-		out = append(out, row(marker+eps))
-		if len(r.Entities) > 0 {
-			out = append(out, row("      "+styleDim.Render(strings.Join(r.Entities, ", "))))
+			out = append(out, selRow("▸ "+eps))
+		} else {
+			out = append(out, row("  "+eps))
 		}
 	}
 	return out
 }
 
-// agentStyleFor colours the agent (executing/idle) status. idle is the resting
-// state so it stays calm; executing/allocating draw the eye; failures are red.
+// renderEndpoints renders a relation's endpoints as "app:endpoint ↔ …" with the
+// application name in normal text and only the ":endpoint" accented, joined by a
+// dim arrow. Each segment is rendered on its own so no styled string is nested
+// inside another (which would corrupt into literal escape text).
+func renderEndpoints(eps []string) string {
+	parts := make([]string, len(eps))
+	for i, ep := range eps {
+		if app, name, ok := strings.Cut(ep, ":"); ok {
+			parts[i] = styleText.Render(app) + styleHook.Render(":"+name)
+		} else {
+			parts[i] = styleHook.Render(ep)
+		}
+	}
+	return strings.Join(parts, styleDim.Render(" ↔ "))
+}
+
+// agentStyleFor colours the agent (executing/idle) status. idle is the healthy
+// resting state, so it reads green like an active workload; executing/allocating
+// draw the eye; failures are red.
 func agentStyleFor(value string) lipgloss.Style {
 	switch value {
 	case "idle":
-		return styleDim
+		return styleOK
 	case "executing", "allocating", "rebooting":
 		return styleWarn
 	case "failed", "error", "lost":

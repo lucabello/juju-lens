@@ -18,26 +18,46 @@ func (m *model) renderEventsPane() string {
 		rows = append(rows, row(styleDim.Render("(no events yet)")))
 	}
 
+	unitW := m.unitColWidth()
 	start := 0
 	if m.cursor >= bodyH {
 		start = m.cursor - bodyH + 1
 	}
 	end := min(start+bodyH, len(m.events))
 	for i := start; i < end; i++ {
-		rows = append(rows, m.eventRow(i))
+		rows = append(rows, m.eventRow(i, unitW))
 	}
 	return m.renderPane(paneEvents, w, h, "Events", rows)
+}
+
+// unitColWidth sizes the unit column to the longest unit name in view so names
+// like "alertmanager/0" are never clipped, capped so a stray long name can't
+// swallow the pane (the line still scrolls horizontally past the cap).
+func (m *model) unitColWidth() int {
+	const floor, ceil = 8, 24
+	w := floor
+	for _, ev := range m.events {
+		u := ev.unit
+		if u == "" {
+			u = "·"
+		}
+		if n := len([]rune(u)); n > w {
+			w = n
+		}
+	}
+	return min(w, ceil)
 }
 
 // eventRow formats one event line: time · unit · glyph summary. A hook's end
 // line trails its duration and, when its commit moved a databag (M7), a ✎db pip;
 // verbose-only raw transitions read dimmed and indented beneath the hooks.
-func (m *model) eventRow(i int) paneRow {
+func (m *model) eventRow(i, unitW int) paneRow {
 	ev := m.events[i]
 	unit := ev.unit
 	if unit == "" {
 		unit = "·"
 	}
+	unit = pad(truncate(unit, unitW), unitW)
 	g := ev.glyph()
 	label := ev.summary
 	if ev.verboseOnly {
@@ -47,8 +67,8 @@ func (m *model) eventRow(i int) paneRow {
 
 	if i == m.cursor {
 		// Selected: plain text so the reverse-video bar reads clean.
-		return selRow(fmt.Sprintf("%s %-12s %s %s%s",
-			ev.ts.UTC().Format("15:04:05"), truncate(unit, 12), g, label, suffix))
+		return selRow(fmt.Sprintf("%s %s %s %s%s",
+			ev.ts.UTC().Format("15:04:05"), unit, g, label, suffix))
 	}
 	gStyle, labelStyle := styleDim, styleText
 	switch {
@@ -59,15 +79,24 @@ func (m *model) eventRow(i int) paneRow {
 	}
 	return row(fmt.Sprintf("%s %s %s %s%s",
 		styleDim.Render(ev.ts.UTC().Format("15:04:05")),
-		styleUnit.Render(fmt.Sprintf("%-12s", truncate(unit, 12))),
+		styleUnit.Render(unit),
 		gStyle.Render(g),
 		labelStyle.Render(label), suffix))
 }
 
+// pad right-pads s with spaces to n visible runes (no truncation; callers
+// truncate first when needed).
+func pad(s string, n int) string {
+	if d := n - len([]rune(s)); d > 0 {
+		return s + strings.Repeat(" ", d)
+	}
+	return s
+}
+
 // eventSuffix is the trailing detail on a hook row: "failed", "(running)" for a
 // hook still open at the tail of a live recording, or the run duration, plus a
-// ✎db pip when the hook changed a databag. Raw transitions carry none, keeping
-// the default view a clean time·unit·hook grid.
+// "(databag changes)" tag when the hook changed a databag. Raw transitions carry
+// none, keeping the default view a clean time·unit·hook grid.
 func (m *model) eventSuffix(ev event) string {
 	if ev.verboseOnly {
 		return ""
@@ -82,7 +111,7 @@ func (m *model) eventSuffix(ev event) string {
 		b.WriteString("  " + styleDim.Render("("+formatDur(ev.dur)+")"))
 	}
 	if ev.hasDatabag {
-		b.WriteString(" " + styleHook.Render("✎db"))
+		b.WriteString("  " + styleHook.Render("(databag changes)"))
 	}
 	return b.String()
 }

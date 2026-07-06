@@ -98,6 +98,24 @@ func (l Layout) StatusBootstrapFile(model string) string {
 	return filepath.Join(l.StatusDir(model), "bootstrap.json")
 }
 
+// StatusDatabagsFile names the ground-truth relation-data file for a model:
+// raw/status/<model>/databags.json. It holds the verbatim `juju show-unit
+// --format=json` output captured at recording start; the indexer seeds baseline
+// databag snapshots (and hence relations) from it so the Status pane shows the
+// relations that already existed before recording began.
+func (l Layout) StatusDatabagsFile(model string) string {
+	return filepath.Join(l.StatusDir(model), "databags.json")
+}
+
+// StatusConfigFile names the ground-truth charm-config file for a model:
+// raw/status/<model>/config.json. It holds a JSON object mapping each
+// application to its verbatim `juju config <app> --format=json` output, captured
+// at recording start; the indexer seeds baseline config snapshots from it so a
+// config-changed event has a "before" to diff against from t0.
+func (l Layout) StatusConfigFile(model string) string {
+	return filepath.Join(l.StatusDir(model), "config.json")
+}
+
 // DerivedDir returns the derived/ directory where cached artifacts live.
 func (l Layout) DerivedDir() string { return filepath.Join(l.Root, "derived") }
 

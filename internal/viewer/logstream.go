@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/lucabello/juju-lens/internal/index"
 )
 
@@ -131,6 +132,20 @@ func (m *model) streamLine(it streamItem, focused bool, curSpan string) paneRow 
 		styleSource.Render("["+src+"]"),
 		level,
 		styleText.Render(lg.Body)))
+}
+
+// logLevelStyle colours a log level so ERROR/WARNING stand out.
+func logLevelStyle(level string) lipgloss.Style {
+	switch level {
+	case "ERROR", "CRITICAL":
+		return styleErr
+	case "WARNING":
+		return styleWarn
+	case "INFO":
+		return styleOK
+	default:
+		return styleDim
+	}
 }
 
 // logSourceLabel maps a raw log source to the short tag shown in the stream and

@@ -21,6 +21,7 @@ package viewer
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/lucabello/juju-lens/internal/index"
@@ -72,8 +73,9 @@ func tickCmd() tea.Cmd {
 type keymap struct {
 	Up, Down, PageUp, PageDown, Home, End key.Binding
 	ScrollLeft, ScrollRight, Wrap         key.Binding
-	Focus1, Focus2, Focus3, Tab           key.Binding
-	Inspect, Free, PointInTime, Diff      key.Binding
+	Focus1, Focus2, Focus3, Tab, ShiftTab key.Binding
+	Inspect, Free                         key.Binding
+	Diff, CopyCur, CopyPrev               key.Binding
 	Verbose, ModelPick, Quit              key.Binding
 }
 
@@ -92,10 +94,12 @@ func defaultKeymap() keymap {
 		Focus2:      key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "logs")),
 		Focus3:      key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "status")),
 		Tab:         key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "cycle")),
+		ShiftTab:    key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧Tab", "cycle back")),
 		Inspect:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "inspect")),
 		Free:        key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "free-scroll")),
-		PointInTime: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "latest/pit")),
 		Diff:        key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "diff")),
+		CopyCur:     key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy after")),
+		CopyPrev:    key.NewBinding(key.WithKeys("Y"), key.WithHelp("Y", "copy before")),
 		Verbose:     key.NewBinding(key.WithKeys("."), key.WithHelp(".", "verbose")),
 		ModelPick:   key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "model")),
 		Quit:        key.NewBinding(key.WithKeys("q", "esc", "ctrl+c"), key.WithHelp("q", "quit")),
@@ -103,14 +107,14 @@ func defaultKeymap() keymap {
 }
 
 func (k keymap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Focus1, k.Focus2, k.Focus3, k.Inspect, k.Verbose, k.PointInTime, k.Diff, k.ModelPick, k.Quit}
+	return []key.Binding{k.Focus1, k.Focus2, k.Focus3, k.Inspect, k.Verbose, k.ModelPick, k.Quit}
 }
 
 func (k keymap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
-		{k.ScrollLeft, k.ScrollRight, k.Wrap, k.Focus1, k.Focus2, k.Focus3, k.Tab, k.Free},
-		{k.Inspect, k.Verbose, k.PointInTime, k.Diff, k.ModelPick, k.Quit},
+		{k.ScrollLeft, k.ScrollRight, k.Wrap, k.Focus1, k.Focus2, k.Focus3, k.Tab, k.ShiftTab, k.Free},
+		{k.Inspect, k.Verbose, k.ModelPick, k.Quit},
 	}
 }
 
@@ -151,15 +155,17 @@ type model struct {
 	appStatuses   map[string]statusValue
 	unitStatuses  map[string]statusValue
 	agentStatuses map[string]statusValue
-	relations     []relationSummary
-	databags      map[string]index.SnapshotRow
-	relCursor     int
-	pit           bool // point-in-time (default) vs latest-known
-	diff          bool
+	relations      []relationSummary
+	databags       map[string]index.SnapshotRow
+	relCursor      int
+	relationBroken map[string][]time.Time // relation key -> relation-broken timestamps
 
 	// Inspector overlay.
 	overlayOn bool
 	overlay   viewport.Model
+	diffMode  bool   // `d`: overlay a git-style diff on the pretty-printed value
+	copyCur   string // current databag/config JSON for `y`
+	copyPrev  string // previous databag/config JSON for `Y`
 
 	follow bool
 	atTail bool
@@ -186,7 +192,6 @@ func newModel(dir string, man *recording.Manifest, db *index.DB, models []index.
 		help:      help.New(),
 		keys:      defaultKeymap(),
 		focus:     paneEvents,
-		pit:       true, // scrubbing replays state by default — the whole pitch
 	}
 	if len(models) > 1 {
 		m.picker = newModelPicker(models)
@@ -208,6 +213,7 @@ func (m *model) setActiveModel(mm index.Model) {
 	m.allEvents = buildEvents(spans, m.databagSpans)
 	m.events = nil // force applyVerboseFilter to select the newest visible event
 	m.appTree = buildAppTree(spans)
+	m.relationBroken = relationBrokenTimes(spans)
 	m.applyVerboseFilter()
 }
 
@@ -272,11 +278,11 @@ func (m *model) spanByID(id string) (recording.SpanRow, bool) {
 	return recording.SpanRow{}, false
 }
 
-// refreshStatus recomputes the Status pane. Point-in-time (default) shows the
-// state as of the selected event; `s` toggles to latest-known.
+// refreshStatus recomputes the Status pane, always point-in-time: the state as
+// of the selected event, so the pane follows the cursor.
 func (m *model) refreshStatus() {
 	rows := func(kind string) []index.SnapshotRow {
-		if m.pit && len(m.events) > 0 {
+		if len(m.events) > 0 {
 			r, _ := m.db.LatestPerScopeAsOf(m.activeModel.ID, kind, m.currentTs())
 			return r
 		}
@@ -287,7 +293,7 @@ func (m *model) refreshStatus() {
 	m.unitStatuses = scopeMap(rows(string(index.KindUnitStatus)), "unit-status:")
 	m.agentStatuses = scopeMap(rows(string(index.KindAgentStatus)), "agent-status:")
 	databagRows := rows(string(index.KindDatabag))
-	m.relations = buildRelations(databagRows)
+	m.relations = m.currentRelations(buildRelations(databagRows), latestWriteByRelation(databagRows), m.currentTs())
 	m.databags = map[string]index.SnapshotRow{}
 	for _, r := range databagRows {
 		m.databags[r.Scope] = r
@@ -295,6 +301,72 @@ func (m *model) refreshStatus() {
 	if m.relCursor >= len(m.relations) {
 		m.relCursor = max(0, len(m.relations)-1)
 	}
+}
+
+// currentRelations drops relations that don't exist at instant now. A databag
+// lingers in the index after its relation is gone, so existence is decided by
+// comparing signals that are reliably attributed to a relation key: a relation
+// is gone when its most recent relation-broken is newer than its most recent
+// databag write. A later databag write (the relation-changed of a re-add) brings
+// it back — which is what makes remove-then-re-add cycles track correctly, even
+// for relations created mid-recording (whose relation-created hook, unlike
+// relation-broken, rarely carries the key).
+func (m *model) currentRelations(rels []relationSummary, lastWrite map[string]time.Time, now time.Time) []relationSummary {
+	var out []relationSummary
+	for _, r := range rels {
+		broken := m.lastBrokenAsOf(r.Key, now)
+		if !broken.IsZero() && broken.After(lastWrite[r.Key]) {
+			continue // broken more recently than any databag write: gone
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// lastBrokenAsOf returns the newest relation-broken time for key at or before t,
+// or the zero time when none.
+func (m *model) lastBrokenAsOf(key string, t time.Time) time.Time {
+	var last time.Time
+	for _, bt := range m.relationBroken[key] {
+		if bt.After(t) {
+			break
+		}
+		last = bt
+	}
+	return last
+}
+
+// relationBrokenTimes records, per canonical relation key, the timestamps of its
+// relation-broken hooks (the point the relation ceased to exist), sorted. Unlike
+// relation-created, relation-broken reliably carries the relation key.
+func relationBrokenTimes(spans []recording.SpanRow) map[string][]time.Time {
+	out := map[string][]time.Time{}
+	for _, sp := range spans {
+		if sp.Hook == "relation-broken" && sp.Relation != "" {
+			out[sp.Relation] = append(out[sp.Relation], sp.Start)
+		}
+	}
+	for _, ts := range out {
+		sort.Slice(ts, func(i, j int) bool { return ts[i].Before(ts[j]) })
+	}
+	return out
+}
+
+// latestWriteByRelation returns, per relation key, the newest databag-write
+// timestamp among the snapshot rows given (already point-in-time as of the
+// cursor). It is the "relation is live" signal paired with relationBrokenTimes.
+func latestWriteByRelation(rows []index.SnapshotRow) map[string]time.Time {
+	out := map[string]time.Time{}
+	for _, r := range rows {
+		key, _ := splitDatabagScope(r.Scope)
+		if key == "" {
+			continue
+		}
+		if t, ok := out[key]; !ok || r.Ts.After(t) {
+			out[key] = r.Ts
+		}
+	}
+	return out
 }
 
 func (m *model) Init() tea.Cmd {
@@ -376,8 +448,12 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Quit), key.Matches(msg, m.keys.Inspect):
 			m.overlayOn = false
 		case key.Matches(msg, m.keys.Diff):
-			m.diff = !m.diff
+			m.diffMode = !m.diffMode
 			m.renderOverlay()
+		case key.Matches(msg, m.keys.CopyCur):
+			return m, copyCmd(m.copyCur)
+		case key.Matches(msg, m.keys.CopyPrev):
+			return m, copyCmd(m.copyPrev)
 		default:
 			var cmd tea.Cmd
 			m.overlay, cmd = m.overlay.Update(msg)
@@ -399,7 +475,10 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.setFocus(paneStatus)
 		return m, nil
 	case key.Matches(msg, m.keys.Tab):
-		m.setFocus((m.focus + 1) % 3)
+		m.cycleFocus(+1)
+		return m, nil
+	case key.Matches(msg, m.keys.ShiftTab):
+		m.cycleFocus(-1)
 		return m, nil
 	case key.Matches(msg, m.keys.Wrap):
 		m.wrap = !m.wrap
@@ -418,18 +497,14 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.picker = newModelPicker(m.allModels)
 		}
 		return m, nil
-	case key.Matches(msg, m.keys.PointInTime):
-		m.pit = !m.pit
-		m.refreshStatus()
-		return m, nil
 	case key.Matches(msg, m.keys.Inspect):
-		if len(m.events) > 0 {
+		// Only events that actually have something to show — a databag change or
+		// a config change — are inspectable.
+		if inspectable(m.currentEvent()) {
 			m.overlayOn = true
 			m.renderOverlay()
+			m.overlay.GotoTop()
 		}
-		return m, nil
-	case key.Matches(msg, m.keys.Diff):
-		m.diff = !m.diff
 		return m, nil
 	case key.Matches(msg, m.keys.Verbose):
 		m.verbose = !m.verbose
@@ -480,6 +555,23 @@ func navDelta(msg tea.KeyMsg, k keymap) int {
 	return 0
 }
 
+// focusOrder is the visual order Tab cycles through: the two top panes left to
+// right, then the Logs stream beneath — Events, Status, Logs.
+var focusOrder = []paneID{paneEvents, paneStatus, paneLogs}
+
+// cycleFocus moves focus dir steps along focusOrder (+1 Tab, -1 Shift+Tab).
+func (m *model) cycleFocus(dir int) {
+	idx := 0
+	for i, p := range focusOrder {
+		if p == m.focus {
+			idx = i
+			break
+		}
+	}
+	n := len(focusOrder)
+	m.setFocus(focusOrder[(idx+dir+n)%n])
+}
+
 // setFocus switches the active pane, resetting the horizontal scroll so each
 // pane starts from column zero rather than inheriting the previous pane's offset.
 func (m *model) setFocus(p paneID) {
@@ -494,9 +586,7 @@ func (m *model) moveCursor(delta int) {
 		return
 	}
 	m.cursor = clamp(m.cursor+delta, 0, len(m.events)-1)
-	if m.pit {
-		m.refreshStatus()
-	}
+	m.refreshStatus() // the Status pane always follows the cursor
 }
 
 func (m *model) moveLogCursor(delta int) {
@@ -550,12 +640,8 @@ func (m *model) renderHeader() string {
 	if m.follow && m.atTail {
 		live = "  " + styleErr.Render("● LIVE")
 	}
-	mode := "pit"
-	if !m.pit {
-		mode = "latest"
-	}
-	title := fmt.Sprintf("juju-lens · %s · model: %s · %d events · @%s [%s]%s",
-		controller, modelsSummary, len(m.events), m.currentTs().UTC().Format("15:04:05.000"), mode, live)
+	title := fmt.Sprintf("juju-lens · %s · model: %s · %d events · @%s%s",
+		controller, modelsSummary, len(m.events), m.currentTs().UTC().Format("15:04:05.000"), live)
 	return styleHeader.Width(m.width).Render(title)
 }
 
@@ -579,7 +665,10 @@ var (
 	styleText    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "235", Dark: "252"})
 	styleSource  = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 	styleErr     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	styleOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	// styleDel is the removed-line colour in the inspector diff: red, but not
+	// bold — the colour alone carries the meaning.
+	styleDel = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	styleOK  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	styleWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	styleRuler   = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Bold(true)
 	styleSection = lipgloss.NewStyle().Bold(true).Underline(true)

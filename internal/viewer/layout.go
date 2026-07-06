@@ -62,4 +62,7 @@ func (m *model) bodyHeight() int {
 func (m *model) layout() {
 	m.overlay.Width = max(0, m.width-4)
 	m.overlay.Height = max(1, m.bodyHeight()-2)
+	// Bound the help footer so its single line is elided rather than spilling
+	// past the terminal on a narrow window.
+	m.help.Width = m.width
 }

@@ -33,6 +33,12 @@ func (m *model) renderPane(p paneID, w, h int, title string, rows []paneRow) str
 	bodyH := max(1, h-2) // top + bottom border
 	focused := m.focus == p
 
+	// Stop rightward scrolling once the widest visible row is fully shown, so a
+	// pane can't be scrolled into empty space past its content.
+	if focused && !m.wrap {
+		m.hScroll = min(m.hScroll, maxHScroll(rows, bodyH, inner))
+	}
+
 	out := make([]string, 0, bodyH)
 	for _, r := range rows {
 		for _, phys := range m.fitLine(r.text, inner, focused) {
@@ -51,8 +57,28 @@ func (m *model) renderPane(p paneID, w, h int, title string, rows []paneRow) str
 	for len(out) < bodyH {
 		out = append(out, "")
 	}
-	box := m.boxFor(p).Width(w).Height(h).Render(strings.Join(out, "\n"))
+	// lipgloss adds the border outside .Width()/.Height(), so pass the inner box
+	// size (w/h minus the 1-cell border on each edge). Otherwise every bordered
+	// pane renders 2 cols/rows wider than its slot and the row overflows the
+	// terminal (inner/bodyH above already budget for the border+padding).
+	box := m.boxFor(p).Width(max(1, w-2)).Height(max(1, h-2)).Render(strings.Join(out, "\n"))
 	return spliceTitle(box, title, focused)
+}
+
+// maxHScroll is the furthest a pane can scroll right: the widest of the rows it
+// will actually display (the first bodyH, since without wrap each row is one
+// line) minus the visible width. Zero when everything already fits.
+func maxHScroll(rows []paneRow, bodyH, inner int) int {
+	widest := 0
+	for i, r := range rows {
+		if i >= bodyH {
+			break
+		}
+		if wv := ansi.StringWidth(r.text); wv > widest {
+			widest = wv
+		}
+	}
+	return max(0, widest-inner)
 }
 
 // fitLine turns one logical (already-styled) row into the physical lines shown

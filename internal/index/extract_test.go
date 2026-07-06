@@ -137,10 +137,11 @@ func TestDatabagSnapshotsFromCommitHookChanges(t *testing.T) {
 	// Expect: loki/0 unit databag on both non-empty relations, plus the loki
 	// application databag on the second (application-settings present). The
 	// empty-settings third relation yields nothing.
+	// Scopes carry the canonical (sorted-segment) relation key.
 	want := map[string]string{
-		"databag:loki.certificates#ca.certificates:loki/0":                 `{"csr":"PEM"}`,
-		"databag:prometheus.metrics-endpoint#loki.metrics-endpoint:loki/0": `{"addr":"10.0.0.1"}`,
-		"databag:prometheus.metrics-endpoint#loki.metrics-endpoint:loki":   `{"scrape":"cfg"}`,
+		"databag:ca.certificates#loki.certificates:loki/0":                 `{"csr":"PEM"}`,
+		"databag:loki.metrics-endpoint#prometheus.metrics-endpoint:loki/0": `{"addr":"10.0.0.1"}`,
+		"databag:loki.metrics-endpoint#prometheus.metrics-endpoint:loki":   `{"scrape":"cfg"}`,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("expected %d databag snapshots, got %d: %+v", len(want), len(got), got)
@@ -160,6 +161,51 @@ func TestDatabagSnapshotsFromCommitHookChanges(t *testing.T) {
 		if s.ProducingSpanID != "s1" {
 			t.Errorf("scope %s missing producing span id", s.Scope)
 		}
+	}
+}
+
+// configSpan builds a span for a Uniter.ConfigSettings RPC: the config value
+// lives in the response envelope, not the params.
+func configSpan(id, unit, response string) recording.SpanRow {
+	return recording.SpanRow{
+		SpanID: id, Model: "default", Unit: unit,
+		Name: "Uniter.ConfigSettings",
+		Attrs: map[string]string{
+			"facade":   "Uniter",
+			"method":   "ConfigSettings",
+			"params":   `{"entities":[{"tag":"unit-` + unit + `-0"}]}`,
+			"response": response,
+		},
+	}
+}
+
+func TestConfigSnapshotsFromConfigSettings(t *testing.T) {
+	// A populated config becomes one app-scoped config snapshot from the
+	// response's results[0].settings.
+	sp := configSpan("c1", "grafana",
+		`{"results":[{"settings":{"log_level":"info","reporting_enabled":true}}]}`)
+	got := SnapshotsForSpan(sp)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 config snapshot, got %d: %+v", len(got), got)
+	}
+	s := got[0]
+	if s.Kind != KindConfig || s.Scope != "config:grafana" {
+		t.Errorf("kind/scope = %s/%s, want config/config:grafana", s.Kind, s.Scope)
+	}
+	if s.ProducingSpanID != "c1" {
+		t.Errorf("missing producing span id: %+v", s)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(s.Body, &body); err != nil {
+		t.Fatalf("body not JSON: %v (%s)", err, s.Body)
+	}
+	if body["log_level"] != "info" {
+		t.Errorf("body = %s, want log_level=info", s.Body)
+	}
+
+	// Empty settings (config-less/subordinate charm) yield nothing.
+	if got := SnapshotsForSpan(configSpan("c2", "empty", `{"results":[{"settings":{}}]}`)); len(got) != 0 {
+		t.Errorf("empty settings should yield no snapshot, got %+v", got)
 	}
 }
 
