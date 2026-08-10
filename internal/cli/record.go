@@ -165,6 +165,33 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 		// populated from t0 rather than all-"unknown".
 		captureStatusBootstrap(layout, topo.controllerName, models)
 		discover := filter.modelUUID == ""
+		// Controller scope: keep the UUID->name topology fresh so RPCs from a
+		// model created mid-recording resolve to its name instead of falling
+		// back to the raw UUID (which would show as a duplicate model in the
+		// viewer, alongside the name-keyed row the log discovery creates).
+		if discover {
+			logWG.Add(1)
+			go func() {
+				defer logWG.Done()
+				t := time.NewTicker(20 * time.Second)
+				defer t.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-t.C:
+						topo.refresh()
+						// Bootstrap status for any model that appeared since t0
+						// (e.g. an ephemeral test model created mid-recording).
+						// Idempotent: models already captured are skipped, so
+						// only the new ones cost a `juju status` call. Without
+						// this their applications stay "unknown", since app
+						// status is seeded from the bootstrap, not RPC traffic.
+						captureStatusBootstrap(layout, topo.controllerName, modelsToStream(topo, filter))
+					}
+				}
+			}()
+		}
 		if f.debugLog && len(models) > 0 {
 			logIng = newLogIngester(layout, topo.controllerName, discover)
 			man.AddSource(recording.SourceStatus{Name: "debug-log", Kind: "juju-debug-log", Started: time.Now().UTC()})
@@ -377,7 +404,7 @@ func reindexInPlace(layout recording.Layout) error {
 		return err
 	}
 	defer db.Close()
-	return rebuildIndex(db, layout.Root, true)
+	return rebuildIndex(db, layout.Root, nil, true)
 }
 
 // buildProbeCommand constructs the exec.Cmd that runs the probe for the chosen

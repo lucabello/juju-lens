@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/lucabello/juju-lens/internal/index"
@@ -12,7 +13,8 @@ import (
 )
 
 func newIndexCmd() *cobra.Command {
-	return &cobra.Command{
+	var renames []string
+	cmd := &cobra.Command{
 		Use:   "index <recording>",
 		Short: "Rebuild the SQLite index for a recording from its raw/ tree",
 		Long: `index reads every captured RPC under raw/rpc/, pairs requests with
@@ -22,17 +24,48 @@ writes a fresh index.db at the recording root.
 
 It is safe to run repeatedly. The DB is entirely rebuildable from raw/, so
 deleting it and re-indexing is the recommended way to pick up schema
-changes.`,
+changes.
+
+Use --rename to unify entries that were captured under different identities
+for the same model. This happens when a model is created mid-recording and its
+RPCs are attributed to the raw model UUID while its logs use the model name;
+--rename OLD=NEW merges OLD's data into NEW so the viewer shows one model.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runIndex(args[0])
+			m, err := parseRenames(renames)
+			if err != nil {
+				return err
+			}
+			return runIndex(args[0], m)
 		},
 	}
+	cmd.Flags().StringArrayVar(&renames, "rename", nil,
+		"remap a model during rebuild, as OLD=NEW (repeatable); merges OLD's spans, snapshots and logs into NEW")
+	return cmd
+}
+
+// parseRenames turns "OLD=NEW" flag values into a model-rename map. An entry
+// with an empty side is rejected so a typo does not silently drop a model's
+// data onto the empty name.
+func parseRenames(pairs []string) (map[string]string, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	m := make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		old, newName, ok := strings.Cut(p, "=")
+		if !ok || old == "" || newName == "" {
+			return nil, fmt.Errorf("invalid --rename %q; want OLD=NEW", p)
+		}
+		m[old] = newName
+	}
+	return m, nil
 }
 
 // runIndex is factored out so `record` can call it at the end of a
-// recording without going through cobra.
-func runIndex(dir string) error {
+// recording without going through cobra. renames optionally merges models
+// captured under different identities (see rebuildIndex).
+func runIndex(dir string, renames map[string]string) error {
 	layout := recording.NewLayout(dir)
 	ok, err := layout.Exists()
 	if err != nil {
@@ -53,7 +86,7 @@ func runIndex(dir string) error {
 		return err
 	}
 	defer db.Close()
-	return rebuildIndex(db, dir, true)
+	return rebuildIndex(db, dir, renames, true)
 }
 
 // rebuildIndex performs a full, authoritative (re)build of an open index from a
@@ -61,7 +94,13 @@ func runIndex(dir string) error {
 // every span, snapshot and log record. Because it resets rather than recreating
 // the file, it can refresh an index other processes have open (a live
 // `view --follow`). Set verbose to log a summary.
-func rebuildIndex(db *index.DB, dir string, verbose bool) error {
+//
+// renames optionally remaps the model each span/snapshot/log is attributed to,
+// applied before insertion. It unifies data captured under different identities
+// for the same model (e.g. RPCs keyed by a raw model UUID and logs keyed by the
+// model name, which happens when a model is created mid-recording before its
+// UUID could be resolved to a name).
+func rebuildIndex(db *index.DB, dir string, renames map[string]string, verbose bool) error {
 	if err := db.Reset(); err != nil {
 		return err
 	}
@@ -73,6 +112,7 @@ func rebuildIndex(db *index.DB, dir string, verbose bool) error {
 	// operations) so the timeline reads as hooks, not bare method names.
 	index.LabelHooks(spans)
 	for i := range spans {
+		spans[i].Model = renameModel(renames, spans[i].Model)
 		// Enrich the span with the relation it concerns (from its params) so the
 		// timeline and relations pane can pivot on it.
 		if spans[i].Relation == "" {
@@ -89,13 +129,13 @@ func rebuildIndex(db *index.DB, dir string, verbose bool) error {
 	// content-hash dedup baseline is the bootstrap value, not a later delta.
 	boots := index.LoadBootstrapSnapshots(dir, bootstrapTs(dir, spans))
 	for _, s := range boots {
-		if err := db.InsertBootstrapSnapshot(s.Model, s.Ts, string(s.Kind), s.Scope, string(s.Body)); err != nil {
+		if err := db.InsertBootstrapSnapshot(renameModel(renames, s.Model), s.Ts, string(s.Kind), s.Scope, string(s.Body)); err != nil {
 			return fmt.Errorf("insert bootstrap snapshot %s: %w", s.Scope, err)
 		}
 	}
 	snaps := index.ExtractSnapshots(spans)
 	for _, s := range snaps {
-		if err := db.InsertSnapshot(s.Model, s.Ts, string(s.Kind), s.Scope,
+		if err := db.InsertSnapshot(renameModel(renames, s.Model), s.Ts, string(s.Kind), s.Scope,
 			string(s.Body), s.ProducingSpanID); err != nil {
 			return fmt.Errorf("insert snapshot %s: %w", s.Scope, err)
 		}
@@ -105,6 +145,7 @@ func rebuildIndex(db *index.DB, dir string, verbose bool) error {
 		return err
 	}
 	for _, rec := range logs {
+		rec.Model = renameModel(renames, rec.Model)
 		if err := db.InsertLog(rec); err != nil {
 			return fmt.Errorf("insert log record: %w", err)
 		}
@@ -114,6 +155,15 @@ func rebuildIndex(db *index.DB, dir string, verbose bool) error {
 			len(spans), len(snaps), len(boots), len(logs))
 	}
 	return nil
+}
+
+// renameModel maps a model name through the rename table, returning it
+// unchanged when there is no entry. A nil table is a no-op.
+func renameModel(renames map[string]string, model string) string {
+	if to, ok := renames[model]; ok {
+		return to
+	}
+	return model
 }
 
 // bootstrapTs is the instant to stamp ground-truth status snapshots at: just

@@ -20,8 +20,16 @@ import (
 // whose status can't be fetched is skipped with a warning and the recording
 // proceeds. Runs before the probe attaches so the files are present by the time
 // the live indexer's first tick reads raw/.
+//
+// A model whose bootstrap.json already exists is skipped, so this is safe to call
+// repeatedly: the controller-scope discovery loop re-invokes it as models appear
+// mid-recording (e.g. an ephemeral test model created after t0), whose apps would
+// otherwise stay "unknown" because nothing captured their `juju status`.
 func captureStatusBootstrap(layout recording.Layout, controller string, models []string) {
 	for _, model := range models {
+		if _, err := os.Stat(layout.StatusBootstrapFile(model)); err == nil {
+			continue // already captured (t0, or an earlier discovery tick)
+		}
 		out, err := runJuju("status", "-m", controller+":"+model, "--format", "json")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "juju-lens: status bootstrap for %s failed: %v\n", model, err)

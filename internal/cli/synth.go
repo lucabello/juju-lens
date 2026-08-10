@@ -146,7 +146,7 @@ func runSynth(ctx context.Context, sc synth.Scenario, f synthFlags) error {
 	}
 	// Synthetic recordings ship a ready-to-open index so `juju-lens synth
 	// ... && juju-lens view ...` works without a separate `index` step.
-	if err := runIndex(layout.Root); err != nil {
+	if err := runIndex(layout.Root, nil); err != nil {
 		return fmt.Errorf("indexing synthetic recording: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "juju-lens: wrote synthetic recording to %s\n", layout.Root)

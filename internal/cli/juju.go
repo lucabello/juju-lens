@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 // jujuTopology is the controller/model inventory juju-lens resolves from the
@@ -17,6 +19,11 @@ type jujuTopology struct {
 	// controllerName is the controller the recording is scoped to.
 	controllerName string
 	controllerUUID string
+
+	// mu guards the maps below: they are read by the probe ingest goroutine
+	// (via resolve) while the controller-scope discovery ticker refreshes them
+	// (via refresh) as models are created during recording.
+	mu sync.RWMutex
 	// modelName maps a model UUID to its short name (e.g. "cos-lite").
 	modelName map[string]string
 	// modelType maps a model short name to "caas" or "iaas"; it routes each
@@ -24,15 +31,91 @@ type jujuTopology struct {
 	modelType map[string]string
 	// controllerNameByUUID maps a controller UUID to its name.
 	controllerNameByUUID map[string]string
+	// lastRefresh rate-limits refresh-on-miss so a burst of RPCs from an
+	// unknown model triggers at most one juju query per refreshMinInterval.
+	lastRefresh time.Time
 }
 
+// refreshMinInterval bounds how often a resolve miss may trigger a juju query.
+const refreshMinInterval = 2 * time.Second
+
 // resolve returns the controller/model names for the UUIDs on a captured frame.
-// Unknown UUIDs yield "" so the caller can fall back to the UUID itself.
+// Unknown UUIDs yield "" so the caller can fall back to the UUID itself. When a
+// model UUID is unknown (a model created after the last topology refresh, e.g.
+// mid-recording), it re-queries juju once (rate-limited) so the model resolves
+// to its name promptly instead of surfacing as a duplicate UUID-keyed model.
 func (t *jujuTopology) resolve(controllerUUID, modelUUID string) (string, string) {
 	if t == nil {
 		return "", ""
 	}
-	return t.controllerNameByUUID[controllerUUID], t.modelName[modelUUID]
+	t.mu.RLock()
+	cn := t.controllerNameByUUID[controllerUUID]
+	mn := t.modelName[modelUUID]
+	t.mu.RUnlock()
+	if mn == "" && modelUUID != "" {
+		t.refreshOnMiss()
+		t.mu.RLock()
+		cn = t.controllerNameByUUID[controllerUUID]
+		mn = t.modelName[modelUUID]
+		t.mu.RUnlock()
+	}
+	return cn, mn
+}
+
+// refreshOnMiss calls refresh at most once per refreshMinInterval, so a burst of
+// RPCs from a not-yet-known model does not spawn a juju query per envelope.
+func (t *jujuTopology) refreshOnMiss() {
+	t.mu.Lock()
+	if time.Since(t.lastRefresh) < refreshMinInterval {
+		t.mu.Unlock()
+		return
+	}
+	t.lastRefresh = time.Now()
+	t.mu.Unlock()
+	t.refresh()
+}
+
+// refresh re-queries the controller's models and merges any newly-created ones
+// into the topology, so a model created mid-recording resolves its UUID to a
+// name instead of falling back to the raw UUID (which would surface as a
+// separate, duplicate model in the viewer). Best-effort: a failed query leaves
+// the existing topology untouched.
+func (t *jujuTopology) refresh() {
+	if t == nil {
+		return
+	}
+	mj, err := runJujuModels(t.controllerName)
+	if err != nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.lastRefresh = time.Now()
+	for _, m := range mj.Models {
+		t.modelName[m.ModelUUID] = m.ShortName
+		t.modelType[m.ShortName] = m.ModelType
+		if m.ControllerUUID != "" {
+			t.controllerNameByUUID[m.ControllerUUID] = m.ControllerName
+		}
+	}
+}
+
+// modelNames returns the known model short-names, sorted. It is concurrency-safe
+// against refresh.
+func (t *jujuTopology) modelNames() []string {
+	if t == nil {
+		return nil
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make([]string, 0, len(t.modelName))
+	for _, name := range t.modelName {
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // controllersJSON mirrors the fields we read from `juju controllers --format
@@ -127,25 +210,23 @@ func modelsToStream(topo *jujuTopology, filter probeFilter) []string {
 		return nil
 	}
 	if filter.modelUUID != "" {
-		if name := topo.modelName[filter.modelUUID]; name != "" {
+		topo.mu.RLock()
+		name := topo.modelName[filter.modelUUID]
+		topo.mu.RUnlock()
+		if name != "" {
 			return []string{name}
 		}
 		return nil
 	}
-	out := make([]string, 0, len(topo.modelName))
-	for _, name := range topo.modelName {
-		if name != "" {
-			out = append(out, name)
-		}
-	}
-	sort.Strings(out)
-	return out
+	return topo.modelNames()
 }
 
 // splitByModelType partitions model short-names into CAAS and IAAS buckets
 // using the topology's model-type map, so each model is routed to the right log
 // ingester. Models of unknown type are dropped from both.
 func splitByModelType(topo *jujuTopology, models []string) (caas, iaas []string) {
+	topo.mu.RLock()
+	defer topo.mu.RUnlock()
 	for _, m := range models {
 		switch topo.modelType[m] {
 		case "caas":
