@@ -53,6 +53,8 @@ func (m *model) renderOverlay() {
 	}
 	var body strings.Builder
 	fmt.Fprintf(&body, "%s\n", strings.Join(head, " · "))
+	m.renderFailure(&body, ev, sp, ok)
+	m.renderStatusChanges(&body, ev)
 	if ok && sp.StatusCode == "ERROR" {
 		line := "ERROR"
 		if sp.StatusMsg != "" {
@@ -79,6 +81,49 @@ func (m *model) renderOverlay() {
 	m.overlay.SetContent(ansi.Hardwrap(b.String(), max(1, m.width-4), false))
 }
 
+// renderFailure explains, in the inspector, how a hook run went wrong (M10).
+// Each failState reads differently because they mean different things: a unit
+// stuck in error state now, a hook that recovered after a retry, a bracket a
+// later hook interrupted (usually a truncated recording), or a completed hook
+// whose RPC merely errored.
+func (m *model) renderFailure(b *strings.Builder, ev event, sp recording.SpanRow, ok bool) {
+	switch ev.fail {
+	case failErrored:
+		fmt.Fprintf(b, "%s\n", styleErr.Render("hook in error state — it errored and the uniter is still retrying it; the unit is in error state"))
+	case failRetried:
+		fmt.Fprintf(b, "%s\n", styleDim.Render("hook retried — it errored, the uniter retried it, and it then completed successfully"))
+	case failInterrupted:
+		fmt.Fprintf(b, "%s\n", styleWarn.Render("hook interrupted — another hook opened before this one finished (often a truncated recording)"))
+	case failRPCWarn:
+		line := "an RPC in this hook returned an error (the hook still completed, and charm status is unaffected)"
+		if ok && sp.StatusMsg != "" {
+			line += ": " + sp.StatusMsg
+		}
+		fmt.Fprintf(b, "%s\n", styleWarn.Render(line))
+	}
+}
+
+// renderStatusChanges lists the workload/application statuses the charm set from
+// inside this hook (M10). Every status a charm reports is set while a hook runs,
+// so this is the hook that drove the charm into its current state.
+func (m *model) renderStatusChanges(b *strings.Builder, ev event) {
+	if len(ev.statuses) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n%s\n", styleSection.Render("status set by this hook"))
+	for _, s := range ev.statuses {
+		who := "unit"
+		if s.app {
+			who = "app"
+		}
+		line := fmt.Sprintf("  %s → %s", who, statusStyleFor(s.value).Render(s.value))
+		if s.message != "" {
+			line += "  " + styleDim.Render("\""+s.message+"\"")
+		}
+		fmt.Fprintf(b, "%s\n", line)
+	}
+}
+
 // overlayHelp is the keybinding line at the top of the inspector. The diff /
 // copy hints only appear when the event actually carries a databag or config to
 // act on.
@@ -97,9 +142,10 @@ func isConfigChanged(ev event) bool {
 }
 
 // inspectable reports whether an event has anything worth drilling into: a
-// databag change or a config change. Enter is a no-op on anything else.
+// databag change, a config change, a failure, or a status the hook drove the
+// charm into (M10). Enter is a no-op on anything else.
 func inspectable(ev event) bool {
-	return ev.hasDatabag || isConfigChanged(ev)
+	return ev.hasDatabag || isConfigChanged(ev) || ev.fail != failNone || len(ev.statuses) > 0
 }
 
 // renderDatabags shows, for each relation the hook touched, all of the local

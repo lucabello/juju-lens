@@ -16,6 +16,7 @@ import (
 // "relation-changed" sequence (VISION §6.2 mockup).
 var (
 	uniterOpRe        = regexp.MustCompile(`(?m)^op:\s*(\S+)`)
+	uniterOpstepRe    = regexp.MustCompile(`(?m)^opstep:\s*(\S+)`)
 	uniterHookKindRe  = regexp.MustCompile(`hook:\s*\n\s*kind:\s*(\S+)`)
 	uniterRemoteAppRe = regexp.MustCompile(`remote-application:\s*(\S+)`)
 	uniterStorageIDRe = regexp.MustCompile(`storage-id:\s*(\S+)`)
@@ -59,6 +60,7 @@ func LabelHooks(spans []recording.SpanRow) {
 type HookMarker struct {
 	Kind      string // bare hook kind, e.g. "relation-changed" ("" unless op is run-hook)
 	Op        string // "run-hook", "continue", …
+	Opstep    string // "pending" | "done": the uniter's progress through the op (M10)
 	RemoteApp string // relation hooks: the remote application (peer relations: the app itself)
 	StorageID string // storage hooks: e.g. "data/0"
 }
@@ -74,6 +76,9 @@ func ParseHookMarker(params string) HookMarker {
 	var hm HookMarker
 	if m := uniterOpRe.FindStringSubmatch(us); m != nil {
 		hm.Op = m[1]
+	}
+	if m := uniterOpstepRe.FindStringSubmatch(us); m != nil {
+		hm.Opstep = m[1]
 	}
 	if m := uniterHookKindRe.FindStringSubmatch(us); m != nil {
 		hm.Kind = m[1]

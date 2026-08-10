@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/lucabello/juju-lens/internal/index"
@@ -92,8 +93,8 @@ func dumpHookRuns(spans []recording.SpanRow) {
 	for _, r := range buildHookRuns(spans) {
 		dur := r.endTs.Sub(r.startTs)
 		flags := ""
-		if r.failed {
-			flags += " FAILED"
+		if r.fail != failNone {
+			flags += " " + strings.ToUpper(r.fail.String())
 		}
 		if r.open {
 			flags += " OPEN"
@@ -133,8 +134,8 @@ func printEvent(e event) {
 	}
 	extra := ""
 	switch {
-	case e.failed:
-		extra = "  FAILED"
+	case e.fail != failNone:
+		extra = "  " + strings.ToUpper(e.fail.String())
 	case e.running:
 		extra = "  (running)"
 	case e.dur > 0:

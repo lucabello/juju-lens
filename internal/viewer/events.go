@@ -22,16 +22,58 @@ import (
 type event struct {
 	ts          time.Time
 	kind        eventKind
-	unit        string // "grafana/0" ("" for controller-side events)
-	app         string // "grafana"
-	summary     string // charm-visible hook name ("grafana-source-relation-changed") or transition
-	detail      string // optional trailing context (status message)
-	spanID      string // representative span (the commit, or the run-hook marker)
-	failed      bool   // the hook errored / the producing RPC errored
-	hasDatabag  bool   // the hook's commit actually changed a databag (M7)
+	unit        string        // "grafana/0" ("" for controller-side events)
+	app         string        // "grafana"
+	summary     string        // charm-visible hook name ("grafana-source-relation-changed") or transition
+	detail      string        // optional trailing context (status message)
+	spanID      string        // representative span (the commit, or the run-hook marker)
+	fail        failState     // how (if at all) this hook run went wrong (M10)
+	statuses    []hookStatus  // status changes this hook produced (M10)
+	hasDatabag  bool          // the hook's commit actually changed a databag (M7)
 	dur         time.Duration // hook duration (run-hook → continue)
-	running     bool   // hook still open at the tail of a live recording
-	verboseOnly bool   // a raw transition: hidden in the default view
+	running     bool          // hook still open at the tail of a live recording
+	verboseOnly bool          // a raw transition: hidden in the default view
+}
+
+// failState classifies how a hook run ended. The old timeline had a single
+// boolean "failed" that conflated three very different things (M10); splitting
+// them lets the timeline tell the user whether the charm actually broke, or
+// whether it merely made a call that errored, or whether the recording is just
+// truncated.
+type failState int
+
+const (
+	failNone        failState = iota
+	failErrored               // retried and still not completed at the tail: the unit is in error state now
+	failRetried               // errored and retried, but then reached `continue`: recovered
+	failInterrupted           // superseded by another hook with no `continue`: usually a truncated recording
+	failRPCWarn               // the hook completed, but one of its RPCs returned an error (often caught by the charm)
+)
+
+// String names the failState for diagnostics and the dump tool.
+func (f failState) String() string {
+	switch f {
+	case failErrored:
+		return "errored"
+	case failRetried:
+		return "retried"
+	case failInterrupted:
+		return "interrupted"
+	case failRPCWarn:
+		return "rpc-warn"
+	default:
+		return "none"
+	}
+}
+
+// hookStatus is a workload/application status the charm set from inside a hook,
+// attributed to that hook by its producing span (M10). Every status a charm
+// reports is set while a hook runs, so the timeline can show which hook drove
+// the charm into blocked/active/error without leaving the Events pane.
+type hookStatus struct {
+	app     bool   // an application status (vs a per-unit workload status)
+	value   string // "active", "blocked", …
+	message string // the status message, if any
 }
 
 type eventKind int
@@ -54,13 +96,26 @@ func (e event) ident() string { return e.spanID }
 // the commit spans that actually moved a databag (M7) so the row can carry the
 // ✎db pip. The result is sorted by timestamp.
 func buildEvents(spans []recording.SpanRow, databagChanged map[string]bool) []event {
+	return buildEventsWithStatus(spans, databagChanged, nil)
+}
+
+// buildEventsWithStatus is buildEvents with the status attribution (M10): given
+// a map from a status-setter span id to the status it set, each hook run carries
+// the statuses whose producing span falls inside its bracket. The viewer passes
+// this in from the index; buildEvents (used by pure-span tests) passes nil.
+func buildEventsWithStatus(spans []recording.SpanRow, databagChanged map[string]bool, statusBySpan map[string]hookStatus) []event {
 	resolver := relationEndpointMap(spans)
 	var out []event
 	for _, r := range buildHookRuns(spans) {
 		ev := event{
 			ts: r.startTs, kind: evHook, unit: r.unit, app: r.app,
 			summary: hookDisplayName(r, resolver), spanID: r.repSpan,
-			failed: r.failed, hasDatabag: databagChanged[r.repSpan],
+			fail: r.fail, hasDatabag: databagChanged[r.repSpan],
+		}
+		for _, spanID := range r.spanIDs {
+			if st, ok := statusBySpan[spanID]; ok {
+				ev.statuses = append(ev.statuses, st)
+			}
 		}
 		if r.open {
 			ev.running = true
@@ -84,16 +139,49 @@ func buildEvents(spans []recording.SpanRow, databagChanged map[string]bool) []ev
 // committed, else the run-hook marker itself. remoteApp/storageID come from the
 // run-hook marker and reconstruct the charm-visible hook name.
 type hookRun struct {
-	unit      string
-	app       string
-	kind      string // bare kind from the marker, e.g. "relation-changed"
-	remoteApp string // relation hooks: the remote application
-	storageID string // storage hooks: e.g. "data/0"
-	startTs   time.Time
-	endTs     time.Time
-	repSpan   string
-	failed    bool
-	open      bool // start marker seen, end not yet (live tail / truncated recording)
+	unit       string
+	app        string
+	kind       string // bare kind from the marker, e.g. "relation-changed"
+	remoteApp  string // relation hooks: the remote application
+	storageID  string // storage hooks: e.g. "data/0"
+	startTs    time.Time
+	endTs      time.Time
+	repSpan    string
+	spanIDs    []string  // every span folded into this run (for status attribution, M10)
+	rpcErr     bool      // an RPC inside the bracket returned an error (M10)
+	retries    int       // times the same run-hook marker reappeared with no `continue`: the uniter's retry loop (M10)
+	superseded bool      // a *different* hook opened before this one's `continue`: interrupted (M10)
+	fail       failState // how the run went wrong, if at all (M10)
+	open       bool      // start marker seen, end not yet (live tail / truncated recording)
+}
+
+// classify decides how a hook run went wrong, if at all. The distinguisher for a
+// retried hook is whether it reached `continue`: the uniter re-writes the same
+// run-hook marker each time it retries a failed hook, then writes `continue`
+// once the retry finally succeeds (docs/event-timeline.md §9).
+//
+//   - retried and still open at the tail  → failErrored: the unit is in error
+//     state *now*; this is the only red, "the charm is broken" signal.
+//   - retried but reached `continue`       → failRetried: it errored, Juju
+//     retried, and the charm recovered — history, not a current problem. This is
+//     why a "retried" hook can sit right next to a "→ active" status.
+//   - a different hook opened first        → failInterrupted: a truncated
+//     recording, not a charm bug.
+//   - completed with an errored RPC        → failRPCWarn: usually a call the
+//     charm caught; it does not change charm status, so it stays a soft warning.
+func (r *hookRun) classify() {
+	switch {
+	case r.retries > 0 && r.open:
+		r.fail = failErrored
+	case r.retries > 0:
+		r.fail = failRetried
+	case r.superseded:
+		r.fail = failInterrupted
+	case r.rpcErr:
+		r.fail = failRPCWarn
+	default:
+		r.fail = failNone
+	}
 }
 
 // buildHookRuns pairs each unit's run-hook and continue SetState markers into
@@ -134,6 +222,11 @@ func buildHookRuns(spans []recording.SpanRow) []hookRun {
 					cur.open = true
 				}
 			}
+			// Classify every closed bracket, and open brackets too: an open hook
+			// that was already retried is a unit stuck in error state *now*
+			// (failErrored), distinct from an open hook that is simply still
+			// running at the live tail (M10).
+			cur.classify()
 			runs = append(runs, *cur)
 			cur, synthetic, lastEnd = nil, false, time.Time{}
 		}
@@ -143,13 +236,21 @@ func buildHookRuns(spans []recording.SpanRow) []hookRun {
 				if hm := index.ParseHookMarker(sp.Attrs["params"]); hm.Op != "" {
 					switch {
 					case hm.Op == "run-hook" && hm.Kind != "":
-						// A run-hook for the hook already open is a later opstep
-						// (pending→done), not a new hook: keep the current run.
+						// A run-hook for the hook already open is a later opstep,
+						// not a new hook: keep the current run. The uniter walks
+						// opstep pending→done on success; a *second* `pending`
+						// (with no intervening `continue`) is the retry loop it
+						// enters when the hook errored — the high-confidence
+						// "unit went to error state" signal (M10).
 						if cur != nil && cur.kind == hm.Kind {
+							if hm.Opstep == "pending" {
+								cur.retries++
+							}
 							continue
 						}
 						if cur != nil { // a different hook opened with no continue: interrupted
-							cur.failed = true
+							cur.superseded = true
+							cur.endTs = sp.Start // the next hook's start bounds this one
 							closeRun()
 						}
 						cur = &hookRun{
@@ -157,6 +258,7 @@ func buildHookRuns(spans []recording.SpanRow) []hookRun {
 							remoteApp: hm.RemoteApp, storageID: hm.StorageID,
 							startTs: sp.Start, repSpan: sp.SpanID,
 						}
+						cur.spanIDs = append(cur.spanIDs, sp.SpanID)
 						continue
 					default: // "continue" (or another op) ends the current hook
 						if cur != nil {
@@ -176,8 +278,9 @@ func buildHookRuns(spans []recording.SpanRow) []hookRun {
 			}
 			if cur != nil {
 				lastEnd = sp.End
+				cur.spanIDs = append(cur.spanIDs, sp.SpanID)
 				if sp.StatusCode == "ERROR" {
-					cur.failed = true
+					cur.rpcErr = true
 				}
 				if sp.Attrs["method"] == "CommitHookChanges" {
 					cur.repSpan = sp.SpanID // prefer the commit for the inspector/databag
@@ -187,6 +290,25 @@ func buildHookRuns(spans []recording.SpanRow) []hookRun {
 		closeRun()
 	}
 	return runs
+}
+
+// statusMapFromSnapshots turns the index's span→status-snapshot maps (unit and
+// application) into the span→hookStatus map buildEventsWithStatus consumes. The
+// snapshot body is the {value,message,since} JSON the extractor wrote (M10).
+func statusMapFromSnapshots(unit, app map[string]index.SnapshotRow) map[string]hookStatus {
+	out := make(map[string]hookStatus, len(unit)+len(app))
+	add := func(m map[string]index.SnapshotRow, isApp bool) {
+		for span, r := range m {
+			var body snapBody
+			if err := json.Unmarshal([]byte(r.Body), &body); err != nil {
+				continue
+			}
+			out[span] = hookStatus{app: isApp, value: body.Value, message: body.Message}
+		}
+	}
+	add(unit, false)
+	add(app, true)
+	return out
 }
 
 // hookDisplayName reconstructs the charm-visible hook name. The wire form leaves
@@ -300,7 +422,10 @@ func rawTransition(sp recording.SpanRow) (event, bool) {
 	method := sp.Attrs["method"]
 	base := event{
 		ts: sp.Start, unit: sp.Unit, app: appOf(sp.Unit), spanID: sp.SpanID,
-		failed: sp.StatusCode == "ERROR", verboseOnly: true,
+		verboseOnly: true,
+	}
+	if sp.StatusCode == "ERROR" {
+		base.fail = failRPCWarn
 	}
 	switch {
 	case method == "SetApplicationStatus":
@@ -367,4 +492,48 @@ func (e event) glyph() string {
 		return "·"
 	}
 	return " "
+}
+
+// isErrored reports whether the hook is in error state now (retried and never
+// completed): the only failure worth colouring the glyph red on the timeline. A
+// recovered "retried" hook is deliberately not red (M10).
+func (e event) isErrored() bool { return e.fail == failErrored }
+
+// failLabel is the trailing word describing how a hook run went wrong, or "" for
+// a clean run. Each state reads differently so the user can tell a unit stuck in
+// error now from one that recovered after a retry, from a truncated recording,
+// from a caught RPC error (M10).
+func (e event) failLabel() string {
+	switch e.fail {
+	case failErrored:
+		return "error"
+	case failRetried:
+		return "retried"
+	case failInterrupted:
+		return "interrupted"
+	case failRPCWarn:
+		return "rpc error"
+	default:
+		return ""
+	}
+}
+
+// statusSummary renders the status changes a hook produced as a compact suffix,
+// e.g. `→ blocked "waiting for db"` (M10). Empty when the hook set no status.
+func (e event) statusSummary() string {
+	if len(e.statuses) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(e.statuses))
+	for _, s := range e.statuses {
+		p := "→ " + s.value
+		if s.app {
+			p = "app → " + s.value
+		}
+		if s.message != "" {
+			p += " \"" + s.message + "\""
+		}
+		parts = append(parts, p)
+	}
+	return strings.Join(parts, "  ")
 }

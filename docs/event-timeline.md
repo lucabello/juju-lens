@@ -1,6 +1,7 @@
 # Event timeline — hooks, and how each maps to a capture signal
 
-Status: **implemented**. Grounds the rework of `internal/viewer/events.go`
+Status: **implemented** (M10 adds failure classification §9 and status
+attribution §10). Grounds the rework of `internal/viewer/events.go`
 (hook-run events + verbose filter), `internal/viewer/timeline.go` (two-line
 rendering), and the `.` binding in `internal/viewer/tui.go`. The hook→signal
 mapping (§4.1) and the workload/pebble and storage/secret parameter extraction
@@ -166,9 +167,11 @@ Notes:
 These are RPC-derived rows the current `classify` emits; in the reworked model
 they are **not hooks** and move to verbose mode (§5):
 
-- `SetStatus` / `SetUnitStatus` / `SetApplicationStatus` → status changes. These
-  already have a dedicated home: the **Status** pane, reconstructed
-  point-in-time. They should not also be timeline rows.
+- `SetStatus` / `SetUnitStatus` / `SetApplicationStatus` → status changes. As
+  standalone rows they stay in verbose mode and the **Status** pane. But because
+  a status set inside a hook is caused by that hook, M10 also folds it onto the
+  hook's own row as an inline suffix (§10) — so the default timeline still shows
+  which hook drove the charm's status without a separate row.
 - `EnterScope` / `LeaveScope` → these are the RPCs that *accompany* the
   `relation-joined` / `relation-departed` **hooks**; the hook is the event, the
   scope RPC is drill-down.
@@ -210,8 +213,22 @@ DEFAULT
 15:04:17.010  grafana/0     ┌ grafana-source-relation-joined
 15:04:17.430  grafana/0     └ grafana-source-relation-joined  ✎db (420ms)
 15:04:18.220  prometheus/0  ┌ grafana-source-relation-changed
-15:04:18.560  prometheus/0  ✗ grafana-source-relation-changed  hook failed
+15:04:18.560  prometheus/0  ✗ grafana-source-relation-changed  error
 ```
+
+Note the trailing word on a failed hook is one of three (§9): `error` (red — the
+charm actually broke and the uniter retried it), `interrupted` (dim — a later
+hook opened before this one finished, usually a truncated recording), or
+`rpc error` (amber — the hook completed but one of its RPCs returned an error,
+which the charm often caught). Only `error` colours the hook glyph red.
+
+A hook also carries, inline, the status it drove the charm into (§10) — because
+every status a charm reports is set from inside a running hook:
+
+```
+15:04:15.082  grafana/0     └ config-changed              (200ms)  → blocked "waiting for db"
+```
+
 
 ```
 VERBOSE  (. pressed) — same window, raw transitions folded back in
@@ -230,7 +247,7 @@ Glyphs (extend `event.glyph`):
 |---|---|
 | `┌` | hook start |
 | `└` | hook end (succeeded) |
-| `✗` | hook end (failed — any RPC in the bracket errored, or a `hook-error` op) |
+| `✗` | hook end (errored — the uniter retried it; see §9 for the three failure states) |
 | `·` | verbose-only raw transition (indented under its hook) |
 | `✎db` | the hook's commit changed a databag (M7; existing marker) |
 | `⧖` | hook still open (start seen, no `continue` yet — live tail or truncated recording) |
@@ -243,19 +260,24 @@ scrolled viewport where the start line is off-screen is still readable.
 ## 7. Inspector (Enter) — identical for start and end
 
 Because both events point at the same `hookRun`, Enter opens the same overlay
-regardless of which line the cursor is on. It shows (reusing `details.go`):
+regardless of which line the cursor is on. A hook is inspectable when it changed
+a databag, is a `config-changed`, **failed in any of the three ways (§9), or set
+a status (§10)** — so a plain failed hook is no longer a dead Enter. It shows
+(reusing `details.go`):
 
-- **Header**: full hook name, unit, `startTs → endTs`, total duration, exit
-  status, and the hook parameters (remote unit / relation id / storage id /
-  secret uri) pulled from the `run-hook` payload.
+- **Header**: full hook name, unit, and the facade.method behind the
+  representative span.
+- **Failure line** (§9): a plain-language explanation of how the run went wrong —
+  "hook errored — the unit went to error state and the uniter retried it",
+  "hook interrupted — another hook opened before this one finished (often a
+  truncated recording)", or "an RPC in this hook returned an error (the hook
+  still completed): <message>".
+- **Status set by this hook** (§10): each workload/application status the charm
+  reported from inside the hook, `unit → blocked "message"`, coloured by value.
 - **Databags**: the delta the enclosed `CommitHookChanges` wrote (M7), diffable
   with `d`. Unchanged.
-- **Network** (the drill-down): every span in `subSpanIDs` — the
-  `CommitHookChanges`, the jujuc tool calls, the status setters — in time order.
-  This is where the RPCs demoted from the default timeline live.
-- **Logs**: correlated debug-log lines over `[startTs-window, endTs+window]`,
-  including the `ran "X" hook` confirmation line, with span-id exact matches
-  marked `»` (unchanged from `renderCorrelatedLogs`).
+- **Logs**: correlated debug-log lines live in the Logs pane, which locks to the
+  selected event by default; span-id exact matches are marked `»`.
 
 ## 8. Edge cases
 
@@ -267,33 +289,113 @@ regardless of which line the cursor is on. It shows (reusing `details.go`):
   `CommitHookChanges` for identity.
 - **Hook still running at tail** (`--follow`): start seen, no `continue`. Emit
   only the start event, glyph `⧖`; the end event appears once the `continue`
-  marker is indexed on a later `Sync`.
-- **Failed hook**: Juju writes `op: run-hook` then, on failure, does *not*
-  write `continue` — it writes a `hook-error`/retry state. Treat the transition
-  away from `run-hook` for that unit as the end, `failed = true`, glyph `✗`.
-  The enclosed error payload / ERROR debug-log line surfaces in the inspector.
+  marker is indexed on a later `Sync`. An open hook at the live tail is
+  **running, not failed** — unless it was already retried, in which case it is
+  in error state now (§9).
+- **Failed hook**: see §9. The four failure states are distinguished from one
+  another and from a live-tail open hook, so the timeline no longer conflates a
+  unit stuck in error now with one that recovered after a retry, nor a real
+  crash with a truncated recording.
 - **Hook with no `CommitHookChanges`** (e.g. an `update-status` that touched
   nothing): still a full hook run with start+end from the markers — the two-line
   event is drawn, `hasDatabag=false`, and the Network drill-down simply lists
   fewer sub-spans. This is the key correctness win over the current model, which
   can only see hooks that happened to commit.
 
-## 9. Implementation sketch (non-binding)
+## 9. Failure classification (M10)
+
+The original model had a single boolean `failed` that was set when *any* RPC in
+a hook's bracket returned an error, or when a hook's bracket was interrupted.
+That conflated several very different situations and, worse, was disconnected
+from whether the charm actually broke — a hook could read "failed" while the
+unit sat `active/idle`. M10 replaces it with a `failState` derived from the
+uniter's own operation log.
+
+The uniter records its progress through an operation in the same
+`Uniter.SetState` `uniter-state` blob we already parse (§2): `op: run-hook` with
+an `opstep:` that walks `pending → done` on success, then `op: continue`. When a
+hook **errors**, the uniter does *not* advance to `continue`; it re-enters the
+operation, re-writing `op: run-hook` with `opstep: pending` for the *same* hook —
+this is its retry loop. `ParseHookMarker` now also extracts `opstep`, and
+`buildHookRuns` counts these retries.
+
+The key subtlety: a retried hook usually **recovers**. The uniter retries a
+failed hook until it succeeds, then writes `continue`. So a hook that was retried
+*and reached `continue`* is history — it errored, Juju retried, and the charm
+recovered (which is exactly why such a hook can sit right next to a `→ active`
+status). The only hook whose unit is in error state *right now* is one that was
+retried and has **not** reached `continue`. The distinguisher is therefore
+whether the bracket closed, not merely whether it was retried. Conversely, an
+errored *RPC* inside a completed hook never changes charm status (Juju's `error`
+status comes only from the hook process exiting non-zero, not from an API call
+erroring), so it stays a soft warning.
+
+The four states (`internal/viewer/events.go`, `failState`):
+
+| State | Detected by | Timeline | Meaning |
+|---|---|---|---|
+| `failErrored` | retried (`run-hook`/`opstep: pending` reappeared) **and** never reached `continue` | red glyph, `error` | the unit is in error state *now* |
+| `failRetried` | retried **but** then reached `continue` | dim, `retried` | it errored, Juju retried, and it then succeeded — history, not a current problem |
+| `failInterrupted` | a **different** hook opened before this one's `continue` | dim, `interrupted` | almost always a truncated recording, not a charm bug |
+| `failRPCWarn` | the hook **completed** but one of its RPCs returned an error | amber, `rpc error` | often a call the charm caught; does not affect charm status |
+
+Precedence: retried-and-open (`failErrored`) beats the plain live-tail "running"
+state, so a unit stuck retrying is never hidden as merely "running". A never-
+retried open hook at the tail is still just "running".
+
+Why this is trustworthy where the old boolean was not: `failErrored` is sourced
+from the uniter's retry loop *without* a recovering `continue` — the same state
+that leaves the unit in `error` status — so it corroborates the Status pane (§10)
+instead of contradicting it. `failRetried` explains the otherwise-confusing
+"errored hook, active unit" pairing rather than mislabelling it red.
+
+## 10. Status attribution (M10)
+
+A charm only ever reports status from inside a running hook — that is how charm
+execution works: Juju wakes the charm with an event (hook), the charm runs, and
+calls `status-set` before it returns. So every status change *can* be attributed
+to the hook that caused it, and the timeline should show it there.
+
+The join is already in the index and needs no new capture:
+
+1. A status snapshot records `ProducingSpanID` = the `SetStatus` /
+   `SetUnitStatus` / `SetApplicationStatus` span (`internal/index/extract.go`).
+2. That span was made *inside* a hook bracket, so `buildHookRuns` already folds
+   its id into the hook run's `spanIDs`.
+3. `DB.StatusBySpan` returns `producing-span → status`, and
+   `buildEventsWithStatus` attaches to each hook every status whose producing
+   span it owns.
+
+Rendered:
+
+- **Timeline**: an inline suffix on the hook row, `→ blocked "waiting for db"`
+  (app statuses read `app → …`), coloured by status value. This is what lets the
+  user scrub the timeline and see *which hook* drove the charm into
+  blocked/active/error without opening anything.
+- **Inspector**: a "status set by this hook" section listing each transition.
+
+Two origins of status, two mechanisms, deliberately complementary:
+
+- **Charm-driven** status (`status-set` from hook code) → the `ProducingSpanID`
+  join above. Exact, by span id.
+- **Juju-driven** `error` status (set by the controller when a hook crashes, not
+  by charm code) → surfaced by §9's `failErrored`, not by a `status-set` span.
+
+Together they cover both ways a unit's status can move.
+
+## 11. Implementation notes
 
 Touches, roughly:
 
-- `internal/index/hooks.go` — extend `parseUniterState` to also return the
-  relation/storage/secret/workload fields from the `run-hook` payload; expose a
-  `HookRuns(spans) []HookRun` that pairs `run-hook`↔`continue` per unit.
-- `internal/viewer/events.go` — replace `classify`'s per-facade heuristics with:
-  (a) `buildHookRuns` → two events per run; (b) a separate `rawTransitions` pass
-  that produces the verbose-only rows (the status/scope/secret events currently
-  in `classify`), tagged so `renderEventsPane` can hide them in default mode.
-- `internal/viewer/tui.go` — add the `.` `Verbose` keybinding and a `verbose bool`
-  on `model`; filter in `renderEventsPane`/`eventRow`.
-- `internal/synth/synth.go` — the trivial scenario already brackets hooks with
-  `run-hook`/`continue` and includes `update-status` (traefik) with no commit,
-  so it exercises §8's no-commit case once events come from markers. Add one
-  hook that errors to cover the `✗` path.
-</content>
-</invoke>
+- `internal/index/hooks.go` — `HookMarker.Opstep` and its regex, so the viewer
+  can tell the uniter's retry loop from normal opstep progression.
+- `internal/index/db.go` — `DB.StatusBySpan(modelID, kind)` returning
+  `producing-span → status snapshot`.
+- `internal/viewer/events.go` — `failState` + `hookRun.classify`, retry/supersede
+  tracking in `buildHookRuns`, `spanIDs` collection, and
+  `buildEventsWithStatus` + `statusMapFromSnapshots` for status attribution.
+- `internal/viewer/timeline.go` — three-way failure suffix and the status suffix.
+- `internal/viewer/details.go` — `inspectable` now true for failures/statuses;
+  `renderFailure` and `renderStatusChanges` sections.
+- `internal/viewer/tui.go` — `setActiveModel` loads the status-by-span maps and
+  feeds `buildEventsWithStatus`.

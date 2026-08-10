@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/muesli/termenv"
 
 	"github.com/lucabello/juju-lens/internal/index"
@@ -114,10 +114,10 @@ func TestPrettyJSONExpandsNestedJSONAndYAML(t *testing.T) {
 	body := `{"uids":"{\"prometheus/0\":\"uid-1\"}","state":"id: 7\napplication-members:\n  prometheus: 0\n","addr":"10.0.0.1"}`
 	got := prettyJSON(body)
 	for _, want := range []string{
-		`"prometheus/0": "uid-1"`,   // nested JSON expanded
-		`"application-members"`,     // nested YAML expanded
-		`"prometheus": 0`,           // nested YAML leaf
-		`"addr": "10.0.0.1"`,        // plain scalar left intact (not YAML-mangled)
+		`"prometheus/0": "uid-1"`, // nested JSON expanded
+		`"application-members"`,   // nested YAML expanded
+		`"prometheus": 0`,         // nested YAML leaf
+		`"addr": "10.0.0.1"`,      // plain scalar left intact (not YAML-mangled)
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prettyJSON missing %q\n---\n%s", want, got)

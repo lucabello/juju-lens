@@ -43,3 +43,13 @@ func TestLabelHooks(t *testing.T) {
 		}
 	}
 }
+
+func TestParseHookMarkerOpstep(t *testing.T) {
+	params, _ := json.Marshal(map[string]any{
+		"args": []map[string]any{{"uniter-state": "op: run-hook\nopstep: pending\nhook:\n  kind: config-changed\n"}},
+	})
+	hm := ParseHookMarker(string(params))
+	if hm.Op != "run-hook" || hm.Opstep != "pending" || hm.Kind != "config-changed" {
+		t.Fatalf("ParseHookMarker = %+v", hm)
+	}
+}

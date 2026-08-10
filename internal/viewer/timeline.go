@@ -72,7 +72,7 @@ func (m *model) eventRow(i, unitW int) paneRow {
 	}
 	gStyle, labelStyle := styleDim, styleText
 	switch {
-	case ev.failed:
+	case ev.isErrored():
 		gStyle = styleErr
 	case ev.verboseOnly:
 		labelStyle = styleDim
@@ -93,22 +93,33 @@ func pad(s string, n int) string {
 	return s
 }
 
-// eventSuffix is the trailing detail on a hook row: "failed", "(running)" for a
-// hook still open at the tail of a live recording, or the run duration, plus a
-// "(databag changes)" tag when the hook changed a databag. Raw transitions carry
-// none, keeping the default view a clean time·unit·hook grid.
+// eventSuffix is the trailing detail on a hook row: the failure state
+// ("error"/"interrupted"/"rpc error"), "(running)" for a hook still open at the
+// tail of a live recording, or the run duration, plus the status the hook drove
+// the charm into (M10) and a "(databag changes)" tag when it changed a databag.
+// Raw transitions carry none, keeping the default view a clean time·unit·hook
+// grid.
 func (m *model) eventSuffix(ev event) string {
 	if ev.verboseOnly {
 		return ""
 	}
 	var b strings.Builder
 	switch {
-	case ev.failed:
-		b.WriteString("  " + styleErr.Render("failed"))
+	case ev.fail == failErrored:
+		b.WriteString("  " + styleErr.Render(ev.failLabel()))
+	case ev.fail == failRetried:
+		b.WriteString("  " + styleDim.Render(ev.failLabel()))
+	case ev.fail == failInterrupted:
+		b.WriteString("  " + styleDim.Render(ev.failLabel()))
+	case ev.fail == failRPCWarn:
+		b.WriteString("  " + styleWarn.Render(ev.failLabel()))
 	case ev.running:
 		b.WriteString("  " + styleDim.Render("(running)"))
 	case ev.dur > 0:
 		b.WriteString("  " + styleDim.Render("("+formatDur(ev.dur)+")"))
+	}
+	if s := ev.statusSummary(); s != "" {
+		b.WriteString("  " + statusStyleFor(ev.statuses[len(ev.statuses)-1].value).Render(s))
 	}
 	if ev.hasDatabag {
 		b.WriteString("  " + styleHook.Render("(databag changes)"))

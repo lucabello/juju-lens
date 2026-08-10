@@ -210,7 +210,10 @@ func (m *model) setActiveModel(mm index.Model) {
 	}
 	m.spans = spans
 	m.databagSpans, _ = m.db.ProducingSpanIDs(mm.ID, string(index.KindDatabag))
-	m.allEvents = buildEvents(spans, m.databagSpans)
+	unitStatusBySpan, _ := m.db.StatusBySpan(mm.ID, string(index.KindUnitStatus))
+	appStatusBySpan, _ := m.db.StatusBySpan(mm.ID, string(index.KindAppStatus))
+	statusBySpan := statusMapFromSnapshots(unitStatusBySpan, appStatusBySpan)
+	m.allEvents = buildEventsWithStatus(spans, m.databagSpans, statusBySpan)
 	m.events = nil // force applyVerboseFilter to select the newest visible event
 	m.appTree = buildAppTree(spans)
 	m.relationBroken = relationBrokenTimes(spans)
@@ -662,13 +665,13 @@ var (
 	// styleText is the primary body-text colour. It is set explicitly (rather
 	// than relying on the terminal default) so rows always contrast the pane
 	// background on both light and dark themes.
-	styleText    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "235", Dark: "252"})
-	styleSource  = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-	styleErr     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+	styleText   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "235", Dark: "252"})
+	styleSource = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	styleErr    = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 	// styleDel is the removed-line colour in the inspector diff: red, but not
 	// bold — the colour alone carries the meaning.
-	styleDel = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	styleOK  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	styleDel     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	styleOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	styleWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	styleRuler   = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Bold(true)
 	styleSection = lipgloss.NewStyle().Bold(true).Underline(true)

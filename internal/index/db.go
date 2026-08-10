@@ -438,6 +438,41 @@ func (d *DB) LogsForSpan(modelID int64, spanID, unit string, start, end time.Tim
 	return out, rows.Err()
 }
 
+// StatusBySpan returns, for every status snapshot in a model, the span that
+// produced it paired with the status it set (M10). The viewer joins this against
+// each hook run's spans to attribute a status change to the hook that caused it:
+// a charm only reports status from inside a running hook. kind is one of the
+// status snapshot kinds ("unit-status", "app-status"). A zero modelID spans all
+// models.
+func (d *DB) StatusBySpan(modelID int64, kind string) (map[string]SnapshotRow, error) {
+	rows, err := d.sql.Query(
+		`SELECT producing_span_id, scope, body_json, ts FROM snapshots
+		  WHERE (? = 0 OR model_id = ?) AND kind = ? AND producing_span_id IS NOT NULL`,
+		modelID, modelID, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]SnapshotRow{}
+	for rows.Next() {
+		var (
+			span string
+			r    SnapshotRow
+			nano int64
+		)
+		if err := rows.Scan(&span, &r.Scope, &r.Body, &nano); err != nil {
+			return nil, err
+		}
+		if span == "" {
+			continue
+		}
+		r.Ts = time.Unix(0, nano).UTC()
+		r.Kind = kind
+		out[span] = r
+	}
+	return out, rows.Err()
+}
+
 // SnapshotsByProducingSpan returns the snapshots a given span produced, of the
 // requested kind, newest scope first. It backs the M4 databag diff: for a
 // CommitHookChanges span it yields the databags that hook wrote.

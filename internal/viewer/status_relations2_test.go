@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/muesli/termenv"
 
 	"github.com/lucabello/juju-lens/internal/index"
