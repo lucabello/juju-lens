@@ -554,9 +554,12 @@ Each milestone ends with a working, useful tool.
      recording.
    - `record` (and `watch`) already call the Juju API `Status()` on connect to seed
      inventory (§2.2; §4.1 step 2). Extend that bootstrap to also write baseline
-     `app-status:*` and `unit-status:*` snapshots (and, where cheap, `leadership`
-     and relation membership) at the recording's start timestamp, giving the
-     snapshot store a known-good floor to reconstruct from.
+     `app-status:*`, `unit-status:*`, `agent-status:*`, `leadership:*` (the leader
+     unit per application) and relation-membership snapshots at the recording's
+     start timestamp, giving the snapshot store a known-good floor to reconstruct
+     from. *(Implemented: status/agent from `juju status`, relation membership
+     from `juju show-unit`, leadership from the `leader` flag in `juju status`;
+     the Status pane marks the leader unit.)*
    - Tag bootstrap snapshots with their provenance (`source=status-api`) so they are
      distinguishable from RPC-derived deltas. Captured-RPC status deltas then apply
      on top, and point-in-time reconstruction walks back to the bootstrap baseline

@@ -2,6 +2,7 @@ package viewer
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,5 +73,36 @@ func TestStatusPaneLatestKnownReflectsSnapshots(t *testing.T) {
 	}
 	if !m.unitStatuses["grafana/0"].Known {
 		t.Errorf("known must be true when a snapshot exists")
+	}
+}
+
+func TestStatusPaneShowsLeader(t *testing.T) {
+	db := openDB(t)
+	base := time.Date(2026, 7, 3, 14, 30, 12, 0, time.UTC)
+	for _, s := range []struct{ kind, scope, body string }{
+		{"unit-status", "unit-status:grafana/0", `{"value":"active","since":"2026-07-03T14:30:12Z"}`},
+		{"unit-status", "unit-status:grafana/1", `{"value":"active","since":"2026-07-03T14:30:12Z"}`},
+		{"leadership", "leadership:grafana", `{"value":"grafana/1","since":"2026-07-03T14:30:12Z"}`},
+	} {
+		if err := db.InsertBootstrapSnapshot("default", base, s.kind, s.scope, s.body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	modelID, err := db.UpsertModel("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := buildModel(t, db, index.Model{ID: modelID, Name: "default"})
+
+	if got := m.leaders["grafana"]; got != "grafana/1" {
+		t.Fatalf("leader for grafana = %q, want grafana/1", got)
+	}
+	rows := m.unitStatusRows([]string{"grafana/0", "grafana/1"}, "")
+	joined := ""
+	for _, r := range rows {
+		joined += r.text + "\n"
+	}
+	if !strings.Contains(joined, "leader") {
+		t.Fatalf("unit rows do not mark the leader:\n%s", joined)
 	}
 }

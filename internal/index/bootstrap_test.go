@@ -159,3 +159,58 @@ func TestBootstrapMatchesRPCScope(t *testing.T) {
 		t.Fatalf("RPC scope %v does not match bootstrap scope %q", rpcSnaps, bootScope)
 	}
 }
+
+// statusLeaderFixture is a two-unit application where the second unit is the
+// leader, exercising leadership extraction from the M8 status bootstrap.
+const statusLeaderFixture = `{
+  "model": {"name": "cos"},
+  "applications": {
+    "prometheus": {
+      "application-status": {"current": "active", "message": "ready"},
+      "units": {
+        "prometheus/0": {"workload-status": {"current": "active"}, "juju-status": {"current": "idle"}},
+        "prometheus/1": {"workload-status": {"current": "active"}, "juju-status": {"current": "idle"}, "leader": true}
+      }
+    }
+  }
+}`
+
+func TestBootstrapExtractsLeadership(t *testing.T) {
+	ts := time.Date(2026, 7, 6, 8, 0, 0, 0, time.UTC)
+	got := BootstrapSnapshots("cos", []byte(statusLeaderFixture), ts)
+	var leader *Snapshot
+	for i := range got {
+		if got[i].Kind == KindLeadership {
+			if leader != nil {
+				t.Fatalf("want exactly one leadership snapshot, got a second: %+v", got[i])
+			}
+			leader = &got[i]
+		}
+	}
+	if leader == nil {
+		t.Fatal("no leadership snapshot produced")
+	}
+	if leader.Scope != "leadership:prometheus" {
+		t.Errorf("leadership scope = %q, want leadership:prometheus", leader.Scope)
+	}
+	var body struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(leader.Body, &body); err != nil {
+		t.Fatalf("leadership body not JSON: %v (%s)", err, leader.Body)
+	}
+	if body.Value != "prometheus/1" {
+		t.Errorf("leader = %q, want prometheus/1", body.Value)
+	}
+}
+
+func TestBootstrapNoLeaderNoSnapshot(t *testing.T) {
+	ts := time.Date(2026, 7, 6, 8, 0, 0, 0, time.UTC)
+	// Same fixture with the leader flag stripped: no leadership snapshot.
+	noLeader := `{"model":{"name":"cos"},"applications":{"prometheus":{"application-status":{"current":"active"},"units":{"prometheus/0":{"workload-status":{"current":"active"}}}}}}`
+	for _, s := range BootstrapSnapshots("cos", []byte(noLeader), ts) {
+		if s.Kind == KindLeadership {
+			t.Fatalf("unexpected leadership snapshot for leaderless app: %+v", s)
+		}
+	}
+}

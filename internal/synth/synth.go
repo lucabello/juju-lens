@@ -95,12 +95,19 @@ func BootstrapStatus(sc Scenario, opts Options) ([]byte, error) {
 	unit := func(status, msg string) map[string]any {
 		return map[string]any{"workload-status": map[string]any{"current": status, "message": msg}}
 	}
+	// leaderUnit marks a unit as its application's leader, so the M8 bootstrap
+	// seeds a leadership snapshot and the Status pane shows "(leader)" from t0.
+	leaderUnit := func(status, msg string) map[string]any {
+		u := unit(status, msg)
+		u["leader"] = true
+		return u
+	}
 	doc := map[string]any{
 		"model": map[string]any{"name": o.ModelName},
 		"applications": map[string]any{
-			"grafana":    app("maintenance", "installing", map[string]any{"grafana/0": unit("maintenance", "installing")}),
-			"prometheus": app("maintenance", "installing", map[string]any{"prometheus/0": unit("maintenance", "installing")}),
-			"traefik":    app("active", "", map[string]any{"traefik/0": unit("active", "")}),
+			"grafana":    app("maintenance", "installing", map[string]any{"grafana/0": leaderUnit("maintenance", "installing")}),
+			"prometheus": app("maintenance", "installing", map[string]any{"prometheus/0": leaderUnit("maintenance", "installing")}),
+			"traefik":    app("active", "", map[string]any{"traefik/0": leaderUnit("active", "")}),
 		},
 	}
 	return json.MarshalIndent(doc, "", "  ")

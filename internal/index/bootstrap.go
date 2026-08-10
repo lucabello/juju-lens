@@ -20,7 +20,7 @@ type jujuStatusDoc struct {
 		Name string `json:"name"`
 	} `json:"model"`
 	Applications map[string]struct {
-		ApplicationStatus statusField            `json:"application-status"`
+		ApplicationStatus statusField           `json:"application-status"`
 		Units             map[string]unitStatus `json:"units"`
 	} `json:"applications"`
 }
@@ -28,6 +28,7 @@ type jujuStatusDoc struct {
 type unitStatus struct {
 	WorkloadStatus statusField `json:"workload-status"`
 	AgentStatus    statusField `json:"juju-status"` // the agent (idle/executing) axis
+	Leader         bool        `json:"leader"`      // the application leader at recording start (M8)
 }
 
 type statusField struct {
@@ -37,11 +38,11 @@ type statusField struct {
 }
 
 // BootstrapSnapshots turns one `juju status --format=json` document into the
-// baseline app-status, unit workload-status, and unit agent-status snapshots it
-// describes, all stamped at ts (the recording's start instant). The model name
-// is taken from the argument when non-empty, else from the document itself, so
-// the snapshots are attributed even for a status file whose directory name was
-// sanitised.
+// baseline app-status, unit workload-status, unit agent-status, and leadership
+// snapshots it describes, all stamped at ts (the recording's start instant). The
+// model name is taken from the argument when non-empty, else from the document
+// itself, so the snapshots are attributed even for a status file whose directory
+// name was sanitised.
 func BootstrapSnapshots(model string, raw []byte, ts time.Time) []Snapshot {
 	var doc jujuStatusDoc
 	if err := json.Unmarshal(raw, &doc); err != nil {
@@ -60,6 +61,16 @@ func BootstrapSnapshots(model string, raw []byte, ts time.Time) []Snapshot {
 			return
 		}
 		out = append(out, Snapshot{Model: model, Kind: kind, Scope: scope, Body: body, Ts: ts})
+	}
+	// addLeader records which unit leads an application, as a leadership snapshot
+	// scoped to the app ("leadership:<app>") whose value is the leader unit name.
+	// juju status marks exactly one unit per application with "leader": true.
+	addLeader := func(app, unit string) {
+		body, err := json.Marshal(statusBody{Value: unit, Since: ts})
+		if err != nil {
+			return
+		}
+		out = append(out, Snapshot{Model: model, Kind: KindLeadership, Scope: string(KindLeadership) + ":" + app, Body: body, Ts: ts})
 	}
 	// Sort app names so the emitted order is deterministic (nice for tests and
 	// for the ascending-ts insertion invariant the dedup relies on — all
@@ -80,6 +91,9 @@ func BootstrapSnapshots(model string, raw []byte, ts time.Time) []Snapshot {
 		for _, u := range units {
 			add(KindUnitStatus, string(KindUnitStatus)+":"+u, a.Units[u].WorkloadStatus)
 			add(KindAgentStatus, string(KindAgentStatus)+":"+u, a.Units[u].AgentStatus)
+			if a.Units[u].Leader {
+				addLeader(app, u)
+			}
 		}
 	}
 	return out

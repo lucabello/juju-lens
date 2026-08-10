@@ -151,10 +151,11 @@ type model struct {
 	logSource      string
 
 	// Status (top-right).
-	appTree       appTree
-	appStatuses   map[string]statusValue
-	unitStatuses  map[string]statusValue
-	agentStatuses map[string]statusValue
+	appTree        appTree
+	appStatuses    map[string]statusValue
+	unitStatuses   map[string]statusValue
+	agentStatuses  map[string]statusValue
+	leaders        map[string]string // app -> leader unit name at the selected instant (M8)
 	relations      []relationSummary
 	databags       map[string]index.SnapshotRow
 	relCursor      int
@@ -295,6 +296,13 @@ func (m *model) refreshStatus() {
 	m.appStatuses = scopeMap(rows(string(index.KindAppStatus)), "app-status:")
 	m.unitStatuses = scopeMap(rows(string(index.KindUnitStatus)), "unit-status:")
 	m.agentStatuses = scopeMap(rows(string(index.KindAgentStatus)), "agent-status:")
+	// Leadership scopes hold the leader unit name in the snapshot's value (M8).
+	m.leaders = map[string]string{}
+	for app, lv := range scopeMap(rows(string(index.KindLeadership)), "leadership:") {
+		if lv.Known && lv.Value != "" {
+			m.leaders[app] = lv.Value
+		}
+	}
 	databagRows := rows(string(index.KindDatabag))
 	m.relations = m.currentRelations(buildRelations(databagRows), latestWriteByRelation(databagRows), m.currentTs())
 	m.databags = map[string]index.SnapshotRow{}

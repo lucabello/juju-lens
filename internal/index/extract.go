@@ -16,8 +16,9 @@ const (
 	KindAppStatus   SnapshotKind = "app-status"
 	KindUnitStatus  SnapshotKind = "unit-status"
 	KindAgentStatus SnapshotKind = "agent-status"
-	KindDatabag     SnapshotKind = "databag" // relation databag (M4)
-	KindConfig      SnapshotKind = "config"   // charm application config (M9)
+	KindDatabag     SnapshotKind = "databag"    // relation databag (M4)
+	KindConfig      SnapshotKind = "config"     // charm application config (M9)
+	KindLeadership  SnapshotKind = "leadership" // which unit leads an application (M8)
 )
 
 // Snapshot is a rebuildable point-in-time observation of Juju state derived

@@ -276,6 +276,9 @@ func (m *model) unitStatusRows(names []string, changed string) []paneRow {
 			agentPart = agentStyleFor(agent.Value).Render(agent.Value)
 		}
 		workload += styleDim.Render(" / ") + agentPart
+		if m.leaders[appOf(name)] == name {
+			workload += "  " + styleHook.Render("(leader)")
+		}
 		out = append(out, row(fmt.Sprintf("%s %s %s %s",
 			pip, glyph, styleText.Render(fmt.Sprintf("%-16s", name)), workload)))
 		if known && wl.Known && wl.Message != "" {
