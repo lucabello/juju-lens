@@ -97,12 +97,12 @@ func TestStatusPaneShowsLeader(t *testing.T) {
 	if got := m.leaders["grafana"]; got != "grafana/1" {
 		t.Fatalf("leader for grafana = %q, want grafana/1", got)
 	}
-	rows := m.unitStatusRows([]string{"grafana/0", "grafana/1"}, "")
+	rows := m.unitRows("grafana", "grafana/1", "")
 	joined := ""
 	for _, r := range rows {
 		joined += r.text + "\n"
 	}
-	if !strings.Contains(joined, "leader") {
-		t.Fatalf("unit rows do not mark the leader:\n%s", joined)
+	if !strings.Contains(joined, "grafana/1*") {
+		t.Fatalf("leader unit is not marked with a star:\n%s", joined)
 	}
 }

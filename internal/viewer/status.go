@@ -53,6 +53,47 @@ func scopeMap(rows []index.SnapshotRow, scopePrefix string) map[string]statusVal
 	return out
 }
 
+// statusSeverities ranks workload statuses so an application's status can be
+// rolled up from its units, mirroring Juju's own derivation
+// (domain/status/service applicationDisplayStatusFromUnits): when a leader has
+// not explicitly set an application status, Juju displays the highest-severity
+// unit workload status. Higher wins; anything unlisted (including "unset") is
+// treated as lowest so it never masks a real unit status.
+var statusSeverities = map[string]int{
+	"error":       100,
+	"blocked":     90,
+	"maintenance": 80,
+	"waiting":     70,
+	"active":      60,
+	"terminated":  50,
+	"unknown":     40,
+}
+
+// deriveAppStatuses rolls each application's status up from its units' workload
+// statuses using Juju's severity precedence, keyed by app name. The winning
+// unit's message is carried so the pane can explain the status, and Since is the
+// winner's timestamp. Apps with no known unit statuses are omitted, letting an
+// explicit application snapshot (or "unknown") stand in refreshStatus.
+func deriveAppStatuses(unitStatuses map[string]statusValue) map[string]statusValue {
+	out := map[string]statusValue{}
+	for unit, sv := range unitStatuses {
+		if !sv.Known {
+			continue
+		}
+		app := appOf(unit)
+		cur, ok := out[app]
+		if !ok || statusSeverities[sv.Value] > statusSeverities[cur.Value] {
+			out[app] = statusValue{
+				Value:   sv.Value,
+				Message: sv.Message,
+				Since:   sv.Since,
+				Known:   true,
+			}
+		}
+	}
+	return out
+}
+
 // relationSummary is a relation and the entities (units/apps) that have written
 // a databag on it, derived from databag snapshot scopes
 // "databag:<relation>:<entity>".
@@ -115,19 +156,6 @@ func statusStyleFor(value string) lipgloss.Style {
 	}
 }
 
-func statusGlyph(value string) string {
-	switch value {
-	case "active":
-		return "●"
-	case "waiting", "maintenance":
-		return "◐"
-	case "blocked", "error":
-		return "●"
-	default:
-		return "○"
-	}
-}
-
 func (m *model) renderStatusPane() string {
 	_, w := topRowWidths(m.width)
 	h, _ := rowHeights(m.bodyHeight())
@@ -143,20 +171,13 @@ func (m *model) renderStatusPane() string {
 		}
 	}
 
-	rows := []paneRow{row(styleDim.Render("as of " + m.currentTs().UTC().Format("15:04:05.000")))}
+	rows := []paneRow{row(styleDim.Render("as of " + m.statusTs().UTC().Format("15:04:05.000")))}
 
 	// The app/unit universe comes from spans *and* snapshots, so a bootstrap-only
 	// app (one with no captured RPCs, M8) still appears.
 	apps, unitsByApp := m.statusUniverse()
-	rows = append(rows, row(styleSection.Render("Applications")))
-	rows = append(rows, appStatusRows(apps, m.appStatuses, changedApp)...)
-	rows = append(rows, row(""))
-	rows = append(rows, row(styleSection.Render("Units")+styleDim.Render("  workload / agent")))
-	var units []string
-	for _, app := range apps {
-		units = append(units, unitsByApp[app]...)
-	}
-	rows = append(rows, m.unitStatusRows(units, changedUnit)...)
+	rows = append(rows, row(styleSection.Render("Applications")+styleDim.Render("  workload / agent")))
+	rows = append(rows, m.appTreeRows(apps, unitsByApp, changedApp, changedUnit)...)
 
 	if len(m.relations) > 0 {
 		rows = append(rows, row(""))
@@ -224,68 +245,77 @@ func (m *model) statusUniverse() (apps []string, unitsByApp map[string][]string)
 	return apps, unitsByApp
 }
 
-// appStatusRows renders one row per application. Unknown scopes are dimmed and
-// labelled so the user can tell "no snapshot yet" from "silent". changed names
-// an app that moved at the selected instant; it gets a ▲ pip.
-func appStatusRows(names []string, byName map[string]statusValue, changed string) []paneRow {
+// appTreeRows renders the aggregated Applications section: each app on its own
+// row followed by its units, indented beneath it. The leader unit is marked with
+// a trailing "*" on its name (juju's own convention), so leadership reads without
+// a separate label. changedApp/changedUnit name whatever the selected event moved
+// at this instant; those rows get a ▲ pip.
+func (m *model) appTreeRows(apps []string, unitsByApp map[string][]string, changedApp, changedUnit string) []paneRow {
+	// Pad app names to the longest one (plus a two-space gap) so their statuses
+	// line up with each other while staying close to the name, independent of the
+	// wider unit column beneath them.
+	appWidth := 0
+	for _, app := range apps {
+		if len(app) > appWidth {
+			appWidth = len(app)
+		}
+	}
+	appWidth += 2
 	var out []paneRow
-	for _, name := range names {
-		pip := " "
-		if name == changed && changed != "" {
-			pip = styleWarn.Render("▲")
-		}
-		st, ok := byName[name]
-		if !ok || !st.Known {
-			out = append(out, row(fmt.Sprintf("%s %s %s %s",
-				pip, "○", styleText.Render(fmt.Sprintf("%-16s", name)), styleDim.Render("unknown"))))
-			continue
-		}
-		style := statusStyleFor(st.Value)
-		out = append(out, row(fmt.Sprintf("%s %s %s %s",
-			pip,
-			style.Render(statusGlyph(st.Value)),
-			styleText.Render(fmt.Sprintf("%-16s", name)),
-			style.Render(st.Value))))
-		if st.Message != "" {
-			out = append(out, row("     "+styleDim.Render(st.Message)))
+	for _, app := range apps {
+		out = append(out, m.appHeaderRow(app, changedApp, appWidth))
+		for _, unit := range unitsByApp[app] {
+			out = append(out, m.unitRows(app, unit, changedUnit)...)
 		}
 	}
 	return out
 }
 
-// unitStatusRows renders one row per unit showing both statuses juju tracks
-// separately: the workload (charm) status and the agent status (idle/executing),
-// as "workload / agent". changed names a unit that moved at the selected instant.
-func (m *model) unitStatusRows(names []string, changed string) []paneRow {
-	var out []paneRow
-	for _, name := range names {
-		pip := " "
-		if name == changed && changed != "" {
-			pip = styleWarn.Render("▲")
-		}
-		wl, known := m.unitStatuses[name]
-		glyph, workload := "○", styleDim.Render("unknown")
-		if known && wl.Known {
-			ws := statusStyleFor(wl.Value)
-			glyph, workload = ws.Render(statusGlyph(wl.Value)), ws.Render(wl.Value)
-		}
-		// The agent (idle/executing) status is always shown, "unknown" when we
-		// never captured it, so the "workload / agent" pair is never half-empty.
-		agentPart := styleDim.Render("unknown")
-		if agent, ok := m.agentStatuses[name]; ok && agent.Known && agent.Value != "" {
-			agentPart = agentStyleFor(agent.Value).Render(agent.Value)
-		}
-		workload += styleDim.Render(" / ") + agentPart
-		if m.leaders[appOf(name)] == name {
-			workload += "  " + styleHook.Render("(leader)")
-		}
-		out = append(out, row(fmt.Sprintf("%s %s %s %s",
-			pip, glyph, styleText.Render(fmt.Sprintf("%-16s", name)), workload)))
-		if known && wl.Known && wl.Message != "" {
-			out = append(out, row("     "+styleDim.Render(wl.Message)))
-		}
+// appHeaderRow renders one application line: "<app>  <status>".
+func (m *model) appHeaderRow(app, changed string, appWidth int) paneRow {
+	pip := " "
+	if app == changed && changed != "" {
+		pip = styleWarn.Render("▲")
 	}
-	return out
+	st, ok := m.appStatuses[app]
+	name := styleText.Render(fmt.Sprintf("%-*s", appWidth, app))
+	if !ok || !st.Known {
+		return row(fmt.Sprintf("%s %s%s", pip, name, styleDim.Render("unknown")))
+	}
+	return row(fmt.Sprintf("%s %s%s", pip, name, statusStyleFor(st.Value).Render(st.Value)))
+}
+
+// unitRows renders a unit nested under its app: an indented
+// unitRows renders a unit nested under its app: an indented
+// "  <unit>[*]  workload / agent  "message"" line, with the workload message (when
+// set) beside the status rather than below it. The leader unit's name carries a
+// trailing "*".
+func (m *model) unitRows(app, unit, changed string) []paneRow {
+	pip := " "
+	if unit == changed && changed != "" {
+		pip = styleWarn.Render("▲")
+	}
+	label := unit
+	if m.leaders[app] == unit {
+		label += "*"
+	}
+	wl, known := m.unitStatuses[unit]
+	workload := styleDim.Render("unknown")
+	if known && wl.Known {
+		workload = statusStyleFor(wl.Value).Render(wl.Value)
+	}
+	// The agent (idle/executing) status is always shown, "unknown" when we never
+	// captured it, so the "workload / agent" pair is never half-empty.
+	agentPart := styleDim.Render("unknown")
+	if agent, ok := m.agentStatuses[unit]; ok && agent.Known && agent.Value != "" {
+		agentPart = agentStyleFor(agent.Value).Render(agent.Value)
+	}
+	workload += styleDim.Render(" / ") + agentPart
+	if known && wl.Known && wl.Message != "" {
+		workload += "  " + styleDim.Render("\""+wl.Message+"\"")
+	}
+	return []paneRow{row(fmt.Sprintf("%s   %s %s",
+		pip, styleText.Render(fmt.Sprintf("%-14s", label)), workload))}
 }
 
 // relationRows renders the Relations section: one line per relation showing its

@@ -272,6 +272,20 @@ func (m *model) currentTs() time.Time {
 	return time.Now()
 }
 
+// statusTs is the instant the Status pane reflects: the *end* of the selected
+// hook rather than its start. A charm's status and databag changes are made
+// while the hook runs (their spans fall inside the run-hook..continue bracket),
+// so reading state as of the hook's end shows the situation the hook produced,
+// which is what the user expects when a hook row is selected. Non-hook events
+// (raw transitions) have no duration, so this is just their timestamp.
+func (m *model) statusTs() time.Time {
+	if len(m.events) > 0 {
+		ev := m.events[m.cursor]
+		return ev.ts.Add(ev.dur)
+	}
+	return m.currentTs()
+}
+
 // spanByID looks up a span by id (for the inspector).
 func (m *model) spanByID(id string) (recording.SpanRow, bool) {
 	for _, sp := range m.spans {
@@ -287,14 +301,26 @@ func (m *model) spanByID(id string) (recording.SpanRow, bool) {
 func (m *model) refreshStatus() {
 	rows := func(kind string) []index.SnapshotRow {
 		if len(m.events) > 0 {
-			r, _ := m.db.LatestPerScopeAsOf(m.activeModel.ID, kind, m.currentTs())
+			r, _ := m.db.LatestPerScopeAsOf(m.activeModel.ID, kind, m.statusTs())
 			return r
 		}
 		r, _ := m.db.LatestPerScope(m.activeModel.ID, kind)
 		return r
 	}
-	m.appStatuses = scopeMap(rows(string(index.KindAppStatus)), "app-status:")
 	m.unitStatuses = scopeMap(rows(string(index.KindUnitStatus)), "unit-status:")
+	// Application status mirrors juju: it is the highest-severity unit workload
+	// status. We derive it from the units so the app row tracks the cursor even
+	// though app status has no RPC traffic of its own (it no longer stays frozen
+	// at the t0 bootstrap value). The captured app snapshot only fills apps that
+	// currently have no known unit statuses, since its single bootstrap row would
+	// otherwise refreeze the value: juju rarely emits SetApplicationStatus, so
+	// there is no later app snapshot to move it.
+	m.appStatuses = deriveAppStatuses(m.unitStatuses)
+	for app, sv := range scopeMap(rows(string(index.KindAppStatus)), "app-status:") {
+		if _, ok := m.appStatuses[app]; !ok {
+			m.appStatuses[app] = sv
+		}
+	}
 	m.agentStatuses = scopeMap(rows(string(index.KindAgentStatus)), "agent-status:")
 	// Leadership scopes hold the leader unit name in the snapshot's value (M8).
 	m.leaders = map[string]string{}
@@ -304,7 +330,7 @@ func (m *model) refreshStatus() {
 		}
 	}
 	databagRows := rows(string(index.KindDatabag))
-	m.relations = m.currentRelations(buildRelations(databagRows), latestWriteByRelation(databagRows), m.currentTs())
+	m.relations = m.currentRelations(buildRelations(databagRows), latestWriteByRelation(databagRows), m.statusTs())
 	m.databags = map[string]index.SnapshotRow{}
 	for _, r := range databagRows {
 		m.databags[r.Scope] = r
