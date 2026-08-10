@@ -21,14 +21,17 @@ import (
 // proceeds. Runs before the probe attaches so the files are present by the time
 // the live indexer's first tick reads raw/.
 //
-// A model whose bootstrap.json already exists is skipped, so this is safe to call
-// repeatedly: the controller-scope discovery loop re-invokes it as models appear
-// mid-recording (e.g. an ephemeral test model created after t0), whose apps would
-// otherwise stay "unknown" because nothing captured their `juju status`.
+// A model whose bootstrap.json already records at least one application is
+// skipped, so this is safe to call repeatedly: the controller-scope discovery
+// loop re-invokes it as models appear mid-recording (e.g. an ephemeral test
+// model created after t0), whose apps would otherwise stay "unknown" because
+// nothing captured their `juju status`. A model captured while still empty (it
+// existed but had no apps deployed yet) is re-captured on later ticks until its
+// applications show up, so their status is not lost.
 func captureStatusBootstrap(layout recording.Layout, controller string, models []string) {
 	for _, model := range models {
-		if _, err := os.Stat(layout.StatusBootstrapFile(model)); err == nil {
-			continue // already captured (t0, or an earlier discovery tick)
+		if bootstrapHasApps(layout.StatusBootstrapFile(model)) {
+			continue // already captured with real content
 		}
 		out, err := runJuju("status", "-m", controller+":"+model, "--format", "json")
 		if err != nil {
@@ -46,6 +49,18 @@ func captureStatusBootstrap(layout recording.Layout, controller string, models [
 		captureDatabagBootstrap(layout, controller, model, out)
 		captureConfigBootstrap(layout, controller, model, out)
 	}
+}
+
+// bootstrapHasApps reports whether a saved status bootstrap file exists and
+// already records at least one application. A file that is missing, unreadable,
+// or captured while the model was still empty returns false, so the caller
+// re-captures until the model's applications appear.
+func bootstrapHasApps(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return len(appsFromStatus(raw)) > 0
 }
 
 // captureConfigBootstrap runs `juju config <app>` for every application in a
