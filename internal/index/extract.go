@@ -267,14 +267,36 @@ func databagSnapshots(sp recording.SpanRow, params string) []Snapshot {
 				out = append(out, databagSnap(sp, rel, unit, rus.Settings))
 			}
 			// Application databag is set by the leader; attribute it to the app.
+			// This also reveals leadership: only the leader may write the
+			// application databag, so the writing unit is the app's leader. juju
+			// status can miss this when leadership is elected after the t0
+			// bootstrap, so recover it from the traffic too.
 			if hasContent(rus.ApplicationSettings) {
-				if app := appName(entityName(rus.Unit)); app != "" {
-					out = append(out, databagSnap(sp, rel, app, rus.ApplicationSettings))
+				if unit := entityName(rus.Unit); unit != "" {
+					if app := appName(unit); app != "" {
+						out = append(out, databagSnap(sp, rel, app, rus.ApplicationSettings))
+						out = append(out, leadershipSnap(sp, app, unit))
+					}
 				}
 			}
 		}
 	}
 	return out
+}
+
+// leadershipSnap records that unit leads app at the span's instant, matching the
+// bootstrap leadership snapshot shape (scope "leadership:<app>", body value is
+// the leader unit name) so the viewer treats both sources identically.
+func leadershipSnap(sp recording.SpanRow, app, unit string) Snapshot {
+	body, _ := json.Marshal(statusBody{Value: unit, Since: sp.Start})
+	return Snapshot{
+		Model:           sp.Model,
+		Kind:            KindLeadership,
+		Scope:           string(KindLeadership) + ":" + app,
+		Body:            body,
+		Ts:              sp.Start,
+		ProducingSpanID: sp.SpanID,
+	}
 }
 
 func databagSnap(sp recording.SpanRow, rel, entity string, body json.RawMessage) Snapshot {

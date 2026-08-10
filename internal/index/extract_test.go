@@ -143,6 +143,20 @@ func TestDatabagSnapshotsFromCommitHookChanges(t *testing.T) {
 		"databag:loki.metrics-endpoint#prometheus.metrics-endpoint:loki/0": `{"addr":"10.0.0.1"}`,
 		"databag:loki.metrics-endpoint#prometheus.metrics-endpoint:loki":   `{"scrape":"cfg"}`,
 	}
+	// Writing the application databag also reveals leadership: loki/0 leads loki.
+	var leader []Snapshot
+	var databags []Snapshot
+	for _, s := range got {
+		if s.Kind == KindLeadership {
+			leader = append(leader, s)
+			continue
+		}
+		databags = append(databags, s)
+	}
+	if len(leader) != 1 || leader[0].Scope != "leadership:loki" || string(leader[0].Body) != `{"value":"loki/0","since":"2026-07-04T14:00:00Z"}` {
+		t.Errorf("expected one leadership:loki snapshot for loki/0, got %+v", leader)
+	}
+	got = databags
 	if len(got) != len(want) {
 		t.Fatalf("expected %d databag snapshots, got %d: %+v", len(want), len(got), got)
 	}
