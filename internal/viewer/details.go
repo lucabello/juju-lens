@@ -93,7 +93,7 @@ func (m *model) renderFailure(b *strings.Builder, ev event, sp recording.SpanRow
 	case failRetried:
 		fmt.Fprintf(b, "%s\n", styleDim.Render("hook retried — it errored, the uniter retried it, and it then completed successfully"))
 	case failInterrupted:
-		fmt.Fprintf(b, "%s\n", styleWarn.Render("hook interrupted — another hook opened before this one finished (often a truncated recording)"))
+		fmt.Fprintf(b, "%s\n", styleWarn.Render("hook interrupted — another hook opened before this one finished"))
 	case failRPCWarn:
 		line := "an RPC in this hook returned an error (the hook still completed, and charm status is unaffected)"
 		if ok && sp.StatusMsg != "" {

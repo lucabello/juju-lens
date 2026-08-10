@@ -74,6 +74,8 @@ func (m *model) eventRow(i, unitW int) paneRow {
 	switch {
 	case ev.isErrored():
 		gStyle = styleErr
+	case ev.kind == evSettle:
+		labelStyle = statusStyleFor(ev.settleWorkload)
 	case ev.verboseOnly:
 		labelStyle = styleDim
 	}
@@ -118,8 +120,8 @@ func (m *model) eventSuffix(ev event) string {
 	case ev.dur > 0:
 		b.WriteString("  " + styleDim.Render("("+formatDur(ev.dur)+")"))
 	}
-	if s := ev.statusSummary(); s != "" {
-		b.WriteString("  " + statusStyleFor(ev.statuses[len(ev.statuses)-1].value).Render(s))
+	if s := ev.statusSummary(m.verbose); s != "" {
+		b.WriteString("  " + s)
 	}
 	if ev.hasDatabag {
 		b.WriteString("  " + styleHook.Render("(databag changes)"))

@@ -40,8 +40,7 @@ func rpcSpan(id, unit string, dt time.Duration, errored bool) recording.SpanRow 
 	return sp
 }
 
-func runHook(kind, opstep string) string {
-	return "op: run-hook\nopstep: " + opstep + "\nhook:\n  kind: " + kind + "\n"
+func runHook(kind, opstep string) string {	return "op: run-hook\nopstep: " + opstep + "\nhook:\n  kind: " + kind + "\n"
 }
 
 const continueDone = "op: continue\nopstep: done\n"
@@ -183,7 +182,55 @@ func TestStatusAttributedToHook(t *testing.T) {
 	if len(hook.statuses) != 1 || hook.statuses[0].value != "blocked" {
 		t.Fatalf("status not attributed to hook: %+v", hook.statuses)
 	}
-	if got := hook.statusSummary(); got != `→ blocked "waiting for db"` {
+	if got := hook.statusSummary(false); got != statusStyleFor("blocked").Render(`→ blocked`) {
 		t.Fatalf("statusSummary = %q", got)
+	}
+}
+
+// statusRPCSpan builds a Uniter status-setter span (SetAgentStatus /
+// SetUnitStatus) carrying a single entity's status, for settle-marker tests.
+func statusRPCSpan(id, method, unit string, dt time.Duration, value string) recording.SpanRow {
+	params, _ := json.Marshal(map[string]any{
+		"entities": []map[string]any{{"tag": "unit-x-0", "status": value, "info": ""}},
+	})
+	return recording.SpanRow{
+		SpanID: id, Unit: unit, Model: "default",
+		Start: eventsBase.Add(dt), End: eventsBase.Add(dt),
+		Name:  "Uniter." + method,
+		Attrs: map[string]string{"method": method, "params": string(params)},
+	}
+}
+
+func TestSettleEvents(t *testing.T) {
+	spans := []recording.SpanRow{
+		statusRPCSpan("w1", "SetUnitStatus", "x/0", 0, "active"),
+		statusRPCSpan("a1", "SetAgentStatus", "x/0", 1*time.Second, "executing"),
+		// Brief drain: idle then executing again <5s later — not a settle.
+		statusRPCSpan("a2", "SetAgentStatus", "x/0", 2*time.Second, "idle"),
+		statusRPCSpan("a3", "SetAgentStatus", "x/0", 3*time.Second, "executing"),
+		// Real rest: idle for well over the threshold before the next executing.
+		statusRPCSpan("a4", "SetAgentStatus", "x/0", 4*time.Second, "idle"),
+		statusRPCSpan("a5", "SetAgentStatus", "x/0", 30*time.Second, "executing"),
+		// Tail idle: still idle at the end of the recording.
+		statusRPCSpan("a6", "SetAgentStatus", "x/0", 40*time.Second, "idle"),
+	}
+	got := settleEvents(spans)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 settle events (long rest + tail), got %d: %+v", len(got), got)
+	}
+	for _, ev := range got {
+		if ev.kind != evSettle {
+			t.Errorf("kind = %v, want evSettle", ev.kind)
+		}
+		if ev.settleWorkload != "active" {
+			t.Errorf("settleWorkload = %q, want active", ev.settleWorkload)
+		}
+		if ev.summary != "→ active / idle" {
+			t.Errorf("summary = %q, want %q", ev.summary, "→ active / idle")
+		}
+	}
+	// The two kept markers are the long-rest idle (4s) and the tail idle (40s).
+	if !got[0].ts.Equal(eventsBase.Add(4*time.Second)) || !got[1].ts.Equal(eventsBase.Add(40*time.Second)) {
+		t.Errorf("unexpected settle timestamps: %v, %v", got[0].ts, got[1].ts)
 	}
 }

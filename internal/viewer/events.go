@@ -33,6 +33,8 @@ type event struct {
 	dur         time.Duration // hook duration (run-hook → continue)
 	running     bool          // hook still open at the tail of a live recording
 	verboseOnly bool          // a raw transition: hidden in the default view
+
+	settleWorkload string // workload status at an evSettle marker (for colouring)
 }
 
 // failState classifies how a hook run ended. The old timeline had a single
@@ -71,9 +73,10 @@ func (f failState) String() string {
 // reports is set while a hook runs, so the timeline can show which hook drove
 // the charm into blocked/active/error without leaving the Events pane.
 type hookStatus struct {
-	app     bool   // an application status (vs a per-unit workload status)
-	value   string // "active", "blocked", …
-	message string // the status message, if any
+	app       bool   // an application status (vs a per-unit workload status)
+	value     string // "active", "blocked", …
+	message   string // the status message, if any
+	redundant bool   // repeats the scope's previous value+message (hidden unless verbose)
 }
 
 type eventKind int
@@ -85,6 +88,7 @@ const (
 	evLeader
 	evAction
 	evSecret
+	evSettle // a unit came to rest: agent idle for a while, or idle at the tail
 )
 
 // ident is a stable key for one event, used to keep the selection pinned across
@@ -130,7 +134,126 @@ func buildEventsWithStatus(spans []recording.SpanRow, databagChanged map[string]
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].ts.Before(out[j].ts) })
+	out = append(out, settleEvents(spans)...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ts.Before(out[j].ts) })
+	markRedundantStatuses(out)
 	return out
+}
+
+// settleQuiescence is how long a unit's agent must stay idle after a hook run
+// for the rest to count as "settled". A shorter idle gap is just the queue
+// briefly draining between back-to-back hooks and is not surfaced. The OTHER way
+// to settle is being idle at the tail of the recording (no next hook at all),
+// which is emitted regardless of how much idle time was captured.
+const settleQuiescence = 5 * time.Second
+
+// settleEvents emits one evSettle marker per time a unit comes to rest: its
+// agent goes idle and then either (a) stays idle for at least settleQuiescence
+// before the next executing/hook, OR (b) is still idle at the end of the
+// recording. This gives a selectable row testifying that a unit reached e.g.
+// "active / idle", which otherwise happens in the gap between hooks and so has no
+// row of its own. The workload value shown is whatever the unit's latest
+// SetUnitStatus set at that instant (juju's agent axis is idle here by
+// definition).
+func settleEvents(spans []recording.SpanRow) []event {
+	if len(spans) == 0 {
+		return nil
+	}
+	var end time.Time
+	for _, sp := range spans {
+		if sp.Start.After(end) {
+			end = sp.Start
+		}
+	}
+	// Per unit, replay agent + workload status RPCs in time order.
+	type agentSample struct {
+		ts    time.Time
+		value string
+		span  string
+	}
+	agentByUnit := map[string][]agentSample{}
+	workloadByUnit := map[string][]agentSample{} // reuse shape: value is workload status
+	for _, sp := range spans {
+		if sp.Unit == "" {
+			continue
+		}
+		method := sp.Attrs["method"]
+		switch method {
+		case "SetAgentStatus":
+			val, _ := statusFromParams(sp.Attrs["params"])
+			agentByUnit[sp.Unit] = append(agentByUnit[sp.Unit], agentSample{sp.Start, val, sp.SpanID})
+		case "SetStatus", "SetUnitStatus":
+			val, _ := statusFromParams(sp.Attrs["params"])
+			workloadByUnit[sp.Unit] = append(workloadByUnit[sp.Unit], agentSample{sp.Start, val, sp.SpanID})
+		}
+	}
+	// workloadAt returns the workload status in effect for unit at time t.
+	workloadAt := func(unit string, t time.Time) string {
+		val := ""
+		for _, s := range workloadByUnit[unit] {
+			if s.ts.After(t) {
+				break
+			}
+			val = s.value
+		}
+		return val
+	}
+	var out []event
+	for unit, samples := range agentByUnit {
+		for i, s := range samples {
+			if s.value != "idle" {
+				continue
+			}
+			// When does this idle end? At the next agent sample (the next
+			// executing), else at the recording tail.
+			restUntil := end
+			if i+1 < len(samples) {
+				restUntil = samples[i+1].ts
+			}
+			atTail := i+1 == len(samples)
+			if !atTail && restUntil.Sub(s.ts) < settleQuiescence {
+				continue // momentary drain between bursts, not a real rest
+			}
+			wl := workloadAt(unit, s.ts)
+			ev := event{
+				ts:     s.ts,
+				kind:   evSettle,
+				unit:   unit,
+				app:    appOf(unit),
+				spanID: s.span,
+			}
+			if wl == "" {
+				wl = "unknown"
+			}
+			ev.summary = "→ " + wl + " / idle"
+			ev.settleWorkload = wl
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// markRedundantStatuses flags each hook status that merely repeats the last
+// value+message its scope was already set to, walking events in time order. A
+// scope is a unit (workload status) or an application (app status). Redundant
+// statuses are hidden in the default view — a charm re-asserting "active" on
+// every hook is noise — but stay available in verbose mode.
+func markRedundantStatuses(events []event) {
+	last := map[string]string{} // scope -> "value\x00message"
+	for i := range events {
+		for j := range events[i].statuses {
+			s := &events[i].statuses[j]
+			scope := "unit:" + events[i].unit
+			if s.app {
+				scope = "app:" + events[i].app
+			}
+			cur := s.value + "\x00" + s.message
+			if prev, ok := last[scope]; ok && prev == cur {
+				s.redundant = true
+			}
+			last[scope] = cur
+		}
+	}
 }
 
 // hookRun is one execution of a hook on a unit: the run-hook..continue bracket
@@ -519,21 +642,28 @@ func (e event) failLabel() string {
 }
 
 // statusSummary renders the status changes a hook produced as a compact suffix,
-// e.g. `→ blocked "waiting for db"` (M10). Empty when the hook set no status.
-func (e event) statusSummary() string {
+// e.g. `→ blocked` (M10). Each part is coloured by its own status so a hook that
+// steps through several (e.g. maintenance → active) does not paint the earlier
+// ones with the last one's colour. The status message is intentionally omitted
+// here to keep the timeline compact — the full message is in the inspector; the
+// Status pane also shows the current one. When verbose is false, statuses that
+// merely repeat the scope's current value+message are dropped, so a charm
+// re-asserting "active" every hook does not clutter the default view. Empty when
+// the hook set no (visible) status.
+func (e event) statusSummary(verbose bool) string {
 	if len(e.statuses) == 0 {
 		return ""
 	}
 	parts := make([]string, 0, len(e.statuses))
 	for _, s := range e.statuses {
+		if s.redundant && !verbose {
+			continue
+		}
 		p := "→ " + s.value
 		if s.app {
 			p = "app → " + s.value
 		}
-		if s.message != "" {
-			p += " \"" + s.message + "\""
-		}
-		parts = append(parts, p)
+		parts = append(parts, statusStyleFor(s.value).Render(p))
 	}
 	return strings.Join(parts, "  ")
 }
