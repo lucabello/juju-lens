@@ -122,9 +122,22 @@ func unitFromPod(pod string) string {
 
 // ParseK8sLogLine parses one line of `kubectl logs --timestamps` for a workload
 // container. The caller supplies the model, pod and container (all in the raw
-// path, not the line). Line shape: "<RFC3339Nano ts> <message>", e.g.
+// path, not the line). Line shape: "<RFC3339Nano ts> <message>", but in
+// practice every workload container in a Juju sidecar charm runs under
+// Pebble, which wraps the service's own output with its own timestamp too, so
+// the real shape is "<kubectl ts> <pebble ts> [service] <logline>", e.g.
 //
-//	2026-07-04T19:13:25.277Z [grafana] level=info msg="ready"
+//	2026-08-10T12:43:56.598Z 2026-08-10T12:43:56.598Z [prometheus] ts=2026-08-10T12:43:56.598Z level=info msg="ready"
+//
+// Both leading timestamps are the same instant already shown on the left of
+// every rendered log line (kubectl's as Ts; Pebble's a near-identical echo of
+// it), so both are unconditionally cut from Message — keeping either would
+// just repeat what Ts already says. Nothing is actually lost: the full raw
+// line stays recoverable at RawFile:RawLine. Message frequently carries a
+// third, workload-printed timestamp of its own inside the logline (e.g.
+// Prometheus' "ts=…", avalanche's "hh:mm:ss") — see RedactK8sInlineTimestamp
+// for that one, which is display-only and reversible rather than stripped
+// here.
 //
 // The container is recorded as the Module and the pod resolves to a Unit, so a
 // workload log line correlates to the same unit timeline as that unit's hooks.
@@ -138,6 +151,14 @@ func ParseK8sLogLine(line, model, pod, container string) (LogRecord, bool) {
 	if err != nil {
 		return LogRecord{}, false
 	}
+	// Pebble's own echo of the same timestamp, when present, is dropped too:
+	// try the next token and only cut it if it actually parses as one (a
+	// container not running under Pebble just prints its line untouched).
+	if pebbleTs, rest, ok := strings.Cut(msg, " "); ok {
+		if _, err := time.Parse(time.RFC3339Nano, pebbleTs); err == nil {
+			msg = rest
+		}
+	}
 	rec := LogRecord{
 		Ts:      ts.UTC(),
 		Model:   model,
@@ -149,6 +170,62 @@ func ParseK8sLogLine(line, model, pod, container string) (LogRecord, bool) {
 	}
 	fillLogHints(&rec, msg)
 	return rec, true
+}
+
+// k8sComponentTagRe matches the "[component] " tag Pebble/container-agent
+// prepends to workload stdout, e.g. "[grafana] level=info msg=...". Redaction
+// leaves this tag untouched — it identifies which process wrote the line, not
+// a repeated timestamp — and only looks for a timestamp token right after it.
+var k8sComponentTagRe = regexp.MustCompile(`^\[[^\[\]\n]{1,64}\]\s+`)
+
+// k8sInlineTimestampRes recognizes a handful of common ways a workload's own
+// log formatter re-prints the timestamp that `kubectl logs --timestamps`
+// already prepended (and that ParseK8sLogLine already lifted into
+// LogRecord.Ts). Each is anchored to the very start of the logline (or right
+// after a "[component] " tag), never searched for mid-message, so a date or
+// time that is actually part of the message content — "retry scheduled for
+// 09:30:15" — is left alone. Order matters: more specific shapes (a named
+// logfmt field) are tried before the bare "just looks like a clock" ones.
+var k8sInlineTimestampRes = []*regexp.Regexp{
+	// logfmt fields: ts=..., time=..., t=... (Prometheus, go-kit/log, zap's
+	// console encoder), quoted or bare. The value itself must still look like
+	// a timestamp, so a coincidental "t=..." holding something else is left
+	// alone. RE2 has no backreferences, so quoted/bare are separate patterns
+	// rather than one sharing a captured quote character.
+	regexp.MustCompile(`^(?:ts|time|timestamp|t)="(?:\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\d{2}:\d{2}:\d{2}(?:\.\d+)?|\d{10}(?:\.\d+)?)"\s*`),
+	regexp.MustCompile(`^(?:ts|time|timestamp|t)=(?:\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\d{2}:\d{2}:\d{2}(?:\.\d+)?|\d{10}(?:\.\d+)?)\s*`),
+	// bracketed timestamp: "[2024-01-17T09:30:15.123Z] ..." / "[09:30:15] ...".
+	regexp.MustCompile(`^\[(?:\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s*`),
+	// Go stdlib `log` package / nginx / avalanche: "2009/11/10 23:00:00 ..." or
+	// a bare clock "23:00:00.123456 ...".
+	regexp.MustCompile(`^(?:\d{4}/\d{2}/\d{2}\s+)?\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?\s+`),
+	// bare ISO8601/RFC3339 at the very start: "2024-01-17T09:30:15.123Z msg".
+	regexp.MustCompile(`^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\s+`),
+	// BSD syslog style: "Jan 17 09:30:15 ...".
+	regexp.MustCompile(`^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+`),
+}
+
+// RedactK8sInlineTimestamp best-effort strips a workload's own repetition of
+// the timestamp already carried on LogRecord.Ts (see k8sInlineTimestampRes)
+// from a k8s LogRecord.Message. It is display-only: the raw/ files and
+// LogRecord.Message it reads are never modified, so the redaction is fully
+// reversible — callers that want the untouched line (the viewer's verbose
+// mode) simply use the original message instead of calling this.
+func RedactK8sInlineTimestamp(msg string) string {
+	prefix, rest := "", msg
+	if tag := k8sComponentTagRe.FindString(msg); tag != "" {
+		prefix, rest = tag, msg[len(tag):]
+	}
+	for _, re := range k8sInlineTimestampRes {
+		m := re.FindString(rest) // regex is ^-anchored: only ever matches at rest[0]
+		if m == "" {
+			continue
+		}
+		if stripped := rest[len(m):]; strings.TrimSpace(stripped) != "" {
+			return prefix + stripped // never leave a blank logline behind
+		}
+	}
+	return msg
 }
 
 // journalPriority maps a syslog PRIORITY (0..7) to the level names the rest of

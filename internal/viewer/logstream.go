@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucabello/juju-lens/internal/index"
+	"github.com/lucabello/juju-lens/internal/recording"
 )
 
 // streamItem is one line of the merged log stream (column [2]): either a
@@ -110,12 +111,20 @@ func (m *model) streamLine(it streamItem, focused bool, curSpan string) paneRow 
 	}
 	ts := lg.Ts.UTC().Format("15:04:05.000")
 
+	// k8s logs echo their own timestamp inside the logline (Prometheus'
+	// `ts=…`, avalanche's `hh:mm:ss`, …), a duplicate of ts above. Redact it
+	// by default; verbose mode (`.`) shows the logline untouched.
+	body := lg.Body
+	if lg.Source == "k8s" && !m.verbose {
+		body = recording.RedactK8sInlineTimestamp(body)
+	}
+
 	if focused {
 		level := ""
 		if lg.Level != "" {
 			level = lg.Level + " "
 		}
-		return selRow(fmt.Sprintf("%s [%s] %s%s", ts, src, level, lg.Body))
+		return selRow(fmt.Sprintf("%s [%s] %s%s", ts, src, level, body))
 	}
 
 	marker := " "
@@ -131,7 +140,7 @@ func (m *model) streamLine(it streamItem, focused bool, curSpan string) paneRow 
 		styleDim.Render(ts),
 		styleSource.Render("["+src+"]"),
 		level,
-		styleText.Render(lg.Body)))
+		styleText.Render(body)))
 }
 
 // logLevelStyle colours a log level so ERROR/WARNING stand out.

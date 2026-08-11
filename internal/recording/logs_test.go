@@ -102,9 +102,11 @@ func TestParseDebugLogLine(t *testing.T) {
 }
 
 func TestParseK8sLogLine(t *testing.T) {
-	// Real shape from `kubectl logs --timestamps`: an RFC3339Nano prefix then the
-	// pebble-wrapped workload line.
-	line := `2026-07-04T19:13:25.277747005Z [grafana] level=info msg="ready" trace-id=00112233445566778899aabbccddeeff`
+	// Real shape from `kubectl logs --timestamps` against a Pebble-managed
+	// workload container: kubectl's own RFC3339Nano prefix, then Pebble's own
+	// near-identical echo of it, then the "[service] logline" Pebble wraps
+	// the service's stdout with.
+	line := `2026-07-04T19:13:25.277747005Z 2026-07-04T19:13:25.277Z [grafana] level=info msg="ready" trace-id=00112233445566778899aabbccddeeff`
 	rec, ok := ParseK8sLogLine(line, "cos-lite", "grafana-0", "grafana")
 	if !ok {
 		t.Fatal("ok = false, want true")
@@ -121,6 +123,8 @@ func TestParseK8sLogLine(t *testing.T) {
 	if rec.Module != "grafana" {
 		t.Errorf("module = %q, want grafana", rec.Module)
 	}
+	// Both the kubectl and the Pebble timestamps are gone; only the
+	// "[service] logline" Pebble wrapper remains.
 	if rec.Message != `[grafana] level=info msg="ready" trace-id=00112233445566778899aabbccddeeff` {
 		t.Errorf("message = %q", rec.Message)
 	}
@@ -135,11 +139,87 @@ func TestParseK8sLogLine(t *testing.T) {
 	if rec, _ := ParseK8sLogLine(line, "cos-lite", "prometheus-k8s-0", "prometheus"); rec.Unit != "prometheus-k8s/0" {
 		t.Errorf("unit = %q, want prometheus-k8s/0", rec.Unit)
 	}
+	// A container not running under Pebble has no second timestamp to strip:
+	// the (non-timestamp) rest of the line is left untouched.
+	if rec, _ := ParseK8sLogLine(`2026-07-04T19:13:25.277Z plain stdout, no pebble wrapper`, "m", "p-0", "c"); rec.Message != "plain stdout, no pebble wrapper" {
+		t.Errorf("message = %q, want the line untouched past the kubectl timestamp", rec.Message)
+	}
 	if _, ok := ParseK8sLogLine("no-space-so-no-timestamp", "m", "p-0", "c"); ok {
 		t.Error("expected ok = false for a line without a timestamp field")
 	}
 	if _, ok := ParseK8sLogLine("not-a-timestamp here", "m", "p-0", "c"); ok {
 		t.Error("expected ok = false for an unparseable timestamp")
+	}
+}
+
+func TestRedactK8sInlineTimestamp(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		want string
+	}{
+		{
+			name: "prometheus logfmt ts=",
+			msg:  `[prometheus] ts=2026-07-04T19:13:25.277Z caller=main.go:123 level=info msg="ready"`,
+			want: `[prometheus] caller=main.go:123 level=info msg="ready"`,
+		},
+		{
+			name: "logfmt time= quoted",
+			msg:  `[loki] time="2026-07-04T19:13:25Z" level=info msg=ready`,
+			want: `[loki] level=info msg=ready`,
+		},
+		{
+			name: "avalanche bare clock",
+			msg:  `[avalanche] 19:13:25 starting up`,
+			want: `[avalanche] starting up`,
+		},
+		{
+			name: "go stdlib log date+time",
+			msg:  `[worker] 2026/07/04 19:13:25 listening on :8080`,
+			want: `[worker] listening on :8080`,
+		},
+		{
+			name: "bracketed ISO timestamp",
+			msg:  `[nginx] [2026-07-04T19:13:25.277Z] GET / 200`,
+			want: `[nginx] GET / 200`,
+		},
+		{
+			name: "bracketed bare clock",
+			msg:  `[app] [19:13:25] boot complete`,
+			want: `[app] boot complete`,
+		},
+		{
+			name: "bare ISO8601, no component tag",
+			msg:  `2026-07-04T19:13:25.277Z ready`,
+			want: `ready`,
+		},
+		{
+			name: "syslog month-day time",
+			msg:  `[sshd] Jul  4 19:13:25 sshd started`,
+			want: `[sshd] sshd started`,
+		},
+		{
+			name: "no recognizable timestamp: untouched",
+			msg:  `[grafana] level=info msg="ready"`,
+			want: `[grafana] level=info msg="ready"`,
+		},
+		{
+			name: "clock mentioned mid-message: untouched, not stripped",
+			msg:  `[app] retry scheduled for 19:13:25 UTC`,
+			want: `[app] retry scheduled for 19:13:25 UTC`,
+		},
+		{
+			name: "whole logline is the timestamp: left alone rather than emptied",
+			msg:  `[app] 19:13:25`,
+			want: `[app] 19:13:25`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := RedactK8sInlineTimestamp(c.msg); got != c.want {
+				t.Errorf("RedactK8sInlineTimestamp(%q) = %q, want %q", c.msg, got, c.want)
+			}
+		})
 	}
 }
 
