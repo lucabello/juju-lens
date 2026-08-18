@@ -304,13 +304,19 @@ func (m *model) unitRows(app, unit, changed string) []paneRow {
 	if known && wl.Known {
 		workload = statusStyleFor(wl.Value).Render(wl.Value)
 	}
-	// The agent (idle/executing) status is always shown, "unknown" when we never
-	// captured it, so the "workload / agent" pair is never half-empty.
-	agentPart := styleDim.Render("unknown")
-	if agent, ok := m.agentStatuses[unit]; ok && agent.Known && agent.Value != "" {
-		agentPart = agentStyleFor(agent.Value).Render(agent.Value)
+	// The agent (idle/executing) status is always shown alongside the workload,
+	// "unknown" when we never captured it, so the "workload / agent" pair is
+	// never half-empty — except once the unit is terminated: there's no agent
+	// left to report on, so a stale pre-termination value ("executing") would
+	// be misleading. Show nothing next to "terminated" instead.
+	terminated := known && wl.Known && wl.Value == "terminated"
+	if !terminated {
+		agentPart := styleDim.Render("unknown")
+		if agent, ok := m.agentStatuses[unit]; ok && agent.Known && agent.Value != "" {
+			agentPart = agentStyleFor(agent.Value).Render(agent.Value)
+		}
+		workload += styleDim.Render(" / ") + agentPart
 	}
-	workload += styleDim.Render(" / ") + agentPart
 	if known && wl.Known && wl.Message != "" {
 		workload += "  " + styleDim.Render("\""+wl.Message+"\"")
 	}

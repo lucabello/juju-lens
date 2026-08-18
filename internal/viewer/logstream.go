@@ -58,9 +58,9 @@ func (m *model) renderLogPane() string {
 	_, h := rowHeights(m.bodyHeight())
 	bodyH := max(1, h-2)
 
-	lock := "locked"
+	lock := "following events"
 	if m.logFree {
-		lock = "free (f)"
+		lock = "free"
 	}
 	title := "Logs · " + lock
 	if m.wrap {
@@ -88,17 +88,25 @@ func (m *model) renderLogPane() string {
 
 // streamLine renders one stream item. Event items become rulers; log items read
 // "timestamp [source(unit)] level body", e.g. "… [k8s(grafana/0)] INFO ready".
+// The selected line is marked with a leading "▸" rather than reversing the
+// whole row, so the row's own colours (unit, level, …) stay legible.
 func (m *model) streamLine(it streamItem, focused bool, curSpan string) paneRow {
+	marker := " "
+	switch {
+	case focused:
+		marker = styleHook.Render("▸")
+	case it.evIdx < 0 && curSpan != "" && it.log.SpanID == curSpan:
+		marker = styleHook.Render("»") // exact span-id join to the selected event
+	}
+
 	if it.evIdx >= 0 {
 		ev := m.events[it.evIdx]
-		body := fmt.Sprintf("══ %s  EVENT %s", ev.ts.UTC().Format("15:04:05.000"), ev.summary)
+		ts := ev.ts.UTC().Format("15:04:05.000")
+		label := styleText.Render(ev.summary)
 		if ev.unit != "" {
-			body += "  " + ev.unit
+			label = styleUnit.Render(ev.unit) + " " + label
 		}
-		if focused {
-			return selRow("▸ " + body)
-		}
-		return row(styleRuler.Render("  " + body))
+		return row(fmt.Sprintf("%s %s%s", marker, styleRuler.Render("══ "+ts+"  "), label))
 	}
 	lg := it.log
 	who := lg.Unit
@@ -119,18 +127,6 @@ func (m *model) streamLine(it streamItem, focused bool, curSpan string) paneRow 
 		body = recording.RedactK8sInlineTimestamp(body)
 	}
 
-	if focused {
-		level := ""
-		if lg.Level != "" {
-			level = lg.Level + " "
-		}
-		return selRow(fmt.Sprintf("%s [%s] %s%s", ts, src, level, body))
-	}
-
-	marker := " "
-	if curSpan != "" && lg.SpanID == curSpan {
-		marker = styleHook.Render("»") // exact span-id join to the selected event
-	}
 	level := ""
 	if lg.Level != "" {
 		level = logLevelStyle(lg.Level).Render(lg.Level) + " "

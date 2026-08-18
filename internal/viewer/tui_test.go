@@ -170,7 +170,10 @@ func TestHorizontalScrollClamps(t *testing.T) {
 	m := buildModel(t, db, index.Model{ID: modelID, Name: "default"})
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = updated.(*model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}}) // focus Logs
+	tab := tea.KeyMsg{Type: tea.KeyTab}
+	updated, _ = m.Update(tab) // Events -> Status
+	m = updated.(*model)
+	updated, _ = m.Update(tab) // Status -> Logs
 	m = updated.(*model)
 
 	right := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}}
@@ -210,6 +213,10 @@ func TestInspectorOverlay(t *testing.T) {
 	}
 	m := buildModel(t, db, active)
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	m = updated.(*model)
+	// The cursor opens on the first event; step to the last (span a3, the one
+	// made inspectable above) before inspecting it.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnd})
 	m = updated.(*model)
 
 	enter := tea.KeyMsg{Type: tea.KeyEnter}

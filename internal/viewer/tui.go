@@ -10,13 +10,15 @@
 //     reconstructed at the selected instant (point-in-time by default), with
 //     change pips marking what moved.
 //   - [2] Logs   — every log source merged into one chronological stream with
-//     the timeline's events dropped in as ruler lines. Locks to the selected
+//     the timeline's events dropped in as ruler lines. Follows the selected
 //     event by default; `f` frees it for lazyjournal-style scrolling.
 //
 // Long lines clip at the pane edge and scroll horizontally (←/→); `w` wraps
 // them instead. The Model owns the SQLite handle and routes messages to the
-// panes. Panes are focused by number (1/2/3) or cycled with Tab; `enter` opens
-// an inspector overlay for the selected event (databags + the RPCs behind it).
+// panes. Panes are cycled with Tab/Shift+Tab; `enter` opens an inspector
+// overlay for the selected event (databags + the RPCs behind it), and `n`/`N`
+// jump to the next/previous event for the same unit — both only while the
+// Events pane is focused.
 package viewer
 
 import (
@@ -73,8 +75,8 @@ func tickCmd() tea.Cmd {
 type keymap struct {
 	Up, Down, PageUp, PageDown, Home, End key.Binding
 	ScrollLeft, ScrollRight, Wrap         key.Binding
-	Focus1, Focus2, Focus3, Tab, ShiftTab key.Binding
-	Inspect, Free                         key.Binding
+	Tab, ShiftTab                         key.Binding
+	Inspect, Free, NextUnit, PrevUnit     key.Binding
 	Diff, CopyCur, CopyPrev               key.Binding
 	Verbose, ModelPick, Quit              key.Binding
 }
@@ -84,19 +86,18 @@ func defaultKeymap() keymap {
 		Up:          key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
 		Down:        key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
 		PageUp:      key.NewBinding(key.WithKeys("pgup", "b"), key.WithHelp("PgUp", "page up")),
-		PageDown:    key.NewBinding(key.WithKeys("pgdown", " ", "f"), key.WithHelp("PgDn", "page down")),
+		PageDown:    key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("PgDn", "page down")),
 		Home:        key.NewBinding(key.WithKeys("home", "g"), key.WithHelp("g", "top")),
 		End:         key.NewBinding(key.WithKeys("end", "G"), key.WithHelp("G", "bottom")),
 		ScrollLeft:  key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "scroll left")),
 		ScrollRight: key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "scroll right")),
 		Wrap:        key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "wrap")),
-		Focus1:      key.NewBinding(key.WithKeys("1"), key.WithHelp("1", "events")),
-		Focus2:      key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "logs")),
-		Focus3:      key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "status")),
 		Tab:         key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "cycle")),
 		ShiftTab:    key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧Tab", "cycle back")),
 		Inspect:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "inspect")),
-		Free:        key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "free-scroll")),
+		Free:        key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow/free")),
+		NextUnit:    key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "next (unit)")),
+		PrevUnit:    key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "prev (unit)")),
 		Diff:        key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "diff")),
 		CopyCur:     key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy after")),
 		CopyPrev:    key.NewBinding(key.WithKeys("Y"), key.WithHelp("Y", "copy before")),
@@ -107,14 +108,14 @@ func defaultKeymap() keymap {
 }
 
 func (k keymap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Focus1, k.Focus2, k.Focus3, k.Inspect, k.Verbose, k.ModelPick, k.Quit}
+	return []key.Binding{k.Tab, k.Inspect, k.Verbose, k.ModelPick, k.Quit}
 }
 
 func (k keymap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
-		{k.ScrollLeft, k.ScrollRight, k.Wrap, k.Focus1, k.Focus2, k.Focus3, k.Tab, k.ShiftTab, k.Free},
-		{k.Inspect, k.Verbose, k.ModelPick, k.Quit},
+		{k.ScrollLeft, k.ScrollRight, k.Wrap, k.Tab, k.ShiftTab, k.Free},
+		{k.Inspect, k.NextUnit, k.PrevUnit, k.Verbose, k.ModelPick, k.Quit},
 	}
 }
 
@@ -215,7 +216,7 @@ func (m *model) setActiveModel(mm index.Model) {
 	appStatusBySpan, _ := m.db.StatusBySpan(mm.ID, string(index.KindAppStatus))
 	statusBySpan := statusMapFromSnapshots(unitStatusBySpan, appStatusBySpan)
 	m.allEvents = buildEventsWithStatus(spans, m.databagSpans, statusBySpan)
-	m.events = nil // force applyVerboseFilter to select the newest visible event
+	m.events = nil // force applyVerboseFilter to select the first visible event
 	m.appTree = buildAppTree(spans)
 	m.relationBroken = relationBrokenTimes(spans)
 	m.applyVerboseFilter()
@@ -224,8 +225,9 @@ func (m *model) setActiveModel(mm index.Model) {
 // applyVerboseFilter recomputes the visible event slice from allEvents,
 // honouring the `.` toggle (default: hooks only; verbose: raw transitions too).
 // It keeps the selection pinned to the same event when possible — and lands on
-// the newest visible event when there was no prior selection. Every derived view
-// (log stream, status pane) is refreshed to the new selection.
+// the first visible event when there was no prior selection (opening the
+// recording). Every derived view (log stream, status pane) is refreshed to the
+// new selection.
 func (m *model) applyVerboseFilter() {
 	prev := ""
 	if m.cursor >= 0 && m.cursor < len(m.events) {
@@ -239,7 +241,7 @@ func (m *model) applyVerboseFilter() {
 	}
 	m.events = visible
 	if prev == "" {
-		m.cursor = max(0, len(visible)-1)
+		m.cursor = 0
 	} else {
 		m.cursor = clamp(m.cursor, 0, max(0, len(visible)-1))
 		for i, ev := range visible {
@@ -502,15 +504,6 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
-	case key.Matches(msg, m.keys.Focus1):
-		m.setFocus(paneEvents)
-		return m, nil
-	case key.Matches(msg, m.keys.Focus2):
-		m.setFocus(paneLogs)
-		return m, nil
-	case key.Matches(msg, m.keys.Focus3):
-		m.setFocus(paneStatus)
-		return m, nil
 	case key.Matches(msg, m.keys.Tab):
 		m.cycleFocus(+1)
 		return m, nil
@@ -536,11 +529,21 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, m.keys.Inspect):
 		// Only events that actually have something to show — a databag change or
-		// a config change — are inspectable.
-		if inspectable(m.currentEvent()) {
+		// a config change — are inspectable. Only reachable from the Events pane.
+		if m.focus == paneEvents && inspectable(m.currentEvent()) {
 			m.overlayOn = true
 			m.renderOverlay()
 			m.overlay.GotoTop()
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.NextUnit):
+		if m.focus == paneEvents {
+			m.moveCursorSameUnit(+1)
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.PrevUnit):
+		if m.focus == paneEvents {
+			m.moveCursorSameUnit(-1)
 		}
 		return m, nil
 	case key.Matches(msg, m.keys.Verbose):
@@ -548,13 +551,13 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.applyVerboseFilter()
 		return m, nil
 	case key.Matches(msg, m.keys.Free):
-		if m.focus == paneLogs {
-			m.logFree = !m.logFree
-			if m.logFree {
-				m.logCursor = m.lockedStreamIdx()
-			}
-			return m, nil
+		// Available regardless of focus: toggles whether the Logs pane tracks
+		// the selected event or scrolls freely.
+		m.logFree = !m.logFree
+		if m.logFree {
+			m.logCursor = m.lockedStreamIdx()
 		}
+		return m, nil
 	}
 
 	// Per-pane navigation.
@@ -624,6 +627,26 @@ func (m *model) moveCursor(delta int) {
 	}
 	m.cursor = clamp(m.cursor+delta, 0, len(m.events)-1)
 	m.refreshStatus() // the Status pane always follows the cursor
+}
+
+// moveCursorSameUnit steps the event cursor to the next (dir > 0) or previous
+// (dir < 0) event belonging to the same unit as the currently selected event
+// ("n"/"N"). A no-op for controller-side events, which have no unit.
+func (m *model) moveCursorSameUnit(dir int) {
+	if len(m.events) == 0 {
+		return
+	}
+	unit := m.currentEvent().unit
+	if unit == "" {
+		return
+	}
+	for i := m.cursor + dir; i >= 0 && i < len(m.events); i += dir {
+		if m.events[i].unit == unit {
+			m.cursor = i
+			m.refreshStatus()
+			return
+		}
+	}
 }
 
 func (m *model) moveLogCursor(delta int) {
