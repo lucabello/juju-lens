@@ -19,11 +19,19 @@
 // overlay for the selected event (databags + the RPCs behind it), and `n`/`N`
 // jump to the next/previous event for the same unit — both only while the
 // Events pane is focused.
+//
+// Two filters narrow what Events/Logs show, and compose with each other and
+// with the verbose toggle: a scope filter — browse the Status pane's
+// Applications tree and press `space` on an app/unit row to pin it (an app
+// pins all its units) — and a free-text search (`/`), which opens a prompt
+// scoped to whichever of Events/Logs is focused, filtering that pane's rows
+// by substring as you type. `r` resets both at once.
 package viewer
 
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/lucabello/juju-lens/internal/index"
@@ -31,6 +39,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -79,35 +88,43 @@ type keymap struct {
 	Inspect, Free, NextUnit, PrevUnit     key.Binding
 	Diff, CopyCur, CopyPrev               key.Binding
 	Verbose, ModelPick, Quit              key.Binding
+	Search, ToggleScope, ResetFilters     key.Binding
 }
 
 func defaultKeymap() keymap {
 	return keymap{
-		Up:          key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
-		Down:        key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
-		PageUp:      key.NewBinding(key.WithKeys("pgup", "b"), key.WithHelp("PgUp", "page up")),
-		PageDown:    key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("PgDn", "page down")),
-		Home:        key.NewBinding(key.WithKeys("home", "g"), key.WithHelp("g", "top")),
-		End:         key.NewBinding(key.WithKeys("end", "G"), key.WithHelp("G", "bottom")),
-		ScrollLeft:  key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "scroll left")),
-		ScrollRight: key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "scroll right")),
-		Wrap:        key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "wrap")),
-		Tab:         key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "cycle")),
-		ShiftTab:    key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧Tab", "cycle back")),
-		Inspect:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "inspect")),
-		Free:        key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow/free")),
-		NextUnit:    key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "next (unit)")),
-		PrevUnit:    key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "prev (unit)")),
-		Diff:        key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "diff")),
-		CopyCur:     key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy after")),
-		CopyPrev:    key.NewBinding(key.WithKeys("Y"), key.WithHelp("Y", "copy before")),
-		Verbose:     key.NewBinding(key.WithKeys("."), key.WithHelp(".", "verbose")),
-		ModelPick:   key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "model")),
-		Quit:        key.NewBinding(key.WithKeys("q", "esc", "ctrl+c"), key.WithHelp("q", "quit")),
+		Up:           key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Down:         key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		PageUp:       key.NewBinding(key.WithKeys("pgup", "b"), key.WithHelp("PgUp", "page up")),
+		PageDown:     key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("PgDn", "page down")),
+		Home:         key.NewBinding(key.WithKeys("home", "g"), key.WithHelp("g", "top")),
+		End:          key.NewBinding(key.WithKeys("end", "G"), key.WithHelp("G", "bottom")),
+		ScrollLeft:   key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "scroll left")),
+		ScrollRight:  key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "scroll right")),
+		Wrap:         key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "wrap")),
+		Tab:          key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "cycle")),
+		ShiftTab:     key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧Tab", "cycle back")),
+		Inspect:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "inspect")),
+		Free:         key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow/free")),
+		NextUnit:     key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "next (unit)")),
+		PrevUnit:     key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "prev (unit)")),
+		Diff:         key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "diff")),
+		CopyCur:      key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy after")),
+		CopyPrev:     key.NewBinding(key.WithKeys("Y"), key.WithHelp("Y", "copy before")),
+		Verbose:      key.NewBinding(key.WithKeys("."), key.WithHelp(".", "verbose")),
+		ModelPick:    key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "model")),
+		Quit:         key.NewBinding(key.WithKeys("q", "esc", "ctrl+c"), key.WithHelp("q", "quit")),
+		Search:       key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
+		ToggleScope:  key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "pin/unpin (Status)")),
+		ResetFilters: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reset filters")),
 	}
 }
 
 func (k keymap) ShortHelp() []key.Binding {
+	// Kept short deliberately: bubbles/help v1.0.0 falls back to showing an
+	// item in full rather than eliding it once there's no room left even for
+	// an ellipsis, so a ShortHelp that's too eager to grow can overflow a
+	// narrow terminal. Search/ToggleScope/ResetFilters live in FullHelp instead.
 	return []key.Binding{k.Tab, k.Inspect, k.Verbose, k.ModelPick, k.Quit}
 }
 
@@ -116,6 +133,7 @@ func (k keymap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
 		{k.ScrollLeft, k.ScrollRight, k.Wrap, k.Tab, k.ShiftTab, k.Free},
 		{k.Inspect, k.NextUnit, k.PrevUnit, k.Verbose, k.ModelPick, k.Quit},
+		{k.Search, k.ToggleScope, k.ResetFilters},
 	}
 }
 
@@ -159,8 +177,23 @@ type model struct {
 	leaders        map[string]string // app -> leader unit name at the selected instant (M8)
 	relations      []relationSummary
 	databags       map[string]index.SnapshotRow
-	relCursor      int
+	statusRows     []statusRow            // flat, in display order: app/unit rows, then relations
+	statusCursor   int                    // cursor into statusRows (was relCursor, relations-only)
 	relationBroken map[string][]time.Time // relation key -> relation-broken timestamps
+
+	// Scope filter: apps/units pinned from the Status pane (`space`), narrowing
+	// Events and Logs to what they touched. Empty means unfiltered. An app entry
+	// covers all of its units without needing to be expanded into the set.
+	scopeFilter map[string]bool
+
+	// Free-text search (`/`): a prompt scoped to whichever of Events/Logs was
+	// focused when opened, filtering that pane's rows by substring live as the
+	// user types. Independent per pane so switching focus doesn't clobber it.
+	searchInput  textinput.Model
+	searchActive bool
+	searchTarget paneID
+	eventQuery   string
+	logQuery     string
 
 	// Inspector overlay.
 	overlayOn bool
@@ -184,16 +217,38 @@ type model struct {
 	picker *modelPicker
 }
 
+// statusRowKind identifies what a Status pane row selects: an application, one
+// of its units, or a relation. Only app/unit rows are pinnable (`space`).
+type statusRowKind int
+
+const (
+	statusRowApp statusRowKind = iota
+	statusRowUnit
+	statusRowRelation
+)
+
+// statusRow is one selectable line of the Status pane, in display order (apps
+// with their units nested beneath, then relations). key is the app/unit name
+// or relation key `space` would pin/unpin.
+type statusRow struct {
+	kind statusRowKind
+	key  string
+}
+
 func newModel(dir string, man *recording.Manifest, db *index.DB, models []index.Model) *model {
+	search := textinput.New()
+	search.CharLimit = 200
+	search.Prompt = ""
 	m := &model{
-		dir:       dir,
-		manifest:  man,
-		db:        db,
-		allModels: models,
-		overlay:   viewport.New(0, 0),
-		help:      help.New(),
-		keys:      defaultKeymap(),
-		focus:     paneEvents,
+		dir:         dir,
+		manifest:    man,
+		db:          db,
+		allModels:   models,
+		overlay:     viewport.New(0, 0),
+		help:        help.New(),
+		keys:        defaultKeymap(),
+		focus:       paneEvents,
+		searchInput: search,
 	}
 	if len(models) > 1 {
 		m.picker = newModelPicker(models)
@@ -204,7 +259,16 @@ func newModel(dir string, man *recording.Manifest, db *index.DB, models []index.
 }
 
 // setActiveModel refreshes every derived view when the model context changes.
+// Filters (scope, search) only reset on a genuine model switch — reload()
+// calls this repeatedly on the *same* model while following a live
+// recording, and that must not wipe out what the user pinned/typed.
 func (m *model) setActiveModel(mm index.Model) {
+	if mm.ID != m.activeModel.ID {
+		m.scopeFilter = nil
+		m.eventQuery = ""
+		m.logQuery = ""
+		m.searchActive = false
+	}
 	m.activeModel = mm
 	spans, err := m.db.Spans(mm.ID)
 	if err != nil {
@@ -216,28 +280,63 @@ func (m *model) setActiveModel(mm index.Model) {
 	appStatusBySpan, _ := m.db.StatusBySpan(mm.ID, string(index.KindAppStatus))
 	statusBySpan := statusMapFromSnapshots(unitStatusBySpan, appStatusBySpan)
 	m.allEvents = buildEventsWithStatus(spans, m.databagSpans, statusBySpan)
-	m.events = nil // force applyVerboseFilter to select the first visible event
+	m.events = nil // force applyFilters to select the first visible event
 	m.appTree = buildAppTree(spans)
 	m.relationBroken = relationBrokenTimes(spans)
-	m.applyVerboseFilter()
+	m.applyFilters()
 }
 
-// applyVerboseFilter recomputes the visible event slice from allEvents,
-// honouring the `.` toggle (default: hooks only; verbose: raw transitions too).
-// It keeps the selection pinned to the same event when possible — and lands on
-// the first visible event when there was no prior selection (opening the
-// recording). Every derived view (log stream, status pane) is refreshed to the
-// new selection.
-func (m *model) applyVerboseFilter() {
+// scopeMatches reports whether app/unit passes the current scope filter: an
+// empty filter matches everything, otherwise the app or the unit itself must
+// be pinned. Pinning an app therefore covers all of its units for free — no
+// set expansion needed when `space` is pressed on an app row.
+func (m *model) scopeMatches(app, unit string) bool {
+	if len(m.scopeFilter) == 0 {
+		return true
+	}
+	if app != "" && m.scopeFilter[app] {
+		return true
+	}
+	return unit != "" && m.scopeFilter[unit]
+}
+
+// matchesEventQuery reports whether ev's searchable text contains query
+// (case-insensitive substring). An empty query always matches.
+func matchesEventQuery(ev event, query string) bool {
+	if query == "" {
+		return true
+	}
+	q := strings.ToLower(query)
+	return strings.Contains(strings.ToLower(ev.summary), q) ||
+		strings.Contains(strings.ToLower(ev.detail), q) ||
+		strings.Contains(strings.ToLower(ev.unit), q) ||
+		strings.Contains(strings.ToLower(ev.app), q)
+}
+
+// applyFilters recomputes the visible event slice from allEvents, honouring
+// the `.` verbose toggle (default: hooks only; verbose: raw transitions too),
+// the scope filter, and the Events search query — all three compose. It keeps
+// the selection pinned to the same event when possible — and lands on the
+// first visible event when there was no prior selection (opening the
+// recording). Every derived view (log stream, status pane) is refreshed to
+// the new selection.
+func (m *model) applyFilters() {
 	prev := ""
 	if m.cursor >= 0 && m.cursor < len(m.events) {
 		prev = m.events[m.cursor].ident()
 	}
 	var visible []event
 	for _, ev := range m.allEvents {
-		if m.verbose || !ev.verboseOnly {
-			visible = append(visible, ev)
+		if !m.verbose && ev.verboseOnly {
+			continue
 		}
+		if !m.scopeMatches(ev.app, ev.unit) {
+			continue
+		}
+		if !matchesEventQuery(ev, m.eventQuery) {
+			continue
+		}
+		visible = append(visible, ev)
 	}
 	m.events = visible
 	if prev == "" {
@@ -337,9 +436,28 @@ func (m *model) refreshStatus() {
 	for _, r := range databagRows {
 		m.databags[r.Scope] = r
 	}
-	if m.relCursor >= len(m.relations) {
-		m.relCursor = max(0, len(m.relations)-1)
+	m.rebuildStatusRows()
+}
+
+// rebuildStatusRows rebuilds the flat, cursor-addressable row list for the
+// Status pane — apps with their units nested beneath, then relations — in the
+// exact order renderStatusPane draws them, and clamps statusCursor to it.
+// Called at the end of refreshStatus so it always reflects the current
+// app/unit universe and the relations visible as of the selected instant.
+func (m *model) rebuildStatusRows() {
+	apps, unitsByApp := m.statusUniverse()
+	var rows []statusRow
+	for _, app := range apps {
+		rows = append(rows, statusRow{kind: statusRowApp, key: app})
+		for _, u := range unitsByApp[app] {
+			rows = append(rows, statusRow{kind: statusRowUnit, key: u})
+		}
 	}
+	for _, r := range m.relations {
+		rows = append(rows, statusRow{kind: statusRowRelation, key: r.Key})
+	}
+	m.statusRows = rows
+	m.statusCursor = clamp(m.statusCursor, 0, max(0, len(rows)-1))
 }
 
 // currentRelations drops relations that don't exist at instant now. A databag
@@ -481,6 +599,24 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// The search prompt captures keys while open (only reachable when the
+	// overlay is closed, since Search is bound in the switch below it).
+	if m.searchActive {
+		switch msg.String() {
+		case "esc":
+			m.searchActive = false
+			m.setSearchQuery(m.searchTarget, "")
+		case "enter":
+			m.searchActive = false
+		default:
+			var cmd tea.Cmd
+			m.searchInput, cmd = m.searchInput.Update(msg)
+			m.setSearchQuery(m.searchTarget, m.searchInput.Value())
+			return m, cmd
+		}
+		return m, nil
+	}
+
 	// The inspector overlay captures keys while open.
 	if m.overlayOn {
 		switch {
@@ -548,7 +684,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, m.keys.Verbose):
 		m.verbose = !m.verbose
-		m.applyVerboseFilter()
+		m.applyFilters()
 		return m, nil
 	case key.Matches(msg, m.keys.Free):
 		// Available regardless of focus: toggles whether the Logs pane tracks
@@ -558,12 +694,34 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.logCursor = m.lockedStreamIdx()
 		}
 		return m, nil
+	case key.Matches(msg, m.keys.Search):
+		if m.focus == paneEvents || m.focus == paneLogs {
+			m.searchTarget = m.focus
+			m.searchInput.SetValue(m.searchQueryFor(m.focus))
+			m.searchInput.CursorEnd()
+			m.searchActive = true
+			return m, m.searchInput.Focus()
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.ToggleScope):
+		if m.focus == paneStatus {
+			m.toggleScopeAtCursor()
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.ResetFilters):
+		if len(m.scopeFilter) > 0 || m.eventQuery != "" || m.logQuery != "" {
+			m.scopeFilter = nil
+			m.eventQuery = ""
+			m.logQuery = ""
+			m.applyFilters()
+		}
+		return m, nil
 	}
 
 	// Per-pane navigation.
 	switch m.focus {
 	case paneStatus:
-		m.moveRelCursor(navDelta(msg, m.keys))
+		m.moveStatusCursor(navDelta(msg, m.keys))
 	case paneLogs:
 		if m.logFree {
 			m.moveLogCursor(navDelta(msg, m.keys))
@@ -656,11 +814,54 @@ func (m *model) moveLogCursor(delta int) {
 	m.logCursor = clamp(m.logCursor+delta, 0, len(m.stream)-1)
 }
 
-func (m *model) moveRelCursor(delta int) {
-	if delta == 0 || len(m.relations) == 0 {
+func (m *model) moveStatusCursor(delta int) {
+	if delta == 0 || len(m.statusRows) == 0 {
 		return
 	}
-	m.relCursor = clamp(m.relCursor+delta, 0, len(m.relations)-1)
+	m.statusCursor = clamp(m.statusCursor+delta, 0, len(m.statusRows)-1)
+}
+
+// toggleScopeAtCursor pins/unpins the app or unit under the Status pane
+// cursor in the scope filter. A no-op on a relation row — relations have
+// their own key space and folding them into the same filter is a separate
+// extension, not needed here.
+func (m *model) toggleScopeAtCursor() {
+	if m.statusCursor < 0 || m.statusCursor >= len(m.statusRows) {
+		return
+	}
+	r := m.statusRows[m.statusCursor]
+	if r.kind != statusRowApp && r.kind != statusRowUnit {
+		return
+	}
+	if m.scopeFilter == nil {
+		m.scopeFilter = map[string]bool{}
+	}
+	if m.scopeFilter[r.key] {
+		delete(m.scopeFilter, r.key)
+	} else {
+		m.scopeFilter[r.key] = true
+	}
+	m.applyFilters()
+}
+
+// searchQueryFor returns the committed search query for pane p (Events or
+// Logs); the search prompt is prefilled with this when reopened.
+func (m *model) searchQueryFor(p paneID) string {
+	if p == paneLogs {
+		return m.logQuery
+	}
+	return m.eventQuery
+}
+
+// setSearchQuery writes q into the query for pane p and reapplies filters —
+// called live as the user types and once more on cancel (to clear it).
+func (m *model) setSearchQuery(p paneID, q string) {
+	if p == paneLogs {
+		m.logQuery = q
+	} else {
+		m.eventQuery = q
+	}
+	m.applyFilters()
 }
 
 func (m *model) View() string {
@@ -672,6 +873,9 @@ func (m *model) View() string {
 	}
 	header := m.renderHeader()
 	footer := m.help.View(m.keys)
+	if m.searchActive {
+		footer = styleHook.Render("/") + m.searchInput.View()
+	}
 
 	if m.overlayOn {
 		return lipgloss.JoinVertical(lipgloss.Left, header, m.renderOverlayFrame(), footer)
@@ -696,12 +900,21 @@ func (m *model) renderHeader() string {
 	if m.manifest != nil {
 		controller = m.manifest.Controller.Name
 	}
+	scope := ""
+	if len(m.scopeFilter) > 0 {
+		names := make([]string, 0, len(m.scopeFilter))
+		for n := range m.scopeFilter {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		scope = "  " + styleHook.Render("· scope: "+strings.Join(names, ", "))
+	}
 	live := ""
 	if m.follow && m.atTail {
 		live = "  " + styleErr.Render("● LIVE")
 	}
-	title := fmt.Sprintf("juju-lens · %s · model: %s · %d events · @%s%s",
-		controller, modelsSummary, len(m.events), m.currentTs().UTC().Format("15:04:05.000"), live)
+	title := fmt.Sprintf("juju-lens · %s · model: %s · %d events · @%s%s%s",
+		controller, modelsSummary, len(m.events), m.currentTs().UTC().Format("15:04:05.000"), scope, live)
 	return styleHeader.Width(m.width).Render(title)
 }
 
@@ -732,6 +945,10 @@ var (
 	styleWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	styleRuler   = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Bold(true)
 	styleSection = lipgloss.NewStyle().Bold(true).Underline(true)
+	// styleScoped marks an app/unit name pinned in the scope filter, distinct
+	// from the cursor's whole-row reverse-video bar (box.go strips styling on
+	// selected rows before reversing, so the two never collide visually).
+	styleScoped = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
 )
 
 // boxFor returns the pane box, highlighting its border when focused. The border

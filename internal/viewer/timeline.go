@@ -27,7 +27,11 @@ func (m *model) renderEventsPane() string {
 	for i := start; i < end; i++ {
 		rows = append(rows, m.eventRow(i, unitW))
 	}
-	return m.renderPane(paneEvents, w, h, "Events", rows)
+	title := "Events"
+	if m.eventQuery != "" {
+		title += " · /" + m.eventQuery
+	}
+	return m.renderPane(paneEvents, w, h, title, rows)
 }
 
 // unitColWidth sizes the unit column to the longest unit name in view so names

@@ -9,6 +9,7 @@ import (
 	"github.com/lucabello/juju-lens/internal/index"
 
 	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 )
 
@@ -25,12 +26,13 @@ func openDB(t *testing.T) *index.DB {
 // buildModel skips Run() so tests can inject a DB.
 func buildModel(t *testing.T, db *index.DB, active index.Model) *model {
 	m := &model{
-		dir:     t.TempDir(),
-		db:      db,
-		overlay: viewport.New(0, 0),
-		help:    help.New(),
-		keys:    defaultKeymap(),
-		focus:   paneEvents,
+		dir:         t.TempDir(),
+		db:          db,
+		overlay:     viewport.New(0, 0),
+		help:        help.New(),
+		keys:        defaultKeymap(),
+		focus:       paneEvents,
+		searchInput: textinput.New(),
 	}
 	m.setActiveModel(active)
 	return m
@@ -97,7 +99,7 @@ func TestStatusPaneShowsLeader(t *testing.T) {
 	if got := m.leaders["grafana"]; got != "grafana/1" {
 		t.Fatalf("leader for grafana = %q, want grafana/1", got)
 	}
-	rows := m.unitRows("grafana", "grafana/1", "")
+	rows := m.unitRows("grafana", "grafana/1", "", false)
 	joined := ""
 	for _, r := range rows {
 		joined += r.text + "\n"

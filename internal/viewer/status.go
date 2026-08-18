@@ -177,7 +177,8 @@ func (m *model) renderStatusPane() string {
 	// app (one with no captured RPCs, M8) still appears.
 	apps, unitsByApp := m.statusUniverse()
 	rows = append(rows, row(styleSection.Render("Applications")+styleDim.Render("  workload / agent")))
-	rows = append(rows, m.appTreeRows(apps, unitsByApp, changedApp, changedUnit)...)
+	appRows, next := m.appTreeRows(apps, unitsByApp, changedApp, changedUnit, 0)
+	rows = append(rows, appRows...)
 
 	if len(m.relations) > 0 {
 		rows = append(rows, row(""))
@@ -186,12 +187,14 @@ func (m *model) renderStatusPane() string {
 		// string into literal "[90m" text.
 		header := styleSection.Render("Relations")
 		if m.focus == paneStatus {
-			header += styleDim.Render("  (↑/↓ select)")
+			header += styleDim.Render("  (↑/↓ select, space pin app/unit)")
 		}
 		rows = append(rows, row(header))
 		sel := -1
 		if m.focus == paneStatus {
-			sel = m.relCursor
+			if local := m.statusCursor - next; local >= 0 && local < len(m.relations) {
+				sel = local
+			}
 		}
 		rows = append(rows, relationRows(m.relations, sel)...)
 	}
@@ -249,8 +252,10 @@ func (m *model) statusUniverse() (apps []string, unitsByApp map[string][]string)
 // row followed by its units, indented beneath it. The leader unit is marked with
 // a trailing "*" on its name (juju's own convention), so leadership reads without
 // a separate label. changedApp/changedUnit name whatever the selected event moved
-// at this instant; those rows get a ▲ pip.
-func (m *model) appTreeRows(apps []string, unitsByApp map[string][]string, changedApp, changedUnit string) []paneRow {
+// at this instant; those rows get a ▲ pip. startIdx is this section's offset into
+// the Status pane's unified cursor (m.statusCursor); it returns the next free
+// index so the caller can continue numbering the Relations section after it.
+func (m *model) appTreeRows(apps []string, unitsByApp map[string][]string, changedApp, changedUnit string, startIdx int) ([]paneRow, int) {
 	// Pad app names to the longest one (plus a two-space gap) so their statuses
 	// line up with each other while staying close to the name, independent of the
 	// wider unit column beneath them.
@@ -261,36 +266,54 @@ func (m *model) appTreeRows(apps []string, unitsByApp map[string][]string, chang
 		}
 	}
 	appWidth += 2
+	idx := startIdx
 	var out []paneRow
 	for _, app := range apps {
-		out = append(out, m.appHeaderRow(app, changedApp, appWidth))
+		selected := m.focus == paneStatus && idx == m.statusCursor
+		out = append(out, m.appHeaderRow(app, changedApp, appWidth, selected))
+		idx++
 		for _, unit := range unitsByApp[app] {
-			out = append(out, m.unitRows(app, unit, changedUnit)...)
+			selected := m.focus == paneStatus && idx == m.statusCursor
+			out = append(out, m.unitRows(app, unit, changedUnit, selected)...)
+			idx++
 		}
 	}
-	return out
+	return out, idx
 }
 
-// appHeaderRow renders one application line: "<app>  <status>".
-func (m *model) appHeaderRow(app, changed string, appWidth int) paneRow {
+// appHeaderRow renders one application line: "<app>  <status>". A pinned app
+// (in the scope filter) renders its name in styleScoped instead of styleText;
+// selected (the Status pane cursor) draws the whole row reverse-video.
+func (m *model) appHeaderRow(app, changed string, appWidth int, selected bool) paneRow {
 	pip := " "
 	if app == changed && changed != "" {
 		pip = styleWarn.Render("▲")
 	}
-	st, ok := m.appStatuses[app]
-	name := styleText.Render(fmt.Sprintf("%-*s", appWidth, app))
-	if !ok || !st.Known {
-		return row(fmt.Sprintf("%s %s%s", pip, name, styleDim.Render("unknown")))
+	nameStyle := styleText
+	if m.scopeFilter[app] {
+		nameStyle = styleScoped
 	}
-	return row(fmt.Sprintf("%s %s%s", pip, name, statusStyleFor(st.Value).Render(st.Value)))
+	st, ok := m.appStatuses[app]
+	name := nameStyle.Render(fmt.Sprintf("%-*s", appWidth, app))
+	var text string
+	if !ok || !st.Known {
+		text = fmt.Sprintf("%s %s%s", pip, name, styleDim.Render("unknown"))
+	} else {
+		text = fmt.Sprintf("%s %s%s", pip, name, statusStyleFor(st.Value).Render(st.Value))
+	}
+	if selected {
+		return selRow(text)
+	}
+	return row(text)
 }
 
 // unitRows renders a unit nested under its app: an indented
-// unitRows renders a unit nested under its app: an indented
 // "  <unit>[*]  workload / agent  "message"" line, with the workload message (when
 // set) beside the status rather than below it. The leader unit's name carries a
-// trailing "*".
-func (m *model) unitRows(app, unit, changed string) []paneRow {
+// trailing "*". A pinned unit (in the scope filter) renders its name in
+// styleScoped instead of styleText; selected (the Status pane cursor) draws the
+// whole row reverse-video.
+func (m *model) unitRows(app, unit, changed string, selected bool) []paneRow {
 	pip := " "
 	if unit == changed && changed != "" {
 		pip = styleWarn.Render("▲")
@@ -298,6 +321,10 @@ func (m *model) unitRows(app, unit, changed string) []paneRow {
 	label := unit
 	if m.leaders[app] == unit {
 		label += "*"
+	}
+	labelStyle := styleText
+	if m.scopeFilter[unit] {
+		labelStyle = styleScoped
 	}
 	wl, known := m.unitStatuses[unit]
 	workload := styleDim.Render("unknown")
@@ -320,8 +347,12 @@ func (m *model) unitRows(app, unit, changed string) []paneRow {
 	if known && wl.Known && wl.Message != "" {
 		workload += "  " + styleDim.Render("\""+wl.Message+"\"")
 	}
-	return []paneRow{row(fmt.Sprintf("%s   %s %s",
-		pip, styleText.Render(fmt.Sprintf("%-14s", label)), workload))}
+	text := fmt.Sprintf("%s   %s %s",
+		pip, labelStyle.Render(fmt.Sprintf("%-14s", label)), workload)
+	if selected {
+		return []paneRow{selRow(text)}
+	}
+	return []paneRow{row(text)}
 }
 
 // relationRows renders the Relations section: one line per relation showing its

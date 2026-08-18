@@ -3,6 +3,7 @@ package viewer
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -26,6 +27,7 @@ type streamItem struct {
 // onto the selected one.
 func (m *model) buildStream() {
 	logs, _ := m.db.Logs(m.activeModel.ID, 20000)
+	logs = m.filterLogs(logs)
 	items := make([]streamItem, 0, len(m.events)+len(logs))
 	for i, ev := range m.events {
 		items = append(items, streamItem{ts: ev.ts, evIdx: i})
@@ -42,6 +44,40 @@ func (m *model) buildStream() {
 		}
 	}
 	m.logCursor = clamp(m.logCursor, 0, max(0, len(items)-1))
+}
+
+// filterLogs applies the scope filter and the Logs search query to a batch of
+// log rows before they're merged into the stream. Both are no-ops (returns
+// logs unchanged) when neither is active.
+func (m *model) filterLogs(logs []index.LogRow) []index.LogRow {
+	if len(m.scopeFilter) == 0 && m.logQuery == "" {
+		return logs
+	}
+	q := strings.ToLower(m.logQuery)
+	out := make([]index.LogRow, 0, len(logs))
+	for _, lg := range logs {
+		who := lg.Unit
+		if who == "" {
+			who = lg.Entity
+		}
+		if !m.scopeMatches(appOf(who), lg.Unit) {
+			continue
+		}
+		if q != "" && !logMatchesQuery(lg, q) {
+			continue
+		}
+		out = append(out, lg)
+	}
+	return out
+}
+
+// logMatchesQuery reports whether lg's searchable fields contain the
+// already-lowercased query q as a substring.
+func logMatchesQuery(lg index.LogRow, q string) bool {
+	return strings.Contains(strings.ToLower(lg.Body), q) ||
+		strings.Contains(strings.ToLower(lg.Unit), q) ||
+		strings.Contains(strings.ToLower(lg.Module), q) ||
+		strings.Contains(strings.ToLower(lg.Level), q)
 }
 
 // lockedStreamIdx is the stream position the log pane centres on when it tracks
@@ -65,6 +101,9 @@ func (m *model) renderLogPane() string {
 	title := "Logs · " + lock
 	if m.wrap {
 		title += " · wrap"
+	}
+	if m.logQuery != "" {
+		title += " · /" + m.logQuery
 	}
 
 	if len(m.stream) == 0 {
