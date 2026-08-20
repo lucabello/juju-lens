@@ -8,9 +8,13 @@ byte on the wire ends up as a queryable row in the viewer.
 Implemented today: `local`/`ssh` attach, RPC capture, `debug-log`/k8s
 pod logs/journald ingestion, SQLite indexing, the read-only TUI.
 `kubectl-debug`/`daemonset` attach (Kubernetes-native deployment of the
-probe) is designed in [VISION.md](../VISION.md) but not yet built (tracked
-for milestone M6) — the Kubernetes lane in the diagrams below is marked
-accordingly.
+probe, for capturing `containeragent`'s own RPC traffic inside a pod) is
+designed in [VISION.md](../VISION.md) §9 but explicitly out of scope —
+deferred with no milestone currently scheduled — the Kubernetes lane in the
+diagrams below is marked accordingly. This is a different, narrower gap than
+it may sound: k8s *log* ingestion (workload-container stdout via `kubectl
+logs`) is fully built and doesn't depend on it at all; what's missing is
+probe attach to see a CAAS unit's own RPC/hook-lifecycle traffic.
 
 ## 1. What is profiled, how, and when
 
@@ -54,7 +58,7 @@ sequenceDiagram
 
     Op->>Rec: "juju-lens record CONTROLLER --attach local|ssh"
     Rec->>Rec: Status() bootstrap (seed inventory, app/unit status)
-    Rec->>Probe: exec locally, or scp + exec over `juju ssh`
+    Rec->>Probe: exec locally, or exec over `juju ssh`\n(remote binary assumed pre-installed; no scp staging today)
     Probe->>Probe: enumerate jujud/containeragent PIDs
     Probe->>Probe: parse .gopclntab, resolve TLS Read/Write addrs
     Probe->>Kern: attach uprobes (entry + return) on resolved addrses
@@ -90,23 +94,23 @@ flowchart TB
 
     subgraph MachineTarget["Machine controller host (attach: ssh)"]
         SSH["juju ssh session"]
-        ProbeM["juju-lens-probe\n(scp'd static binary)"]
+        ProbeM["juju-lens-probe\n(assumed pre-installed on $PATH;\nno scp staging today)"]
         JujudM["jujud\n(controller / machine unit agent)"]
         EbpfM["eBPF uprobes\ncrypto/tls Read/Write"]
         Journal["journalctl -f\n(jujud-*, snap.juju.* units)"]
     end
 
     subgraph K8sTarget["Kubernetes model"]
-        ProbeK["juju-lens-probe\nvia kubectl debug node / DaemonSet\n(designed, not yet built — M6)"]
+        ProbeK["juju-lens-probe\nvia kubectl debug node / DaemonSet\n(designed in VISION.md, deferred —\nno milestone scheduled)"]
         JujudK["jujud (controller pod) /\ncontaineragent (unit sidecar)"]
         EbpfK["eBPF uprobes\ncrypto/tls Read/Write"]
-        PodLogs["Pod log informer\n(CoreV1 GetLogs --follow,\nkeyed by juju.io/* labels)"]
+        PodLogs["kubectl logs -f --timestamps\nper workload container\n(kubectl CLI, not a Go/CoreV1 client)"]
     end
 
     JujuAPI["Juju API\n(Status only — bootstrap + periodic re-sync)"]
 
     CLI -->|"exec locally"| ProbeM
-    CLI -->|"juju ssh + scp"| SSH --> ProbeM
+    CLI -->|"juju ssh (assumes the probe\nis pre-installed remotely —\nno scp staging today)"| SSH --> ProbeM
     CLI -.->|"designed: kubectl debug / DaemonSet"| ProbeK
 
     ProbeM --- EbpfM --- JujudM
@@ -118,7 +122,7 @@ flowchart TB
     CLI -->|"Status() bootstrap + reconcile"| JujuAPI
     CLI -->|"debug-log --tail --format json"| JujuAPI
     Journal -->|"journal.jsonl per host"| CLI
-    PodLogs -.->|"designed: pod logs per container"| CLI
+    PodLogs -->|"k8s log lines per container"| CLI
 
     CLI -->|"writes raw envelopes/log lines"| RAW
     CLI -->|"incremental Sync():\nspans, snapshots, log_records, inventory"| DB
@@ -127,7 +131,7 @@ flowchart TB
     RAW -.->|"juju-lens index rebuilds DB from raw"| DB
 
     classDef planned stroke-dasharray: 5 4;
-    class ProbeK,EbpfK,PodLogs,JujudK planned;
+    class ProbeK,EbpfK,JujudK planned;
 ```
 
 ## 3. Data flow
@@ -149,11 +153,11 @@ flowchart LR
     subgraph LogSources["Log sources (independent streams)"]
         L1["juju debug-log --tail\n--format json"] --> LR["raw/juju/&lt;model&gt;/debug-log.jsonl"]
         L2["journalctl -f\n(per machine)"] --> LM["raw/machine/&lt;model&gt;/&lt;host&gt;/journal.jsonl"]
-        L3["k8s pod logs\n(designed, M6)"] -.-> LK["raw/k8s/&lt;model&gt;/&lt;unit&gt;/*.log"]
+        L3["kubectl logs -f --timestamps\nper workload container"] --> LK["raw/k8s/&lt;model&gt;/&lt;pod&gt;/&lt;container&gt;/*.log"]
     end
     LR --> I
     LM --> I
-    LK -.-> I
+    LK --> I
 
     I --> J["extract.go:\nclassify span by (type, request),\nderive status/databag/etc snapshot"]
     I --> K["hooks.go:\nreplay Uniter.SetState,\nlabel spans with the hook that ran them"]
@@ -170,8 +174,6 @@ flowchart LR
     S3 --> V
     S4 --> V
 
-    classDef planned stroke-dasharray: 5 4;
-    class L3,LK planned;
 ```
 
 ## 4. Capture resilience under load (M13)

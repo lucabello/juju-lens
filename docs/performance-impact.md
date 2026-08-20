@@ -58,7 +58,10 @@ cost center that is literally inside Juju's own execution path; everything
 downstream of the ring buffer is a separate process.
 
 **② The probe process's own CPU/memory**, co-located with the traced process
-(`--attach local`, or scp'd onto the target for `--attach ssh`). It decodes
+(`--attach local`, or pre-installed on the target for `--attach ssh` — today's
+`ssh` attach assumes the `juju-lens-probe` binary is already on the remote
+`$PATH`; it does not stage/`scp` it there, despite earlier design notes
+describing that). It decodes
 every captured sample, JSON-marshals it, and writes it out — real per-event
 work, now buffered through a 4096-frame channel and a 64 MiB kernel ring
 (M13) that themselves consume host memory. On a comfortably-resourced host
