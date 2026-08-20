@@ -310,8 +310,21 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 		}()
 	}
 
-	ingestErr := probe.Ingest(ctx, stdout, resolver, w.sink, nil)
+	// onDrops surfaces the probe's own userspace-side frame loss (M13: it
+	// buffers between the kernel ring-buffer drain and the pipe to us, so a
+	// slow consumer here — a burst of spans to index — can no longer cause a
+	// silent kernel-level drop instead). Reported as it happens so a capture
+	// gap is traceable to "we were slow here" rather than a mystery later.
+	var totalDrops uint64
+	onDrops := func(n uint64) {
+		totalDrops = n
+		fmt.Fprintf(os.Stderr, "juju-lens: probe reports %d frames dropped so far (it's falling behind — see docs/profiling-and-architecture.md)\n", n)
+	}
+	ingestErr := probe.Ingest(ctx, stdout, resolver, w.sink, onDrops)
 	cancel()
+	if totalDrops > 0 {
+		fmt.Fprintf(os.Stderr, "juju-lens: recording finished with %d frames dropped by the probe; some hooks may show a \"capture gap\"\n", totalDrops)
+	}
 	// The probe is a child (local) or an ssh session; either way, killing the
 	// process group ends it and its remote peer.
 	_ = probeCmd.Process.Kill()

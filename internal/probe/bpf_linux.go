@@ -49,9 +49,17 @@ const (
 // returned spec is loaded by the OS-specific attach code.
 func buildCollectionSpec() *ebpf.CollectionSpec {
 	events := &ebpf.MapSpec{
-		Name:       "events",
-		Type:       ebpf.RingBuf,
-		MaxEntries: 1 << 24, // 16 MiB ring
+		Name: "events",
+		Type: ebpf.RingBuf,
+		// 64 MiB: headroom to absorb a burst (e.g. many units running hooks
+		// within the same second at bootstrap/scale-out) without the kernel
+		// program's bpf_ringbuf_reserve failing — see emitInsns' "ring full:
+		// drop" path. This alone doesn't fix a *sustained* overload (only a
+		// faster/decoupled userspace reader does, see run_linux.go's Run), but
+		// it's a cheap, safe first line of defence against short spikes, and
+		// rlimit.RemoveMemlock (called in Run) means it isn't rlimit-bounded
+		// (M13).
+		MaxEntries: 1 << 26,
 	}
 	// readStash carries (conn, ptr) from Read's entry uprobe to its return
 	// uretprobe, keyed by pid_tgid. Value is two u64s laid out {conn, ptr}.

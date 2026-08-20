@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -117,27 +118,132 @@ func Run(ctx context.Context, cfg AttachConfig) error {
 		}()
 	}
 
+	// The ring-buffer drain loop below must stay as fast as possible: if it
+	// ever blocks (e.g. cfg.Out is a pipe to a recorder that's busy indexing
+	// a burst of spans to SQLite), the kernel-side eBPF program's
+	// bpf_ringbuf_reserve starts failing and silently drops captured TLS
+	// traffic — real charm activity, gone, with nothing anywhere to log it
+	// (see emitInsns' "ring full: drop" path in bpf_linux.go). Decoupling the
+	// drain from the (potentially slow) sink via a buffered channel means a
+	// downstream stall only costs userspace-side queue drops, which — unlike
+	// kernel ring drops — we can count and report (M13).
+	frames := make(chan Frame, frameQueueCap)
+	var queueDrops atomic.Uint64
+	sinkDone := make(chan error, 1)
+	go func() { sinkDone <- runSink(cfg, frames, &queueDrops, logf, dropStatsInterval) }()
+
 	topoCache := map[int]Topology{}
-	for {
-		rec, err := rd.Read()
-		if err != nil {
-			if errors.Is(err, ringbuf.ErrClosed) || ctx.Err() != nil {
-				return ctx.Err()
+	err = func() error {
+		for {
+			rec, err := rd.Read()
+			if err != nil {
+				if errors.Is(err, ringbuf.ErrClosed) || ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return fmt.Errorf("reading ring buffer: %w", err)
 			}
-			return fmt.Errorf("reading ring buffer: %w", err)
+			f, ok := decodeEvent(rec.RawSample, topoCache)
+			if !ok {
+				continue
+			}
+			select {
+			case frames <- f:
+			default:
+				// The sink can't keep up even with frameQueueCap already
+				// buffered ahead of it. Drop here, in userspace, where the
+				// loss is at least counted and reported — not by blocking,
+				// which would just push the same backlog into the kernel
+				// ring buffer and turn it into an uncounted drop there.
+				queueDrops.Add(1)
+			}
 		}
-		f, ok := decodeEvent(rec.RawSample, topoCache)
-		if !ok {
-			continue
-		}
+	}()
+	close(frames)
+	if sinkErr := <-sinkDone; sinkErr != nil && err == nil {
+		err = sinkErr
+	}
+	return err
+}
+
+// frameQueueCap buffers decoded frames between the ring-buffer drain loop and
+// the sink goroutine (runSink), so a slow sink (a busy recorder on the other
+// end of cfg.Out, or a slow OnFrame callback) can fall behind without stalling
+// the drain loop itself. It's sized well above a single TLS-boundary burst
+// (dozens of hooks firing across many units within the same second, e.g. at
+// bootstrap) so that scenario is absorbed here rather than turning into
+// kernel-side ring-buffer loss.
+const frameQueueCap = 4096
+
+// dropStatsInterval is how often queueDrops (frameQueueCap exhausted) is
+// checked for a change and, if so, reported to the sink as a stats Frame and
+// to Logf, so loss is visible promptly rather than only inferable after the
+// fact from gaps in the recording.
+const dropStatsInterval = 2 * time.Second
+
+// runSink drains frames, delivering each to cfg.OnFrame or writing it to
+// cfg.Out (through a buffered writer, to avoid a syscall per frame under
+// load). It periodically reports queueDrops as a stats Frame (Frame.Drops) —
+// the *cumulative* count, per Ingest's onDrops contract, not a per-interval
+// delta — so a downstream consumer, and the recording itself, learns about
+// userspace-side loss without polling for it. Pulled out of Run so the
+// buffering/flushing/drop-reporting logic is unit-testable without a real
+// eBPF ring buffer (M13). interval is normally dropStatsInterval; tests pass
+// something much shorter so they don't have to wait on real wall-clock time.
+func runSink(cfg AttachConfig, frames <-chan Frame, queueDrops *atomic.Uint64, logf func(string, ...any), interval time.Duration) error {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	var out io.Writer = cfg.Out
+	var bw *bufio.Writer
+	if cfg.OnFrame == nil {
+		bw = bufio.NewWriterSize(cfg.Out, 64*1024)
+		out = bw
+	}
+	emit := func(f Frame) error {
 		if cfg.OnFrame != nil {
-			if err := cfg.OnFrame(f); err != nil {
+			return cfg.OnFrame(f)
+		}
+		return WriteFrame(out, f)
+	}
+	flush := func() error {
+		if bw == nil {
+			return nil
+		}
+		return bw.Flush()
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	var lastReported uint64 // queueDrops is cumulative (Ingest's onDrops contract); only emit on change
+	for {
+		select {
+		case f, ok := <-frames:
+			if !ok {
+				return flush()
+			}
+			if err := emit(f); err != nil {
+				return fmt.Errorf("writing frame: %w", err)
+			}
+			// Once the queue drains (the burst that filled it is behind us),
+			// flush promptly rather than leaving a live/--follow consumer
+			// waiting on a buffer that's no longer filling.
+			if len(frames) == 0 {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+		case <-t.C:
+			n := queueDrops.Load()
+			if n == lastReported {
+				continue
+			}
+			lastReported = n
+			logf("juju-lens-probe: %d frames dropped so far (sink falling behind); recording has a gap here", n)
+			if err := emit(Frame{TsUnixNano: time.Now().UnixNano(), Drops: n}); err != nil {
+				return fmt.Errorf("writing drop-stats frame: %w", err)
+			}
+			if err := flush(); err != nil {
 				return err
 			}
-			continue
-		}
-		if err := WriteFrame(cfg.Out, f); err != nil {
-			return fmt.Errorf("writing frame: %w", err)
 		}
 	}
 }
