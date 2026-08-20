@@ -48,6 +48,11 @@ what is actually implemented today.
     yet (recorder started mid-life, or an app/unit hasn't reported).
   A model picker appears when the recording contains more than one Juju
   model; press `m` to switch models at any time.
+- `juju-lens export <recording> [--format json|md]` dumps the same derived
+  narrative the TUI shows — hook runs with their failure classification,
+  statuses/databags/config they changed, merged with every correlated log
+  line — as one time-ordered document, for offline reading or feeding to an
+  LLM agent. `--unit`, `--since`/`--until`, and `--errors-only` scope it down.
 - `juju-lens version` prints the build stamp.
 
 Not yet implemented (see VISION.md for milestone plan):
