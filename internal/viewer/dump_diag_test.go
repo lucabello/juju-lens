@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/lucabello/juju-lens/internal/index"
+	"github.com/lucabello/juju-lens/internal/narrative"
 	"github.com/lucabello/juju-lens/internal/recording"
 )
 
@@ -75,8 +76,8 @@ func dumpRawMarkers(spans []recording.SpanRow) {
 			marker := ""
 			if method == "SetState" {
 				hm := index.ParseHookMarker(sp.Attrs["params"])
-				marker = fmt.Sprintf("  op=%-10s hook.kind=%q remoteApp=%q storageID=%q",
-					hm.Op, hm.Kind, hm.RemoteApp, hm.StorageID)
+				marker = fmt.Sprintf("  op=%-10s opstep=%-8s hook.kind=%q remoteApp=%q storageID=%q",
+					hm.Op, hm.Opstep, hm.Kind, hm.RemoteApp, hm.StorageID)
 			}
 			if method == "SetState" || method == "CommitHookChanges" || sp.Hook != "" {
 				fmt.Printf("  %s  %-22s label=%-40q%s\n",
@@ -89,18 +90,18 @@ func dumpRawMarkers(spans []recording.SpanRow) {
 // dumpHookRuns prints the runs buildHookRuns pairs — one line per run, so a hook
 // that splits into several runs (the suspected duplication) is visible.
 func dumpHookRuns(spans []recording.SpanRow) {
-	fmt.Printf("\n===== HOOK RUNS (buildHookRuns) =====\n")
-	for _, r := range buildHookRuns(spans) {
-		dur := r.endTs.Sub(r.startTs)
+	fmt.Printf("\n===== HOOK RUNS (narrative.BuildHookRuns) =====\n")
+	for _, r := range narrative.BuildHookRuns(spans) {
+		dur := r.EndTs.Sub(r.StartTs)
 		flags := ""
-		if r.fail != failNone {
-			flags += " " + strings.ToUpper(r.fail.String())
+		if r.Fail != narrative.FailNone {
+			flags += " " + strings.ToUpper(r.Fail.String())
 		}
-		if r.open {
+		if r.Open {
 			flags += " OPEN"
 		}
 		fmt.Printf("  %s  %-14s %-40s dur=%-8v rep=%s%s\n",
-			r.startTs.UTC().Format("15:04:05.000"), r.unit, r.kind, dur.Round(1e6), r.repSpan, flags)
+			r.StartTs.UTC().Format("15:04:05.000"), r.Unit, r.Kind, dur.Round(1e6), r.RepSpan, flags)
 	}
 }
 
@@ -142,7 +143,7 @@ func printEvent(e event) {
 		extra = fmt.Sprintf("  dur=%v", e.dur.Round(1e6))
 	}
 	if e.hasDatabag {
-		extra += "  ✎db"
+		extra += "  (databag changes)"
 	}
 	fmt.Printf("  %s  %-14s %s %-40s%s\n",
 		e.ts.UTC().Format("15:04:05.000"), e.unit, g, e.summary, extra)

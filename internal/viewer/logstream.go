@@ -26,8 +26,7 @@ type streamItem struct {
 // time-ordered stream, and records where each event landed so the pane can lock
 // onto the selected one.
 func (m *model) buildStream() {
-	logs, _ := m.db.Logs(m.activeModel.ID, 20000)
-	logs = m.filterLogs(logs)
+	logs := m.filterLogs(m.rawLogs)
 	items := make([]streamItem, 0, len(m.events)+len(logs))
 	for i, ev := range m.events {
 		items = append(items, streamItem{ts: ev.ts, evIdx: i})

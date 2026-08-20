@@ -1,7 +1,6 @@
 package viewer
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -12,8 +11,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/lucabello/juju-lens/internal/index"
+	"github.com/lucabello/juju-lens/internal/narrative"
 	"github.com/lucabello/juju-lens/internal/recording"
-	"gopkg.in/yaml.v3"
 )
 
 // renderOverlayFrame draws the inspector overlay over the body. It is opened
@@ -84,8 +83,9 @@ func (m *model) renderOverlay() {
 // renderFailure explains, in the inspector, how a hook run went wrong (M10).
 // Each failState reads differently because they mean different things: a unit
 // stuck in error state now, a hook that recovered after a retry, a bracket a
-// later hook interrupted (usually a truncated recording), or a completed hook
-// whose RPC merely errored.
+// later hook genuinely interrupted mid-run, one that finished but lost its own
+// closing marker (a capture gap, not a charm/uniter event, M13), or a completed
+// hook whose RPC merely errored.
 func (m *model) renderFailure(b *strings.Builder, ev event, sp recording.SpanRow, ok bool) {
 	switch ev.fail {
 	case failErrored:
@@ -93,7 +93,9 @@ func (m *model) renderFailure(b *strings.Builder, ev event, sp recording.SpanRow
 	case failRetried:
 		fmt.Fprintf(b, "%s\n", styleDim.Render("hook retried — it errored, the uniter retried it, and it then completed successfully"))
 	case failInterrupted:
-		fmt.Fprintf(b, "%s\n", styleWarn.Render("hook interrupted — another hook opened before this one finished"))
+		fmt.Fprintf(b, "%s\n", styleWarn.Render("hook interrupted — another hook opened before this one reached done; it was genuinely abandoned mid-run"))
+	case failLostContinue:
+		fmt.Fprintf(b, "%s\n", styleWarn.Render("capture gap — this hook actually finished (it reached done), but its own closing marker is missing from the recording; almost certainly a dropped span, not a charm or uniter problem"))
 	case failRPCWarn:
 		line := "an RPC in this hook returned an error (the hook still completed, and charm status is unaffected)"
 		if ok && sp.StatusMsg != "" {
@@ -113,12 +115,12 @@ func (m *model) renderStatusChanges(b *strings.Builder, ev event) {
 	fmt.Fprintf(b, "\n%s\n", styleSection.Render("status set by this hook"))
 	for _, s := range ev.statuses {
 		who := "unit"
-		if s.app {
+		if s.App {
 			who = "app"
 		}
-		line := fmt.Sprintf("  %s → %s", who, statusStyleFor(s.value).Render(s.value))
-		if s.message != "" {
-			line += "  " + styleDim.Render("\""+s.message+"\"")
+		line := fmt.Sprintf("  %s → %s", who, statusStyleFor(s.Value).Render(s.Value))
+		if s.Message != "" {
+			line += "  " + styleDim.Render("\""+s.Message+"\"")
 		}
 		fmt.Fprintf(b, "%s\n", line)
 	}
@@ -136,16 +138,20 @@ func (m *model) overlayHelp() string {
 }
 
 // isConfigChanged reports whether an event is a unit's config-changed hook, for
-// which the inspector shows the charm-config diff.
+// which the inspector shows the charm-config diff. See narrative.IsConfigChanged.
 func isConfigChanged(ev event) bool {
-	return ev.kind == evHook && ev.summary == "config-changed"
+	return narrative.IsConfigChanged(narrative.Event{Kind: ev.kind, Summary: ev.summary})
 }
 
 // inspectable reports whether an event has anything worth drilling into: a
 // databag change, a config change, a failure, or a status the hook drove the
-// charm into (M10). Enter is a no-op on anything else.
+// charm into (M10). Enter is a no-op on anything else. See
+// narrative.Inspectable.
 func inspectable(ev event) bool {
-	return ev.hasDatabag || isConfigChanged(ev) || ev.fail != failNone || len(ev.statuses) > 0
+	return narrative.Inspectable(narrative.Event{
+		Kind: ev.kind, Summary: ev.summary, HasDatabag: ev.hasDatabag,
+		Fail: ev.fail, Statuses: ev.statuses,
+	})
 }
 
 // renderDatabags shows, for each relation the hook touched, all of the local
@@ -175,7 +181,7 @@ func (m *model) renderDatabags(b *strings.Builder, sp recording.SpanRow) {
 	seenKey := map[string]bool{}
 	for _, s := range changed {
 		changedScope[s.Scope] = true
-		if k, _ := splitDatabagScope(s.Scope); k != "" && !seenKey[k] {
+		if k, _ := narrative.SplitDatabagScope(s.Scope); k != "" && !seenKey[k] {
 			seenKey[k] = true
 			keys = append(keys, k)
 		}
@@ -199,64 +205,25 @@ func (m *model) renderDatabags(b *strings.Builder, sp recording.SpanRow) {
 			b.WriteByte('\n') // blank line between relations
 		}
 		fmt.Fprintf(b, "  %s\n", renderRelationLabel(key, local))
-		for _, e := range localDatabagEntries(body, key, local) {
-			cur := body[e.scope]
+		for _, e := range narrative.LocalDatabagEntries(body, key, local) {
+			cur := body[e.Scope]
 			prev := cur // unchanged: rendered as plain context
-			if changedScope[e.scope] {
-				prev, _ = m.db.PrevSnapshotBefore(m.activeModel.ID, e.scope, sp.Start)
+			if changedScope[e.Scope] {
+				prev, _ = m.db.PrevSnapshotBefore(m.activeModel.ID, e.Scope, sp.Start)
 			}
-			fmt.Fprintf(b, "    %s\n", styleUnit.Render(e.label))
+			fmt.Fprintf(b, "    %s\n", styleUnit.Render(e.Label))
 			if m.diffMode {
 				writeStructuredDiff(b, "      ", prev, cur)
 			} else {
 				writeStructured(b, "      ", cur)
 			}
-			ck := key + " " + e.label
-			curAll[ck] = expandJSON([]byte(cur))
-			prevAll[ck] = expandJSON([]byte(prev))
+			ck := key + " " + e.Label
+			curAll[ck] = narrative.ExpandJSON([]byte(cur))
+			prevAll[ck] = narrative.ExpandJSON([]byte(prev))
 		}
 	}
-	m.copyCur = marshalIndent(curAll)
-	m.copyPrev = marshalIndent(prevAll)
-}
-
-// databagEntry is one row under a relation: the "app"/"unit (name)" label and
-// the scope its body lives at.
-type databagEntry struct {
-	label string
-	scope string
-}
-
-// localDatabagEntries lists the local application's databags on a relation — its
-// application databag first, then each of its units' databags (sorted) — from
-// the set of databag scopes present at the event.
-func localDatabagEntries(body map[string]string, key, local string) []databagEntry {
-	var entries []databagEntry
-	if _, ok := body["databag:"+key+":"+local]; ok {
-		entries = append(entries, databagEntry{"app", "databag:" + key + ":" + local})
-	}
-	var units []string
-	for scope := range body {
-		k, entity := splitDatabagScope(scope)
-		if k == key && appOf(entity) == local && strings.ContainsRune(entity, '/') {
-			units = append(units, entity)
-		}
-	}
-	sort.Strings(units)
-	for _, u := range units {
-		entries = append(entries, databagEntry{"unit (" + u + ")", "databag:" + key + ":" + u})
-	}
-	return entries
-}
-
-// splitDatabagScope splits "databag:<key>:<entity>" into its relation key and
-// entity (unit or application name).
-func splitDatabagScope(scope string) (key, entity string) {
-	s := strings.TrimPrefix(scope, "databag:")
-	if i := strings.LastIndexByte(s, ':'); i >= 0 {
-		return s[:i], s[i+1:]
-	}
-	return s, ""
+	m.copyCur = narrative.MarshalIndent(curAll)
+	m.copyPrev = narrative.MarshalIndent(prevAll)
 }
 
 // renderConfig shows the charm-config for a config-changed hook: the config read
@@ -273,8 +240,8 @@ func (m *model) renderConfig(b *strings.Builder, ev event) {
 		return
 	}
 	prevBody, _ := m.db.PrevSnapshotBefore(m.activeModel.ID, scope, ev.ts)
-	m.copyCur = prettyJSON(curBody)
-	m.copyPrev = prettyJSON(prevBody)
+	m.copyCur = narrative.PrettyJSON(curBody)
+	m.copyPrev = narrative.PrettyJSON(prevBody)
 
 	fmt.Fprintf(b, "\n%s\n", styleSection.Render("config"))
 	if m.diffMode {
@@ -290,56 +257,35 @@ func (m *model) renderConfig(b *strings.Builder, ev event) {
 //	databag:loki.certificates#ca.certificates:loki/0 -> "loki:certificates → ca:certificates", false
 //	databag:mimir.mimir-peers:mimir/0                -> "mimir:mimir-peers (peer)", false
 func formatDatabagLabel(scope string) (rel string, isApp bool) {
-	key, entity := splitDatabagScope(scope)
-	return relationLabel(key, appOf(entity), false), !strings.ContainsRune(entity, '/')
+	key, entity := narrative.SplitDatabagScope(scope)
+	return narrative.RelationLabel(key, appOf(entity)), !strings.ContainsRune(entity, '/')
 }
 
 // renderRelationLabel is the coloured relation label for the inspector: the
 // application name in normal text, only the ":endpoint" accented, local side
-// first.
+// first. Structurally the same "which side is local, peer vs two-sided" logic
+// as narrative.RelationLabel, just with lipgloss styling per segment instead
+// of plain text.
 func renderRelationLabel(key, local string) string {
-	return relationLabel(key, local, true)
-}
-
-// relationLabel renders "app:endpoint → app:endpoint" (or "app:endpoint (peer)")
-// with the local application placed first. When coloured, the application name
-// is plain and only ":endpoint" is accented; each segment is rendered on its own
-// so no styled string is nested inside another.
-func relationLabel(key, local string, colour bool) string {
 	seg := func(app, ep string) string {
-		if colour {
-			return styleText.Render(app) + styleHook.Render(":"+ep)
-		}
-		return app + ":" + ep
-	}
-	arrow, peer := " → ", " (peer)"
-	if colour {
-		arrow, peer = styleDim.Render(" → "), styleDim.Render(" (peer)")
+		return styleText.Render(app) + styleHook.Render(":"+ep)
 	}
 	if before, after, ok := strings.Cut(key, "#"); ok {
-		a1, e1 := cutDot(before)
-		a2, e2 := cutDot(after)
+		a1, e1 := narrative.CutDot(before)
+		a2, e2 := narrative.CutDot(after)
 		if a2 == local && a1 != local { // put the local side first
 			a1, e1, a2, e2 = a2, e2, a1, e1
 		}
-		return seg(a1, e1) + arrow + seg(a2, e2)
+		return seg(a1, e1) + styleDim.Render(" → ") + seg(a2, e2)
 	}
-	a, e := cutDot(key)
-	return seg(a, e) + peer
-}
-
-// cutDot splits "app.endpoint" into its two parts.
-func cutDot(s string) (app, ep string) {
-	if a, b, ok := strings.Cut(s, "."); ok {
-		return a, b
-	}
-	return s, ""
+	a, e := narrative.CutDot(key)
+	return seg(a, e) + styleDim.Render(" (peer)")
 }
 
 // writeStructured pretty-prints body as recursively-expanded JSON, each line
 // prefixed with indent.
 func writeStructured(b *strings.Builder, indent, body string) {
-	p := prettyJSON(body)
+	p := narrative.PrettyJSON(body)
 	if p == "" {
 		fmt.Fprintf(b, "%s%s\n", indent, styleDim.Render("(empty)"))
 		return
@@ -353,197 +299,23 @@ func writeStructured(b *strings.Builder, indent, body string) {
 // prev and cur bodies: unchanged lines in normal text (so an untouched databag
 // still reads cleanly), additions in green with "+", removals in red with "-".
 func writeStructuredDiff(b *strings.Builder, indent, prevBody, curBody string) {
-	prev := splitLines(prettyJSON(prevBody))
-	cur := splitLines(prettyJSON(curBody))
-	diff := lineDiff(prev, cur)
+	prev := narrative.SplitLines(narrative.PrettyJSON(prevBody))
+	cur := narrative.SplitLines(narrative.PrettyJSON(curBody))
+	diff := narrative.LineDiff(prev, cur)
 	if len(diff) == 0 {
 		fmt.Fprintf(b, "%s%s\n", indent, styleDim.Render("(empty)"))
 		return
 	}
 	for _, d := range diff {
-		switch d.op {
+		switch d.Op {
 		case '+':
-			fmt.Fprintf(b, "%s%s\n", indent, styleOK.Render("+ "+d.text))
+			fmt.Fprintf(b, "%s%s\n", indent, styleOK.Render("+ "+d.Text))
 		case '-':
-			fmt.Fprintf(b, "%s%s\n", indent, styleDel.Render("- "+d.text))
+			fmt.Fprintf(b, "%s%s\n", indent, styleDel.Render("- "+d.Text))
 		default:
-			fmt.Fprintf(b, "%s%s\n", indent, styleText.Render("  "+d.text))
+			fmt.Fprintf(b, "%s%s\n", indent, styleText.Render("  "+d.Text))
 		}
 	}
-}
-
-func splitLines(s string) []string {
-	if s == "" {
-		return nil
-	}
-	return strings.Split(s, "\n")
-}
-
-// diffLine is one line of a git-style diff: op is ' ' (context), '+' or '-'.
-type diffLine struct {
-	op   byte
-	text string
-}
-
-// lineDiff computes a minimal line diff between a and b via an LCS table. Inputs
-// are small (a pretty-printed databag/config), so the O(n·m) table is fine.
-func lineDiff(a, b []string) []diffLine {
-	n, m := len(a), len(b)
-	lcs := make([][]int, n+1)
-	for i := range lcs {
-		lcs[i] = make([]int, m+1)
-	}
-	for i := n - 1; i >= 0; i-- {
-		for j := m - 1; j >= 0; j-- {
-			if a[i] == b[j] {
-				lcs[i][j] = lcs[i+1][j+1] + 1
-			} else {
-				lcs[i][j] = max(lcs[i+1][j], lcs[i][j+1])
-			}
-		}
-	}
-	var out []diffLine
-	i, j := 0, 0
-	for i < n && j < m {
-		switch {
-		case a[i] == b[j]:
-			out = append(out, diffLine{' ', a[i]})
-			i, j = i+1, j+1
-		case lcs[i+1][j] >= lcs[i][j+1]:
-			out = append(out, diffLine{'-', a[i]})
-			i++
-		default:
-			out = append(out, diffLine{'+', b[j]})
-			j++
-		}
-	}
-	for ; i < n; i++ {
-		out = append(out, diffLine{'-', a[i]})
-	}
-	for ; j < m; j++ {
-		out = append(out, diffLine{'+', b[j]})
-	}
-	return out
-}
-
-// prettyJSON renders a JSON body as indented, recursively-expanded JSON: any
-// string field whose value is itself JSON — or nested YAML — is parsed and
-// expanded in place, so a databag holding `{"alert_rules":"{...}"}` or a
-// YAML relation-state blob reads as structure rather than an escaped string.
-// Object keys are sorted, so two versions diff cleanly. Returns the input
-// unchanged when it isn't JSON.
-func prettyJSON(body string) string {
-	if strings.TrimSpace(body) == "" {
-		return ""
-	}
-	out, err := json.MarshalIndent(expandJSON([]byte(body)), "", "  ")
-	if err != nil {
-		return body
-	}
-	return string(out)
-}
-
-// expandJSON decodes raw and recursively expands any string leaf that is itself
-// JSON or YAML. Non-JSON input is returned as a plain string.
-func expandJSON(raw []byte) any {
-	var v any
-	if json.Unmarshal(raw, &v) != nil {
-		return string(raw)
-	}
-	return expandValue(v)
-}
-
-func expandValue(v any) any {
-	switch t := v.(type) {
-	case string:
-		if e, ok := expandString(t); ok {
-			return e
-		}
-		return t
-	case map[string]any:
-		for k, val := range t {
-			t[k] = expandValue(val)
-		}
-		return t
-	case []any:
-		for i, val := range t {
-			t[i] = expandValue(val)
-		}
-		return t
-	}
-	return v
-}
-
-// expandString tries to interpret a leaf string as embedded structure: JSON when
-// it opens with {/[, else multi-line YAML (Juju stores relation-state and some
-// databag values as YAML). It only expands when the result is a non-empty
-// mapping or sequence — plain scalars (numbers, URLs, addresses) are left as-is.
-func expandString(s string) (any, bool) {
-	t := strings.TrimSpace(s)
-	if t == "" {
-		return nil, false
-	}
-	if t[0] == '{' || t[0] == '[' {
-		var inner any
-		if json.Unmarshal([]byte(t), &inner) == nil {
-			return expandValue(inner), true
-		}
-	}
-	if strings.Contains(t, "\n") {
-		var inner any
-		if yaml.Unmarshal([]byte(s), &inner) == nil {
-			if norm := normalizeYAML(inner); isStructured(norm) {
-				return expandValue(norm), true
-			}
-		}
-	}
-	return nil, false
-}
-
-// isStructured reports whether v is a non-empty map or slice (as opposed to a
-// scalar we should leave untouched).
-func isStructured(v any) bool {
-	switch t := v.(type) {
-	case map[string]any:
-		return len(t) > 0
-	case []any:
-		return len(t) > 0
-	}
-	return false
-}
-
-// normalizeYAML converts YAML's map shapes into JSON-marshalable
-// map[string]any recursively (yaml.v3 already uses string keys for interface
-// targets, but be defensive about map[any]any from older shapes).
-func normalizeYAML(v any) any {
-	switch t := v.(type) {
-	case map[string]any:
-		for k, val := range t {
-			t[k] = normalizeYAML(val)
-		}
-		return t
-	case map[any]any:
-		mm := make(map[string]any, len(t))
-		for k, val := range t {
-			mm[fmt.Sprint(k)] = normalizeYAML(val)
-		}
-		return mm
-	case []any:
-		for i, val := range t {
-			t[i] = normalizeYAML(val)
-		}
-		return t
-	}
-	return v
-}
-
-// marshalIndent renders v as indented JSON, or "" on error.
-func marshalIndent(v any) string {
-	out, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return ""
-	}
-	return string(out)
 }
 
 // copyCmd emits an OSC52 clipboard-set escape to the terminal (works over SSH),

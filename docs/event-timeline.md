@@ -195,6 +195,11 @@ In verbose mode:
    when the enclosed commit changed a databag.
 3. **Sub-span count** is shown on the start line (`+7 rpc`) so the user sees how
    much traffic the hook generated without opening the inspector.
+4. **`interrupted` and `capture gap`** (`failInterrupted`/`failLostContinue`,
+   §9) become visible on hooks that hit them. Both are suppressed by default:
+   neither says the charm broke — a hook flagged either way still ran — so
+   showing them unconditionally reads as a deployment problem more often than
+   it is one (M14).
 
 The `.` binding is added to `keymap` in `tui.go` (suggested field `Verbose`,
 `key.WithHelp(".", "verbose")`) and rendered in the help footer.
@@ -216,11 +221,18 @@ DEFAULT
 15:04:18.560  prometheus/0  ✗ grafana-source-relation-changed  error
 ```
 
-Note the trailing word on a failed hook is one of three (§9): `error` (red — the
-charm actually broke and the uniter retried it), `interrupted` (dim — a later
-hook opened before this one finished, usually a truncated recording), or
-`rpc error` (amber — the hook completed but one of its RPCs returned an error,
-which the charm often caught). Only `error` colours the hook glyph red.
+Note the trailing word on a failed hook is one of five (§9): `error` (red — the
+charm actually broke and the uniter is still retrying it), `retried` (dim — it
+errored, the uniter retried it, and it then succeeded), or `rpc error` (amber —
+the hook completed but one of its RPCs returned an error, which the charm
+often caught). Only `error` colours the hook glyph red. The other two,
+`interrupted` (dim — a later hook opened before this one reached `done`:
+genuinely abandoned mid-run) and `capture gap` (amber — this hook actually
+finished, but its own closing marker is missing from the recording, almost
+always a dropped span, M13), are deliberately **verbose-only** (M14): neither
+says the charm broke — a hook flagged either way still ran — so showing them
+by default would read as a deployment problem more often than it is one.
+Both stay available in the inspector regardless of the verbose toggle.
 
 A hook also carries, inline, the status it drove the charm into (§10) — because
 every status a charm reports is set from inside a running hook:
@@ -247,7 +259,7 @@ Glyphs (extend `event.glyph`):
 |---|---|
 | `┌` | hook start |
 | `└` | hook end (succeeded) |
-| `✗` | hook end (errored — the uniter retried it; see §9 for the three failure states) |
+| `✗` | hook end (errored — the uniter retried it; see §9 for the five failure states) |
 | `·` | verbose-only raw transition (indented under its hook) |
 | `✎db` | the hook's commit changed a databag (M7; existing marker) |
 | `⧖` | hook still open (start seen, no `continue` yet — live tail or truncated recording) |
@@ -292,10 +304,11 @@ a status (§10)** — so a plain failed hook is no longer a dead Enter. It shows
   marker is indexed on a later `Sync`. An open hook at the live tail is
   **running, not failed** — unless it was already retried, in which case it is
   in error state now (§9).
-- **Failed hook**: see §9. The four failure states are distinguished from one
+- **Failed hook**: see §9. The five failure states are distinguished from one
   another and from a live-tail open hook, so the timeline no longer conflates a
   unit stuck in error now with one that recovered after a retry, nor a real
-  crash with a truncated recording.
+  crash with a truncated recording, nor a genuine mid-hook abandonment with a
+  hook that actually finished but lost its own closing marker to a dropped span.
 - **Hook with no `CommitHookChanges`** (e.g. an `update-status` that touched
   nothing): still a full hook run with start+end from the markers — the two-line
   event is drawn, `hasDatabag=false`, and the Network drill-down simply lists
@@ -313,11 +326,16 @@ uniter's own operation log.
 
 The uniter records its progress through an operation in the same
 `Uniter.SetState` `uniter-state` blob we already parse (§2): `op: run-hook` with
-an `opstep:` that walks `pending → done` on success, then `op: continue`. When a
-hook **errors**, the uniter does *not* advance to `continue`; it re-enters the
-operation, re-writing `op: run-hook` with `opstep: pending` for the *same* hook —
+an `opstep:` that walks `queued → pending → done` on success, then `op:
+continue`. **All three opsteps happen on every single error-free hook run** —
+`queued → pending` is not itself a sign of trouble. When a hook **errors**, the
+uniter does *not* advance to `done`; it re-enters the operation, re-writing
+`op: run-hook` with `opstep: pending` for the *same* hook a **second** time —
 this is its retry loop. `ParseHookMarker` now also extracts `opstep`, and
-`buildHookRuns` counts these retries.
+`BuildHookRuns` counts a retry only on a *repeated* `pending` (`seenPending`),
+not on the routine first one — an earlier version counted any `pending` beyond
+the first same-kind marker, which misfired on the normal `queued → pending`
+step and flagged every healthy hook as retried (M13).
 
 The key subtlety: a retried hook usually **recovers**. The uniter retries a
 failed hook until it succeeds, then writes `continue`. So a hook that was retried
@@ -330,13 +348,14 @@ errored *RPC* inside a completed hook never changes charm status (Juju's `error`
 status comes only from the hook process exiting non-zero, not from an API call
 erroring), so it stays a soft warning.
 
-The four states (`internal/viewer/events.go`, `failState`):
+The five states (`internal/viewer/events.go`, `failState`):
 
 | State | Detected by | Timeline | Meaning |
 |---|---|---|---|
-| `failErrored` | retried (`run-hook`/`opstep: pending` reappeared) **and** never reached `continue` | red glyph, `error` | the unit is in error state *now* |
-| `failRetried` | retried **but** then reached `continue` | dim, `retried` | it errored, Juju retried, and it then succeeded — history, not a current problem |
-| `failInterrupted` | a **different** hook opened before this one's `continue` | dim, `interrupted` | almost always a truncated recording, not a charm bug |
+| `failErrored` | `opstep: pending` reappeared for the same hook (a real retry, §9) **and** never reached `continue` | red glyph, `error` | the unit is in error state *now* |
+| `failRetried` | `opstep: pending` reappeared **but** then reached `continue` | dim, `retried` | it errored, Juju retried, and it then succeeded — history, not a current problem |
+| `failInterrupted` | a **different** hook opened before this one reached `opstep: done` | dim, `interrupted` (verbose-only, §5, M14) | genuinely abandoned mid-run — a truncated recording, an agent restart, or the unit being torn down; not a charm bug |
+| `failLostContinue` | a **different** hook opened, but this one had already reached `opstep: done` | amber, `capture gap` (verbose-only, §5) | the hook actually finished (and may have committed) — only its own `continue` marker is missing; almost always a dropped span, not a charm or uniter event (M13) |
 | `failRPCWarn` | the hook **completed** but one of its RPCs returned an error | amber, `rpc error` | often a call the charm caught; does not affect charm status |
 
 Precedence: retried-and-open (`failErrored`) beats the plain live-tail "running"
@@ -394,7 +413,7 @@ Touches, roughly:
 - `internal/viewer/events.go` — `failState` + `hookRun.classify`, retry/supersede
   tracking in `buildHookRuns`, `spanIDs` collection, and
   `buildEventsWithStatus` + `statusMapFromSnapshots` for status attribution.
-- `internal/viewer/timeline.go` — three-way failure suffix and the status suffix.
+- `internal/viewer/timeline.go` — five-way failure suffix and the status suffix.
 - `internal/viewer/details.go` — `inspectable` now true for failures/statuses;
   `renderFailure` and `renderStatusChanges` sections.
 - `internal/viewer/tui.go` — `setActiveModel` loads the status-by-span maps and

@@ -628,17 +628,20 @@ func (d *DB) LatestSnapshotBefore(modelID int64, scope string, ts time.Time) (st
 
 // SnapshotRow is one row from the snapshots table returned to viewers.
 type SnapshotRow struct {
-	Kind  string
-	Scope string
-	Body  string
-	Ts    time.Time
+	Kind   string
+	Scope  string
+	Body   string
+	Ts     time.Time
+	Origin string // 'rpc' | 'bootstrap' (M8) — lets a caller tell an explicit
+	// status-setter snapshot from the ground-truth value seeded at recording
+	// start from `juju status`.
 }
 
 // LatestPerScope returns the most recent snapshot per scope for the given
 // kind. Useful for the M2 status pane's "latest known" view.
 func (d *DB) LatestPerScope(modelID int64, kind string) ([]SnapshotRow, error) {
 	rows, err := d.sql.Query(
-		`SELECT s.scope, s.body_json, s.ts FROM snapshots s
+		`SELECT s.scope, s.body_json, s.ts, s.origin FROM snapshots s
 		  WHERE s.model_id = ? AND s.kind = ? AND s.ts = (
 		      SELECT MAX(t.ts) FROM snapshots t
 		       WHERE t.model_id = s.model_id
@@ -656,7 +659,7 @@ func (d *DB) LatestPerScope(modelID int64, kind string) ([]SnapshotRow, error) {
 			r    SnapshotRow
 			nano int64
 		)
-		if err := rows.Scan(&r.Scope, &r.Body, &nano); err != nil {
+		if err := rows.Scan(&r.Scope, &r.Body, &nano, &r.Origin); err != nil {
 			return nil, err
 		}
 		r.Ts = time.Unix(0, nano).UTC()
@@ -672,7 +675,7 @@ func (d *DB) LatestPerScope(modelID int64, kind string) ([]SnapshotRow, error) {
 // the cursor to the nearest snapshot per scope.
 func (d *DB) LatestPerScopeAsOf(modelID int64, kind string, ts time.Time) ([]SnapshotRow, error) {
 	rows, err := d.sql.Query(
-		`SELECT s.scope, s.body_json, s.ts FROM snapshots s
+		`SELECT s.scope, s.body_json, s.ts, s.origin FROM snapshots s
 		  WHERE s.model_id = ? AND s.kind = ? AND s.ts <= ? AND s.ts = (
 		      SELECT MAX(t.ts) FROM snapshots t
 		       WHERE t.model_id = s.model_id
@@ -691,7 +694,7 @@ func (d *DB) LatestPerScopeAsOf(modelID int64, kind string, ts time.Time) ([]Sna
 			r    SnapshotRow
 			nano int64
 		)
-		if err := rows.Scan(&r.Scope, &r.Body, &nano); err != nil {
+		if err := rows.Scan(&r.Scope, &r.Body, &nano, &r.Origin); err != nil {
 			return nil, err
 		}
 		r.Ts = time.Unix(0, nano).UTC()

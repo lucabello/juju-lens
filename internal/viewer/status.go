@@ -10,6 +10,7 @@ import (
 	"github.com/lucabello/juju-lens/internal/index"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // statusValue is the flattened view of a status snapshot for either an app
@@ -20,6 +21,7 @@ type statusValue struct {
 	Message string
 	Since   time.Time
 	Known   bool
+	Origin  string // 'rpc' | 'bootstrap' (M8), mirrors index.SnapshotRow.Origin
 }
 
 // snapBody mirrors the JSON shape written by index.ExtractSnapshots. Kept
@@ -48,6 +50,7 @@ func scopeMap(rows []index.SnapshotRow, scopePrefix string) map[string]statusVal
 			Message: body.Message,
 			Since:   body.Since,
 			Known:   true,
+			Origin:  r.Origin,
 		}
 	}
 	return out
@@ -159,6 +162,8 @@ func statusStyleFor(value string) lipgloss.Style {
 func (m *model) renderStatusPane() string {
 	_, w := topRowWidths(m.width)
 	h, _ := rowHeights(m.bodyHeight())
+	inner := max(1, w-4) // matches renderPane's own inner-width math
+	bodyH := max(1, h-2) // matches renderPane's own inner-height math
 
 	// Change pips: mark whatever the *selected* event changed at this instant,
 	// so scrubbing shows what moved without leaving the pane.
@@ -171,7 +176,11 @@ func (m *model) renderStatusPane() string {
 		}
 	}
 
-	rows := []paneRow{row(styleDim.Render("as of " + m.statusTs().UTC().Format("15:04:05.000")))}
+	// Right-align "as of" within the pane instead of pinning it to the left
+	// margin, so it reads like a timestamp badge rather than a body line.
+	asOf := styleDim.Render("as of " + m.currentTs().UTC().Format("15:04:05.000"))
+	pad := max(0, inner-ansi.StringWidth(asOf))
+	rows := []paneRow{row(strings.Repeat(" ", pad) + asOf)}
 
 	// The app/unit universe comes from spans *and* snapshots, so a bootstrap-only
 	// app (one with no captured RPCs, M8) still appears.
@@ -199,7 +208,32 @@ func (m *model) renderStatusPane() string {
 		rows = append(rows, relationRows(m.relations, sel)...)
 	}
 
+	rows = windowAroundSelection(rows, bodyH)
 	return m.renderPane(paneStatus, w, h, "Status", rows)
+}
+
+// windowAroundSelection returns the bodyH-tall slice of rows centred on the
+// selected one, mirroring how the Logs pane centres its focus in the stream
+// (lockedStreamIdx/renderLogPane). Without this, a pane that simply clips to
+// its first bodyH rows lets the selection cursor scroll below the visible
+// area instead of bringing the content up to follow it. A no-op when
+// everything already fits or nothing is selected.
+func windowAroundSelection(rows []paneRow, bodyH int) []paneRow {
+	if len(rows) <= bodyH {
+		return rows
+	}
+	sel := -1
+	for i, r := range rows {
+		if r.selected {
+			sel = i
+			break
+		}
+	}
+	if sel < 0 {
+		return rows[:bodyH]
+	}
+	start := clamp(sel-bodyH/2, 0, len(rows)-bodyH)
+	return rows[start : start+bodyH]
 }
 
 // statusUniverse returns the apps (sorted) and their units to show in the Status

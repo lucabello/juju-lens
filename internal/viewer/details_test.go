@@ -108,37 +108,6 @@ func TestFormatDatabagLabel(t *testing.T) {
 	}
 }
 
-func TestPrettyJSONExpandsNestedJSONAndYAML(t *testing.T) {
-	// A databag whose values are (1) a JSON string and (2) a multi-line YAML
-	// blob should both be expanded into structure.
-	body := `{"uids":"{\"prometheus/0\":\"uid-1\"}","state":"id: 7\napplication-members:\n  prometheus: 0\n","addr":"10.0.0.1"}`
-	got := prettyJSON(body)
-	for _, want := range []string{
-		`"prometheus/0": "uid-1"`, // nested JSON expanded
-		`"application-members"`,   // nested YAML expanded
-		`"prometheus": 0`,         // nested YAML leaf
-		`"addr": "10.0.0.1"`,      // plain scalar left intact (not YAML-mangled)
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("prettyJSON missing %q\n---\n%s", want, got)
-		}
-	}
-	// The escaped-JSON string must not survive verbatim.
-	if strings.Contains(got, `\"prometheus/0\"`) {
-		t.Errorf("nested JSON was not expanded:\n%s", got)
-	}
-}
-
-func TestLineDiff(t *testing.T) {
-	a := []string{"{", `  "x": 1`, "}"}
-	b := []string{"{", `  "x": 2`, `  "y": 3`, "}"}
-	got := lineDiff(a, b)
-	var sb strings.Builder
-	for _, d := range got {
-		sb.WriteByte(d.op)
-	}
-	// context, remove x:1, add x:2, add y:3, context  -> " -++ "
-	if ops := sb.String(); ops != " -++ " {
-		t.Errorf("lineDiff ops = %q, want %q", ops, " -++ ")
-	}
-}
+// prettyJSON/lineDiff's own behaviour (nested JSON/YAML expansion, the LCS
+// diff) is tested in internal/narrative/detail_test.go now that the logic
+// lives there.

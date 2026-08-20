@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/lucabello/juju-lens/internal/index"
+	"github.com/lucabello/juju-lens/internal/narrative"
 	"github.com/lucabello/juju-lens/internal/recording"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -163,6 +164,7 @@ type model struct {
 	databagSpans map[string]bool // span ids that changed a databag (M7 marker)
 
 	// Logs (bottom) — the merged stream.
+	rawLogs        []index.LogRow // every log row for the model, unfiltered — fetched once per setActiveModel, not per keystroke (M14)
 	stream         []streamItem
 	eventStreamIdx []int // events[i] -> index into stream
 	logCursor      int   // free-scroll position into stream
@@ -275,6 +277,11 @@ func (m *model) setActiveModel(mm index.Model) {
 		spans = nil
 	}
 	m.spans = spans
+	// Fetched once here (and again each reload() tick while following a live
+	// recording), not on every applyFilters() call — buildStream() used to
+	// re-run this same query on every search keystroke, which made typing in
+	// the filter prompt laggy on a recording with a large log volume (M14).
+	m.rawLogs, _ = m.db.Logs(mm.ID, 20000)
 	m.databagSpans, _ = m.db.ProducingSpanIDs(mm.ID, string(index.KindDatabag))
 	unitStatusBySpan, _ := m.db.StatusBySpan(mm.ID, string(index.KindUnitStatus))
 	appStatusBySpan, _ := m.db.StatusBySpan(mm.ID, string(index.KindAppStatus))
@@ -362,7 +369,13 @@ func (m *model) currentEvent() event {
 	return m.events[m.cursor]
 }
 
-// currentTs is the instant every synchronised pane reflects.
+// currentTs is the instant every synchronised pane reflects, including the
+// Status pane: the selected event's own start, matching what the Events pane
+// shows next to it. A hook's status/databag changes now surface as their own
+// separately-positioned marker rows (EvStatus, M12) rather than as a suffix
+// implicitly attributed to the hook's end, so the Status pane no longer needs
+// to peek past the selected row's own timestamp to show what it produced —
+// selecting the marker row itself lands exactly on the instant it committed.
 func (m *model) currentTs() time.Time {
 	if len(m.events) > 0 {
 		return m.events[m.cursor].ts
@@ -371,20 +384,6 @@ func (m *model) currentTs() time.Time {
 		return m.spans[len(m.spans)-1].Start
 	}
 	return time.Now()
-}
-
-// statusTs is the instant the Status pane reflects: the *end* of the selected
-// hook rather than its start. A charm's status and databag changes are made
-// while the hook runs (their spans fall inside the run-hook..continue bracket),
-// so reading state as of the hook's end shows the situation the hook produced,
-// which is what the user expects when a hook row is selected. Non-hook events
-// (raw transitions) have no duration, so this is just their timestamp.
-func (m *model) statusTs() time.Time {
-	if len(m.events) > 0 {
-		ev := m.events[m.cursor]
-		return ev.ts.Add(ev.dur)
-	}
-	return m.currentTs()
 }
 
 // spanByID looks up a span by id (for the inspector).
@@ -402,23 +401,27 @@ func (m *model) spanByID(id string) (recording.SpanRow, bool) {
 func (m *model) refreshStatus() {
 	rows := func(kind string) []index.SnapshotRow {
 		if len(m.events) > 0 {
-			r, _ := m.db.LatestPerScopeAsOf(m.activeModel.ID, kind, m.statusTs())
+			r, _ := m.db.LatestPerScopeAsOf(m.activeModel.ID, kind, m.currentTs())
 			return r
 		}
 		r, _ := m.db.LatestPerScope(m.activeModel.ID, kind)
 		return r
 	}
 	m.unitStatuses = scopeMap(rows(string(index.KindUnitStatus)), "unit-status:")
-	// Application status mirrors juju: it is the highest-severity unit workload
-	// status. We derive it from the units so the app row tracks the cursor even
-	// though app status has no RPC traffic of its own (it no longer stays frozen
-	// at the t0 bootstrap value). The captured app snapshot only fills apps that
-	// currently have no known unit statuses, since its single bootstrap row would
-	// otherwise refreeze the value: juju rarely emits SetApplicationStatus, so
-	// there is no later app snapshot to move it.
+	// Application status mirrors juju: an app's status is "unset" by default, in
+	// which case juju displays the highest-severity unit workload status — so we
+	// derive that rollup from the units first, tracking the cursor live. But once
+	// the leader has explicitly called status-set --application, that value sticks
+	// regardless of what units do afterwards (domain/status/service
+	// applicationDisplayStatusFromUnits only runs while the app status is unset),
+	// so an *rpc-origin* app-status snapshot always overrides the rollup here. The
+	// bootstrap-origin snapshot (seeded once from `juju status` at recording
+	// start) is lowest priority and only fills apps with no known unit status at
+	// all (a bootstrap-only app, M8) — using it more broadly would refreeze every
+	// app at its t0 value, since juju rarely emits SetApplicationStatus again.
 	m.appStatuses = deriveAppStatuses(m.unitStatuses)
 	for app, sv := range scopeMap(rows(string(index.KindAppStatus)), "app-status:") {
-		if _, ok := m.appStatuses[app]; !ok {
+		if _, ok := m.appStatuses[app]; sv.Origin == "rpc" || !ok {
 			m.appStatuses[app] = sv
 		}
 	}
@@ -431,7 +434,7 @@ func (m *model) refreshStatus() {
 		}
 	}
 	databagRows := rows(string(index.KindDatabag))
-	m.relations = m.currentRelations(buildRelations(databagRows), latestWriteByRelation(databagRows), m.statusTs())
+	m.relations = m.currentRelations(buildRelations(databagRows), latestWriteByRelation(databagRows), m.currentTs())
 	m.databags = map[string]index.SnapshotRow{}
 	for _, r := range databagRows {
 		m.databags[r.Scope] = r
@@ -515,7 +518,7 @@ func relationBrokenTimes(spans []recording.SpanRow) map[string][]time.Time {
 func latestWriteByRelation(rows []index.SnapshotRow) map[string]time.Time {
 	out := map[string]time.Time{}
 	for _, r := range rows {
-		key, _ := splitDatabagScope(r.Scope)
+		key, _ := narrative.SplitDatabagScope(r.Scope)
 		if key == "" {
 			continue
 		}

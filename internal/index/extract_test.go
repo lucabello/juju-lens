@@ -81,6 +81,26 @@ func TestExtractSnapshotsFromStatusRPCs(t *testing.T) {
 	}
 }
 
+// Some real controllers send SetApplicationStatus with the leader unit's own
+// tag rather than an application tag. That must still land as the bare
+// application's app-status, not a phantom "app" named after the unit (a real
+// capture surfaced exactly this: a "mimir/2" entry in the Applications
+// section, sitting next to "mimir").
+func TestExtractAppStatusFromUnitTag(t *testing.T) {
+	base := time.Date(2026, 7, 3, 14, 30, 12, 0, time.UTC)
+	spans := []recording.SpanRow{
+		statusSpan("01", "SetApplicationStatus", "mimir/2", base,
+			`{"entities":[{"tag":"unit-mimir-2","status":"active","info":"ready"}]}`),
+	}
+	got := ExtractSnapshots(spans)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 snapshot, got %d: %+v", len(got), got)
+	}
+	if got[0].Kind != KindAppStatus || got[0].Scope != "app-status:mimir" {
+		t.Errorf("kind/scope = %s/%s, want %s/app-status:mimir", got[0].Kind, got[0].Scope, KindAppStatus)
+	}
+}
+
 // SetAgentStatus (executing/idle) must extract into its own agent-status scope,
 // distinct from the workload unit-status scope, so the sidebar and Status pane
 // draw from different axes. This guards against the recorder/extractor ever

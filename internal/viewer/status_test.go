@@ -78,6 +78,71 @@ func TestStatusPaneLatestKnownReflectsSnapshots(t *testing.T) {
 	}
 }
 
+// TestStatusPaneExplicitAppStatusOverridesRollup covers the leader calling
+// status-set --application (e.g. mimir/2, captured as an rpc-origin
+// app-status snapshot): that explicit value must win over the unit-derived
+// rollup, even though a unit workload status is known. Before the fix,
+// deriveAppStatuses always took precedence and the explicit call was
+// silently discarded.
+func TestStatusPaneExplicitAppStatusOverridesRollup(t *testing.T) {
+	db := openDB(t)
+	base := time.Date(2026, 7, 3, 14, 30, 12, 0, time.UTC)
+	if err := db.InsertSnapshot("default", base, "unit-status",
+		"unit-status:mimir/2",
+		`{"value":"active","message":"Ready","since":"2026-07-03T14:30:12Z"}`, ""); err != nil {
+		t.Fatal(err)
+	}
+	// The leader's explicit application-status call, attributed under the
+	// bare app name (extract.go collapses the leader unit tag).
+	if err := db.InsertSnapshot("default", base.Add(time.Second), "app-status",
+		"app-status:mimir",
+		`{"value":"waiting","message":"waiting for compactor","since":"2026-07-03T14:30:13Z"}`, "sp1"); err != nil {
+		t.Fatal(err)
+	}
+	modelID, err := db.UpsertModel("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := buildModel(t, db, index.Model{ID: modelID, Name: "default"})
+
+	if got := m.appStatuses["mimir"].Value; got != "waiting" {
+		t.Errorf("app-status mimir = %q, want waiting (explicit rpc snapshot should win)", got)
+	}
+	if got := m.appStatuses["mimir"].Message; got != "waiting for compactor" {
+		t.Errorf("app-status mimir message = %q, want %q", got, "waiting for compactor")
+	}
+}
+
+// TestStatusPaneBootstrapAppStatusDoesNotOverrideRollup covers the opposite:
+// the app-status snapshot seeded once from `juju status` at recording start
+// (origin "bootstrap") must not freeze the app row — the live unit rollup
+// still wins once a unit status is known.
+func TestStatusPaneBootstrapAppStatusDoesNotOverrideRollup(t *testing.T) {
+	db := openDB(t)
+	base := time.Date(2026, 7, 3, 14, 30, 12, 0, time.UTC)
+	if err := db.InsertBootstrapSnapshot("default", base, "app-status",
+		"app-status:mimir",
+		`{"value":"waiting","message":"starting up","since":"2026-07-03T14:30:12Z"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSnapshot("default", base.Add(time.Second), "unit-status",
+		"unit-status:mimir/2",
+		`{"value":"active","message":"Ready","since":"2026-07-03T14:30:13Z"}`, ""); err != nil {
+		t.Fatal(err)
+	}
+	modelID, err := db.UpsertModel("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := buildModel(t, db, index.Model{ID: modelID, Name: "default"})
+
+	if got := m.appStatuses["mimir"].Value; got != "active" {
+		t.Errorf("app-status mimir = %q, want active (unit rollup should win over the frozen bootstrap value)", got)
+	}
+}
+
 func TestStatusPaneShowsLeader(t *testing.T) {
 	db := openDB(t)
 	base := time.Date(2026, 7, 3, 14, 30, 12, 0, time.UTC)

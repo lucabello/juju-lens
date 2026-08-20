@@ -60,7 +60,7 @@ func LabelHooks(spans []recording.SpanRow) {
 type HookMarker struct {
 	Kind      string // bare hook kind, e.g. "relation-changed" ("" unless op is run-hook)
 	Op        string // "run-hook", "continue", …
-	Opstep    string // "pending" | "done": the uniter's progress through the op (M10)
+	Opstep    string // "queued" | "pending" | "done": the uniter's progress through the op. Every hook run walks queued→pending→done once, even when nothing goes wrong; only a *second* "pending" (a retry loop re-entered after an error) is meaningful on its own (M10, M13)
 	RemoteApp string // relation hooks: the remote application (peer relations: the app itself)
 	StorageID string // storage hooks: e.g. "data/0"
 }

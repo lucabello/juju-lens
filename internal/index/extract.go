@@ -152,7 +152,12 @@ func configSnapshots(sp recording.SpanRow) []Snapshot {
 
 // statusSnapshots decodes a status-setter's params into one snapshot per
 // entity. The scope is derived from the entity tag: unit tags map to
-// "unit-status:<app>/<n>", application tags to "app-status:<app>".
+// "unit-status:<app>/<n>", application tags to "app-status:<app>". Real
+// SetApplicationStatus traffic has been observed carrying the *leader unit's*
+// tag rather than an application tag (contrary to Juju's own params docs), so
+// a KindAppStatus entity is always collapsed to its bare application name —
+// otherwise the leader's unit id ends up stored (and later rendered) as its
+// own phantom application, e.g. "mimir/2" next to "mimir".
 func statusSnapshots(sp recording.SpanRow, params string, kind SnapshotKind) []Snapshot {
 	if params == "" {
 		return nil
@@ -166,6 +171,9 @@ func statusSnapshots(sp recording.SpanRow, params string, kind SnapshotKind) []S
 		name := entityName(e.Tag)
 		if name == "" || e.Status == "" {
 			continue
+		}
+		if kind == KindAppStatus {
+			name = appName(name)
 		}
 		body, err := json.Marshal(statusBody{Value: e.Status, Message: e.Info, Since: sp.Start})
 		if err != nil {
