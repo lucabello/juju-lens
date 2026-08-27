@@ -108,8 +108,35 @@ func SnapshotsForSpan(sp recording.SpanRow) []Snapshot {
 		return databagSnapshots(sp, params)
 	case method == "ConfigSettings":
 		return configSnapshots(sp)
+	case method == "SetState":
+		return leaderElectedSnapshots(sp, params)
 	}
 	return nil
+}
+
+// leaderElectedSnapshots recognizes a unit's own leader-elected hook run (the
+// `run-hook` uniter-state marker with hook.kind == "leader-elected") as direct
+// proof the unit now leads its application. Juju only ever runs this hook
+// after the unit's leadership claim has already succeeded, so the hook
+// *starting* is itself a leadership signal — it does not need to wait for the
+// hook to go on and write an app-scoped databag entry (databagSnapshots'
+// leadershipSnap, below), which a leader-elected hook may never do. This closes
+// the gap where the Status pane's leader marker stayed on the previous leader
+// until some later, unrelated app-databag write happened to reveal the change.
+func leaderElectedSnapshots(sp recording.SpanRow, params string) []Snapshot {
+	hm := ParseHookMarker(params)
+	if hm.Op != "run-hook" || hm.Kind != "leader-elected" {
+		return nil
+	}
+	unit := sp.Unit
+	if unit == "" {
+		return nil
+	}
+	app := appName(unit)
+	if app == "" {
+		return nil
+	}
+	return []Snapshot{leadershipSnap(sp, app, unit)}
 }
 
 // configSnapshots turns a Uniter.ConfigSettings RPC into a charm-config

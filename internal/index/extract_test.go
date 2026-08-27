@@ -198,6 +198,51 @@ func TestDatabagSnapshotsFromCommitHookChanges(t *testing.T) {
 	}
 }
 
+// setStateSpan builds a span the way recording.LoadSpans would for a
+// Uniter.SetState RPC carrying a uniter-state marker.
+func setStateSpan(id, unit string, start time.Time, uniterState string) recording.SpanRow {
+	params, _ := json.Marshal(map[string]any{
+		"args": []map[string]any{{"tag": "unit-" + unit, "uniter-state": uniterState}},
+	})
+	return recording.SpanRow{
+		SpanID: id, Model: "default", Unit: unit,
+		Start: start, End: start,
+		Name:  "Uniter.SetState",
+		Attrs: map[string]string{"facade": "Uniter", "method": "SetState", "params": string(params)},
+	}
+}
+
+// A unit's leader-elected hook starting is itself proof of leadership — Juju
+// only runs the hook after the unit's claim has already succeeded — so it must
+// be recognized directly, without waiting for the hook to also write an
+// app-scoped databag entry (which it may never do).
+func TestLeadershipSnapshotFromLeaderElectedHook(t *testing.T) {
+	base := time.Date(2026, 7, 4, 14, 0, 0, 0, time.UTC)
+	spans := []recording.SpanRow{
+		setStateSpan("01", "grafana/1", base, "op: run-hook\nopstep: pending\nhook:\n  kind: leader-elected\n"),
+		// A run-hook marker for an unrelated hook must not be mistaken for leadership.
+		setStateSpan("02", "grafana/1", base.Add(time.Second), "op: run-hook\nopstep: pending\nhook:\n  kind: config-changed\n"),
+		setStateSpan("03", "grafana/1", base.Add(2*time.Second), "op: continue\n"),
+	}
+	got := ExtractSnapshots(spans)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 leadership snapshot, got %d: %+v", len(got), got)
+	}
+	if got[0].Kind != KindLeadership || got[0].Scope != "leadership:grafana" {
+		t.Errorf("kind/scope = %s/%s, want %s/leadership:grafana", got[0].Kind, got[0].Scope, KindLeadership)
+	}
+	var body statusBody
+	if err := json.Unmarshal(got[0].Body, &body); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if body.Value != "grafana/1" {
+		t.Errorf("leader = %s, want grafana/1", body.Value)
+	}
+	if got[0].ProducingSpanID != "01" {
+		t.Errorf("producing span id = %s, want 01", got[0].ProducingSpanID)
+	}
+}
+
 // configSpan builds a span for a Uniter.ConfigSettings RPC: the config value
 // lives in the response envelope, not the params.
 func configSpan(id, unit, response string) recording.SpanRow {
