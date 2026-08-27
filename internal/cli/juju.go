@@ -75,11 +75,18 @@ func (t *jujuTopology) refreshOnMiss() {
 	t.refresh()
 }
 
-// refresh re-queries the controller's models and merges any newly-created ones
-// into the topology, so a model created mid-recording resolves its UUID to a
-// name instead of falling back to the raw UUID (which would surface as a
-// separate, duplicate model in the viewer). Best-effort: a failed query leaves
-// the existing topology untouched.
+// refresh re-queries the controller's models and rebuilds the topology from
+// that result, so a model created mid-recording resolves its UUID to a name
+// instead of falling back to the raw UUID (which would surface as a separate,
+// duplicate model in the viewer). Best-effort: a failed query leaves the
+// existing topology untouched.
+//
+// The rebuild is wholesale, not a merge: a model that no longer appears (e.g.
+// a short-lived test model destroyed mid-recording) must drop out of
+// modelName here. Otherwise modelsToStream keeps returning it forever, and
+// callers driven by it — captureStatusBootstrap, the debug-log/k8s/machine
+// discovery tickers — retry and fail against it on every tick for the rest of
+// the recording instead of just once.
 func (t *jujuTopology) refresh() {
 	if t == nil {
 		return
@@ -88,16 +95,32 @@ func (t *jujuTopology) refresh() {
 	if err != nil {
 		return
 	}
+	modelName, modelType, controllerNameByUUID, _ := buildTopologyMaps(mj)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.lastRefresh = time.Now()
+	t.modelName = modelName
+	t.modelType = modelType
+	t.controllerNameByUUID = controllerNameByUUID
+}
+
+// buildTopologyMaps converts a `juju models` result into the lookup maps
+// jujuTopology needs, plus the controller UUID shared by those models. It is
+// pure (no I/O) so both resolveScope's initial build and refresh's rebuild go
+// through the same logic, and it's unit-testable without shelling out to juju.
+func buildTopologyMaps(mj *modelsJSON) (modelName, modelType, controllerNameByUUID map[string]string, controllerUUID string) {
+	modelName = make(map[string]string, len(mj.Models))
+	modelType = make(map[string]string, len(mj.Models))
+	controllerNameByUUID = make(map[string]string, len(mj.Models))
 	for _, m := range mj.Models {
-		t.modelName[m.ModelUUID] = m.ShortName
-		t.modelType[m.ShortName] = m.ModelType
+		modelName[m.ModelUUID] = m.ShortName
+		modelType[m.ShortName] = m.ModelType
 		if m.ControllerUUID != "" {
-			t.controllerNameByUUID[m.ControllerUUID] = m.ControllerName
+			controllerUUID = m.ControllerUUID
+			controllerNameByUUID[m.ControllerUUID] = m.ControllerName
 		}
 	}
+	return modelName, modelType, controllerNameByUUID, controllerUUID
 }
 
 // modelNames returns the known model short-names, sorted. It is concurrency-safe
@@ -168,19 +191,13 @@ func resolveScope(controllerName, modelName string) (*jujuTopology, probeFilter,
 	if err != nil {
 		return nil, probeFilter{}, err
 	}
+	byUUID, typeByName, controllerByUUID, controllerUUID := buildTopologyMaps(mj)
 	topo := &jujuTopology{
 		controllerName:       controllerName,
-		modelName:            map[string]string{},
-		modelType:            map[string]string{},
-		controllerNameByUUID: map[string]string{},
-	}
-	for _, m := range mj.Models {
-		topo.modelName[m.ModelUUID] = m.ShortName
-		topo.modelType[m.ShortName] = m.ModelType
-		if m.ControllerUUID != "" {
-			topo.controllerUUID = m.ControllerUUID
-			topo.controllerNameByUUID[m.ControllerUUID] = m.ControllerName
-		}
+		controllerUUID:       controllerUUID,
+		modelName:            byUUID,
+		modelType:            typeByName,
+		controllerNameByUUID: controllerByUUID,
 	}
 
 	var filter probeFilter
