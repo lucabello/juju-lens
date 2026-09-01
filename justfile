@@ -2,7 +2,9 @@ set shell := ["bash", "-c"]
 
 BIN := "juju-lens"
 PKG := "./..."
-LDFLAGS := "-X main.version=$(cat VERSION) -X main.commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+# Version comes from git tags (vX.Y.Z, pushed to release) - no VERSION file.
+# `--always` falls back to a short commit hash for untagged dev builds.
+LDFLAGS := "-X main.version=$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//') -X main.commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 # List available commands
 [private]
@@ -62,24 +64,31 @@ install:
     go install -ldflags "{{LDFLAGS}}" ./cmd/juju-lens
     go install -ldflags "{{LDFLAGS}}" ./cmd/juju-lens-probe
 
-# Cross-compile for common platforms into ./dist/
+# Cross-compile release archives (linux/amd64, linux/arm64) into ./dist/
 [group("build")]
 release:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p dist
-    VERSION="$(cat VERSION)"
-    for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+    VERSION="$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')"
+    # Only linux: juju-lens-probe is eBPF/Linux-only, and darwin builds
+    # would just ship a functionless stub. `go build`/`just build` still
+    # work fine on other platforms for local development.
+    for target in linux/amd64 linux/arm64; do
         os="${target%/*}" arch="${target#*/}"
-        out="dist/{{BIN}}-${VERSION}-${os}-${arch}"
-        echo "building ${out}"
+        workdir="$(mktemp -d)"
+        trap 'rm -rf "${workdir}"' EXIT
         GOOS="${os}" GOARCH="${arch}" CGO_ENABLED=0 \
-            go build -trimpath -ldflags "{{LDFLAGS}} -s -w" -o "${out}" ./cmd/juju-lens
-        # The probe only functions on Linux, but the stub cross-compiles so
-        # the artifact set stays uniform.
+            go build -trimpath -ldflags "{{LDFLAGS}} -s -w" -o "${workdir}/{{BIN}}" ./cmd/juju-lens
         GOOS="${os}" GOARCH="${arch}" CGO_ENABLED=0 \
-            go build -trimpath -ldflags "{{LDFLAGS}} -s -w" -o "${out}-probe" ./cmd/juju-lens-probe
+            go build -trimpath -ldflags "{{LDFLAGS}} -s -w" -o "${workdir}/{{BIN}}-probe" ./cmd/juju-lens-probe
+        archive="dist/{{BIN}}-${VERSION}-${os}-${arch}.tar.gz"
+        echo "building ${archive}"
+        tar czf "${archive}" -C "${workdir}" {{BIN}} {{BIN}}-probe
+        rm -rf "${workdir}"
+        trap - EXIT
     done
+    (cd dist && sha256sum *.tar.gz > checksums.txt)
 
 # Remove build artifacts
 [group("build")]
@@ -143,4 +152,4 @@ update:
 # Print the tool version that would be built
 [group("maintenance")]
 version:
-    @echo "$(cat VERSION) ($(git rev-parse --short HEAD 2>/dev/null || echo unknown))"
+    @echo "$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//') ($(git rev-parse --short HEAD 2>/dev/null || echo unknown))"

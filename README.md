@@ -73,9 +73,34 @@ Not yet implemented (see VISION.md for milestone plan):
 
 ## Requirements
 
-- **Go** ≥ 1.24.
+- **Go** ≥ 1.25.
 - **just** (recipe runner) — install from
   [github.com/casey/just](https://github.com/casey/just).
+
+## Installing
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lucabello/juju-lens/main/install.sh | sh
+```
+
+Downloads and verifies the latest release from
+[GitHub Releases](https://github.com/lucabello/juju-lens/releases) and
+installs `juju-lens` + `juju-lens-probe` to `/usr/local/bin` (or
+`~/.local/bin` if that isn't writable). Only `linux/amd64` and
+`linux/arm64` are published — `juju-lens-probe` is eBPF-based and only
+functions on Linux; see [Just recipes](#just-recipes) below to build from
+source on other platforms (dev/TUI use only). Set `JUJU_LENS_VERSION` to
+pin a specific release, or `JUJU_LENS_INSTALL_DIR` to change where the
+binaries go.
+
+Releases are cut by pushing a tag (`git tag v0.1.0 && git push origin
+v0.1.0`); a GitHub Actions workflow builds and publishes from there — see
+`.github/workflows/release.yml`.
+
+Prefer to build it yourself? `go install
+github.com/lucabello/juju-lens/cmd/juju-lens@latest` (and, separately,
+`.../cmd/juju-lens-probe@latest`) works with just a Go toolchain, no
+release infrastructure involved.
 
 ## Getting started
 
@@ -182,7 +207,7 @@ recordings/2026-07-03T14-30-12--mycontroller/
 ```
 just build        # → ./bin/juju-lens
 just install      # go install into $GOBIN
-just release      # cross-compile linux/darwin × amd64/arm64 → ./dist/
+just release      # linux/amd64 + linux/arm64 archives + checksums → ./dist/
 just run -- version
 just record my-controller
 just stop /path/to/recording  # SIGTERM the background recorder
