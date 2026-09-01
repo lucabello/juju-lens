@@ -8,11 +8,11 @@ process, or watching the Juju API as a client.
 
 ## The three candidate vantage points
 
-| Vantage point | Verdict |
+| Vantage point | What it sees |
 |---|---|
-| **The Juju API wire** (what `juju-lens` uses) | The producer of all the state that matters, seen at the moment it becomes real. |
-| The charm's own hook process | A *consumer* of state, not its producer — see below. |
-| The Juju API, as a client (e.g. the `AllWatcher` model-events stream) | Broken on the versions this project targets — see below. |
+| **The Juju API wire** (what `juju-lens` uses) | Every RPC that carries or produces the state in question, at the point it's written or read. |
+| The charm's own hook process | Only the *requests* it makes for that state, not the state itself — see below. |
+| The Juju API, as a client (e.g. the `AllWatcher` model-events stream) | Not usable on the versions this project targets — see below. |
 
 ## Why not the charm process?
 
@@ -33,8 +33,8 @@ protocol, just from a worse vantage point, and for one that's also:
   lives for the unit's entire life, so attaching once at record start
   misses nothing.
 
-This is intentional project scope, not an oversight: `juju-lens` is not a
-charm profiler, and doesn't instrument charm code in any language.
+This follows from the project's scope: `juju-lens` is not a charm profiler,
+and doesn't instrument charm code in any language.
 
 ## Why not the Juju API as a client?
 
@@ -52,14 +52,15 @@ it's broken on both versions this project targets:
 versions: `Status()` to bootstrap the inventory, and `WatchDebugLog` for the
 log stream. It just isn't the primary source.
 
-## The one thing worth naming: TLS means "from outside" isn't an option either
+## Why a network-level capture isn't an option either
 
 A true external capture — a network tap, a sidecar packet capture — sees
 only ciphertext, since the traffic is TLS-encrypted end to end. Getting the
 plaintext that way would mean either pulling it out of the process anyway
 (the same uprobe idea, described differently) or terminating TLS in the
-middle, which requires installing trust material and would violate the
-project's core promise: **`juju-lens` never mutates the target.**
+middle, which requires installing trust material on the target — something
+`juju-lens` doesn't do anywhere else, since it only ever attaches read-only
+probes and never changes what's running.
 
 ## See also
 

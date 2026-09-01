@@ -1,9 +1,9 @@
 # How capture works
 
-This page explains where `juju-lens` gets its data from, and why that
-source is trustworthy even though `juju-lens` never talks to the Juju API
-for it. It applies to both Juju 3.6 and 4.x, and to machine and Kubernetes
-controllers alike.
+This page explains where `juju-lens` gets its data from: what it reads,
+where it reads it from inside a running process, and why that's enough to
+see every Juju API call without talking to the Juju API for it. It applies
+to both Juju 3.6 and 4.x, and to machine and Kubernetes controllers alike.
 
 ## The short version
 
@@ -12,37 +12,35 @@ talks to its peers over TLS, using Go's `crypto/tls` package. `juju-lens`
 attaches an eBPF probe to that process and reads the plaintext at the two
 points where it briefly exists unencrypted inside the process: right before
 `crypto/tls` encrypts an outgoing write, and right after it decrypts an
-incoming read. The process is never paused, modified, or reconfigured — the
-same non-invasive technique production continuous-profiling agents use, here
-aimed at a protocol boundary instead of a CPU stack.
+incoming read. The process itself is never paused, modified, or
+reconfigured to make this possible — the probe only reads memory the
+process already produces as part of doing its normal work.
 
-```mermaid
-flowchart LR
-    A["Plaintext Juju RPC\n(inside jujud, in memory)"] -->|crypto/tls encrypts| B["Ciphertext on the wire"]
-    B -->|crypto/tls decrypts| C["Plaintext Juju RPC\n(inside the peer, in memory)"]
-    A -.->|eBPF uprobe reads it here| D["juju-lens-probe"]
-    C -.->|and here, on the peer| D
-```
+## What the wire carries
 
-## Why this is safe to trust
+Every Juju API call — `Uniter.CommitHookChanges`, `SecretsManager.*`,
+status setters, relation scope changes — goes through this same connection
+as a JSON-over-websocket envelope, self-describing with a request id, a
+facade name, a method name, and (when tracing is configured upstream) a
+trace id. Reading it means seeing every RPC an agent makes or serves,
+verbatim, in order — there's no sampling and nothing needs to be inferred
+from a side effect.
 
-The wire carries the *entire* Juju API: `Uniter.CommitHookChanges`,
-`SecretsManager.*`, status setters, relation scope changes, and everything
-else a charm or agent does goes through it as a JSON-over-websocket
-envelope, self-describing with a request id, a facade name, a method name,
-and (when tracing is configured upstream) a trace id. Reading it is
-equivalent to seeing every RPC an agent makes or serves — nothing is
-sampled or inferred.
+This is also the reason `juju-lens` doesn't use the Juju API itself as its
+main source: the client-facing model-events watcher it would need is
+removed in Juju 4.x, and even on 3.6 it doesn't carry relation databag
+contents. See [why the wire, not the charm or the API](why-the-wire.md) for
+the comparison in full.
 
-It's also stable across Juju versions on purpose: `juju-lens` depends only
-on `crypto/tls` (Go's standard library) and on the JSON wire format, neither
-of which changes across Juju minor versions. Contrast this with the
-alternative of watching the Juju API for model-change events — that
-approach was tried and rejected, because Juju 4.x removed the relevant
-watcher entirely. See [why the wire, not the charm or the
-API](why-the-wire.md) for the full comparison.
+## Why the technique survives version upgrades
 
-## How the probe finds its target without help
+`juju-lens` depends on two things: Go's `crypto/tls` (standard library) and
+the JSON wire format Juju's own `rpc/jsoncodec` uses. Neither changes across
+Juju minor versions, so the same uprobe addresses and the same envelope
+decoder work on 3.6 and 4.x without version-specific logic in the capture
+path itself.
+
+## How the probe finds its target on a stripped binary
 
 `jujud` binaries ship stripped in production — no debug symbols. The probe
 still finds `crypto/tls.(*Conn).Write`/`.Read` by reading `.gopclntab`, a

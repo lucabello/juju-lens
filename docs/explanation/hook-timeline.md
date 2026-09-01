@@ -24,13 +24,6 @@ Each hook run becomes two rows in the Events pane: a start line and an end
 line, both pointing at the same underlying data — so selecting either opens
 the same inspector.
 
-```mermaid
-flowchart LR
-    A["Uniter.SetState\nop: run-hook"] -->|hook start| B["... hook body:\nCommitHookChanges,\njujuc tool calls,\nstatus setters ..."]
-    B --> C["Uniter.SetState\nop: continue"]
-    C -->|hook end| D["Event pair in the\nEvents pane"]
-```
-
 ## Default view vs. verbose (`.`)
 
 By default, the Events pane shows only hook rows. Everything else the raw
@@ -48,19 +41,40 @@ change can be attributed to the hook that caused it.
 
 ## When a hook didn't go cleanly
 
-A hook run can end in one of a few ways, distinguished by the same
-`SetState` bracket:
+A hook run can end in one of a few ways. The classifier's job is to tell
+"the charm is broken right now" apart from "this recording has a gap" —
+two situations that look identical if you only check whether the bracket
+closed. It checks, in this order:
+
+```mermaid
+flowchart TD
+    A["hook run"] --> B{"was run-hook written\ntwice for this hook?\n(a real retry)"}
+    B -->|yes| C{"still open at\nthe tail?"}
+    C -->|yes| D["errored"]
+    C -->|no| E["retried"]
+    B -->|no| F{"a different hook opened\nbefore this one resolved?"}
+    F -->|yes| G{"had this hook already\nreached its last opstep?"}
+    G -->|yes| H["capture gap"]
+    G -->|no| I["interrupted"]
+    F -->|no| J{"an RPC inside\nreturned an error?"}
+    J -->|yes| K["rpc warning"]
+    J -->|no| L["succeeded"]
+```
 
 | Outcome | What it means |
 |---|---|
-| Succeeded | The bracket closed normally. |
-| Errored | The unit is in error state *right now* — the hook failed and hasn't recovered. |
-| Retried | It failed, Juju retried it, and it then succeeded — history, not a current problem. |
-| RPC warning | The hook completed, but one of the RPCs inside it returned an error the charm likely caught. |
-| Interrupted / capture gap | The bracket never closed in what was captured — usually a truncated recording or a dropped sample, not a charm bug. |
+| Errored | Retried, and still open at the tail — the unit is in error state *right now*. |
+| Retried | Retried, but it reached `continue` — it errored, Juju retried it, and the charm recovered. History, not a current problem. |
+| Capture gap | A different hook opened before this one's `continue` arrived, but this one had already reached its last opstep — it almost certainly finished; only its own closing marker is missing, usually a dropped sample. |
+| Interrupted | A different hook opened before this one reached its last opstep at all — usually a truncated recording or the unit being torn down mid-hook. |
+| RPC warning | The bracket closed normally, but one of the RPCs inside it returned an error the charm likely caught. |
+| Succeeded | None of the above. |
 
-Only the first three read as charm-relevant by default; the last two are
-about the recording itself, not the charm, so they stay in verbose mode.
+Only errored/retried/RPC-warning read as charm-relevant by default;
+interrupted and capture gap are about the recording itself, not the charm,
+so they stay in verbose mode. A hook that never retried, was never
+superseded, and hasn't reached `continue` yet is simply still running — the
+live tail of an in-progress recording, not a failure.
 
 ## See also
 

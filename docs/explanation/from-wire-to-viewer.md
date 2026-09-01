@@ -54,8 +54,9 @@ it is derivable from `raw/rpc/*.jsonl` and the log files alongside it. That
 means the schema can change, or extraction logic can improve, without
 invalidating old recordings — `juju-lens index` just rebuilds `index.db`
 from scratch (see [how to rebuild the index](../how-to/rebuild-the-index.md)).
-It also means a recording stays useful with nothing but `grep` and `jq` if
-the tool itself ever misbehaves.
+It also means `raw/` on its own, read with `grep` or `jq`, is a valid way to
+inspect a recording if the viewer or the index can't be used for some
+reason.
 
 ## When capture falls behind
 

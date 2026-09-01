@@ -12,10 +12,11 @@ The docs below are organised by what you're trying to do:
 
 ## Tutorials
 
-Learn `juju-lens` by doing, with no real Juju controller required.
+Learn `juju-lens` by doing.
 
-- [Your first recording](tutorials/first-recording.md) — generate a
-  synthetic recording and explore it in the viewer.
+- [Your first recording](tutorials/first-recording.md) — capture a real
+  Juju controller while a charm's own integration tests run against it,
+  then explore the result in the viewer.
 
 ## How-to guides
 
@@ -26,6 +27,7 @@ Steps for a specific task, once you already know the basics.
 - [How to stop a running recording](how-to/stop-a-recording.md)
 - [How to rebuild a recording's index](how-to/rebuild-the-index.md)
 - [How to export a recording for an agent](how-to/export-for-an-agent.md)
+- [How to generate a synthetic recording](how-to/generate-a-synthetic-recording.md) — no Juju controller needed.
 
 ## Reference
 

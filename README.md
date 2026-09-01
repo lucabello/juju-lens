@@ -34,7 +34,7 @@ Working:
   an agent](docs/how-to/export-for-an-agent.md).
 - **`juju-lens synth trivial`** writes a byte-for-byte reproducible
   synthetic recording, for trying the tool with no Juju controller at all.
-  See the [first-recording tutorial](docs/tutorials/first-recording.md).
+  See [how to generate a synthetic recording](docs/how-to/generate-a-synthetic-recording.md).
 
 Kubernetes-native probe attach (`kubectl-debug`, `daemonset` — capturing a
 CAAS unit's own RPC traffic) is designed in VISION.md but not yet built;
@@ -44,10 +44,10 @@ and already works.
 
 ## Documentation
 
-- [Your first recording](docs/tutorials/first-recording.md) — a synthetic
-  recording, no Juju controller needed.
+- [Your first recording](docs/tutorials/first-recording.md) — capture a
+  real Juju controller while a charm's integration tests run against it.
 - [How-to guides](docs/README.md#how-to-guides) — recording, watching,
-  stopping, exporting.
+  stopping, exporting, or generating a synthetic recording instead.
 - [Reference](docs/README.md#reference) — CLI flags, on-disk layout, SQLite
   schema, keybindings.
 - [Explanation](docs/README.md#explanation) — how capture works, how a
@@ -91,9 +91,10 @@ just build   # → ./bin/juju-lens and ./bin/juju-lens-probe
 just demo    # generate a synthetic recording and open it in the viewer
 ```
 
-For a guided walkthrough, see the [first-recording
-tutorial](docs/tutorials/first-recording.md). To record from a real Juju
-controller, see [how to record a controller](docs/how-to/record-a-controller.md).
+That's the fastest way to see the viewer, with a fabricated recording and
+no Juju controller involved. For a walkthrough that captures a real
+deployment instead, see the [first-recording
+tutorial](docs/tutorials/first-recording.md).
 
 ## Repository layout
 
