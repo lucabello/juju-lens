@@ -4,72 +4,54 @@ A time machine for Juju controllers. `juju-lens` records everything a Juju
 controller and its models emit, then plays it back offline in a TUI where
 events, state changes, and logs are correlated by time and by trace.
 
-See [VISION.md](./VISION.md) for the full design; this README documents
-what is actually implemented today.
+See [`docs/`](./docs/README.md) for how it works and how to use it, and
+[VISION.md](./VISION.md) for the full long-term design — this README covers
+what's implemented today.
 
 ## Status
 
-**Milestone M2 — SQLite index + three-column TUI.** Working:
+Working:
 
-- `juju-lens-probe` attaches eBPF uprobes to `crypto/tls.(*Conn).Read/Write`
-  in a target `jujud`/`containeragent` process (resolving symbols from the
-  stripped binary's `.gopclntab`) and streams the captured plaintext RPC
-  frames to stdout as length-prefixed JSON. Requires Linux ≥ 5.8 and
-  `CAP_BPF` (or root).
-- `juju-lens record` runs the probe — locally (`--attach local`, for a
-  jujud installed on this host) or on a machine controller over `juju ssh`
-  (`--attach ssh`) — reassembles the websocket RPC stream, writes each
-  captured envelope to `raw/rpc/<model>/calls-*.jsonl`, and builds
-  `index.db` on shutdown. **It never mutates the controller** — no config
-  is read or set; the only side effect is attaching read-only uprobes.
-  Stops on Ctrl-C, on SIGTERM (delivered by
-  `juju-lens stop`), on `--max-duration`, or on `--max-size`. Kubernetes
-  attach (`kubectl-debug`, `daemonset`) lands in M6.
-- `juju-lens stop <recording>` signals a running recorder (found via
-  `recorder.pid` in the recording directory) with SIGTERM so it can
-  shut down cleanly — useful when the recorder was started with `&` or
-  in a systemd unit. `--force --timeout 5s` escalates to SIGKILL.
-- `juju-lens synth trivial` writes a byte-for-byte reproducible synthetic
-  recording — a stream of captured Juju API RPCs — that mimics two Juju
-  applications (grafana, prometheus) forming one relation, sets a workload
-  status on each unit, and sets the leader's application status. Ships with
-  a pre-built index.
-- `juju-lens index <recording>` rebuilds `index.db` from `raw/` — useful
-  when the schema changes or when opening a recording captured by an older
-  build.
-- `juju-lens view` opens a recording in a bubbletea TUI. Three columns:
-  - **Applications** — apps → units tree derived from the units RPCs came from.
-  - **Timeline + Details** — every synthesised RPC span (`<facade>.<method>`)
-    in wall-clock order, with the selected span's envelope fields (params,
-    response, timing) rendered in a scrollable pane below.
-  - **Status** — two independent sections (Applications, Units) that
-    reconstruct the *latest known* status per app and per unit from the
-    snapshot store. `unknown` rows mark scopes we haven't seen data for
-    yet (recorder started mid-life, or an app/unit hasn't reported).
-  A model picker appears when the recording contains more than one Juju
-  model; press `m` to switch models at any time.
-- `juju-lens export <recording>` writes the same derived narrative the TUI
-  shows — hook runs with their failure classification, statuses/databags/
-  config they changed, merged with every correlated log line — as a folder
-  under `<recording>/derived/export` (`--out` to redirect): `SUMMARY.md` for
-  orientation, `timeline.jsonl`/`events.jsonl` for grepping, one
-  `details/<span_id>.json` per event for full drill-down, `report.md` for a
-  human, and an `AGENTS.md` legend. Meant for an agent to read
-  incrementally instead of ingesting the whole recording up front.
-  `--parts` restricts which files get written; `--unit`, `--since`/
-  `--until`, and `--errors-only` restrict what content is in scope.
-  `--format json|md` instead writes a single merged document to stdout, for
-  scripting.
-- `juju-lens version` prints the build stamp.
+- **`juju-lens record`** attaches a read-only eBPF probe to a `jujud`/
+  `containeragent` process — locally, or on a machine controller over `juju
+  ssh` — and captures Juju API RPCs plus `juju debug-log`, Kubernetes
+  workload-container logs, and machine journald. It never mutates the
+  controller. See [how to record a controller](docs/how-to/record-a-controller.md).
+- **`juju-lens watch`** does the same, live: record and view in one command,
+  so you can follow hooks, status, and relations in real time. See [how to
+  watch a live model](docs/how-to/watch-a-live-model.md).
+- **`juju-lens stop`** signals a running recorder to shut down cleanly. See
+  [how to stop a recording](docs/how-to/stop-a-recording.md).
+- **`juju-lens index`** rebuilds the SQLite index from raw captured data.
+  See [how to rebuild the index](docs/how-to/rebuild-the-index.md).
+- **`juju-lens view`** opens a recording in a bubbletea TUI: Events and
+  Status side by side, Logs spanning beneath, all synchronised to the
+  selected instant. See the [viewer keybindings
+  reference](docs/reference/viewer-keybindings.md).
+- **`juju-lens export`** writes a recording's derived narrative — hook runs
+  with failure classification, the state they changed, correlated logs — as
+  a folder meant for an agent to read incrementally. See [how to export for
+  an agent](docs/how-to/export-for-an-agent.md).
+- **`juju-lens synth trivial`** writes a byte-for-byte reproducible
+  synthetic recording, for trying the tool with no Juju controller at all.
+  See the [first-recording tutorial](docs/tutorials/first-recording.md).
 
-Not yet implemented (see VISION.md for milestone plan):
+Kubernetes-native probe attach (`kubectl-debug`, `daemonset` — capturing a
+CAAS unit's own RPC traffic) is designed in VISION.md but not yet built;
+`record`/`watch` currently support `--attach local` and `--attach ssh`
+only. Kubernetes *log* ingestion (workload-container stdout) is unaffected
+and already works.
 
-- Ingesting `juju debug-log`, Kubernetes pod logs, `journalctl`, `snap logs`.
-- Point-in-time status reconstruction at the cursor (M4 upgrades the pane
-  from "latest known" to "walk backward from cursor to nearest snapshot").
-- Agent status alongside workload/app status.
-- Databag / secret snapshotter, relations sidebar with diff mode.
-- Split view, filter overlay, follow mode.
+## Documentation
+
+- [Your first recording](docs/tutorials/first-recording.md) — a synthetic
+  recording, no Juju controller needed.
+- [How-to guides](docs/README.md#how-to-guides) — recording, watching,
+  stopping, exporting.
+- [Reference](docs/README.md#reference) — CLI flags, on-disk layout, SQLite
+  schema, keybindings.
+- [Explanation](docs/README.md#explanation) — how capture works, how a
+  captured byte becomes a viewer row, why this architecture.
 
 ## Requirements
 
@@ -105,102 +87,38 @@ release infrastructure involved.
 ## Getting started
 
 ```bash
-just build          # → ./bin/juju-lens and ./bin/juju-lens-probe
-
-# Generate a synthetic recording and open it.
-just demo
-
-# Or explicitly:
-just synth trivial /tmp/rec-trivial
-just view /tmp/rec-trivial
+just build   # → ./bin/juju-lens and ./bin/juju-lens-probe
+just demo    # generate a synthetic recording and open it in the viewer
 ```
 
-Recording live RPCs from a controller:
-
-```bash
-just build
-
-# `record` attaches the eBPF probe read-only; it never changes controller
-# config. Attach modes: `local` (jujud on this host) or `ssh` (a machine
-# controller reached over `juju ssh`). Requires Linux >= 5.8 and CAP_BPF on
-# whichever host the target process runs on.
-./bin/juju-lens record my-capture \
-    --output ./recordings/my-capture \
-    --attach ssh \
-    --controller my-juju-controller \
-    --ssh-target controller/0 \
-    --max-duration 30m
-
-# The <name> argument is a label for the recording (used in the directory
-# name and stored in manifest.json); it is not passed to `juju`.
-
-# Point --attach at a locally-installed jujud snap instead:
-sudo ./bin/juju-lens record local-capture --attach local
-
-# Inspect candidate targets the probe would attach to:
-sudo ./bin/juju-lens-probe --list
-
-# Start the recorder in the background, then stop it later with SIGTERM
-# via `juju-lens stop`. Stop does the same clean shutdown as Ctrl-C:
-# detaches the probes, finalises the manifest, builds the index.
-./bin/juju-lens record my-capture --output ./recordings/my-capture &
-./bin/juju-lens stop ./recordings/my-capture
-
-# --force after --timeout sends SIGKILL for an unresponsive recorder.
-./bin/juju-lens stop --force --timeout 5s ./recordings/my-capture
-```
-
-Open the recording later:
-
-```bash
-./bin/juju-lens view ./recordings/my-controller
-```
-
-Viewer keys:
-
-| Key | Action |
-|---|---|
-| `↑`/`k`, `↓`/`j` | move cursor |
-| `PgUp`/`b`, `PgDn`/` `/`f` | page |
-| `Home`/`g`, `End`/`G` | jump to first / last event |
-| `Tab` | cycle focus between panes (M2: timeline-only) |
-| `m` | pick a different model (multi-model recordings) |
-| `q`, `Esc`, `Ctrl+C` | quit |
+For a guided walkthrough, see the [first-recording
+tutorial](docs/tutorials/first-recording.md). To record from a real Juju
+controller, see [how to record a controller](docs/how-to/record-a-controller.md).
 
 ## Repository layout
 
 ```
 cmd/juju-lens/        # tiny main; delegates to internal/cli
 cmd/juju-lens-probe/  # standalone eBPF probe binary (TLS-boundary capture)
-internal/cli/         # cobra subcommands (record, stop, synth, index, view, version)
+internal/cli/         # cobra subcommands (record, watch, stop, synth, index, view, export, version)
 internal/probe/       # eBPF attach + frame protocol + symbol resolution + ingest
 internal/wire/        # Juju RPC envelope, websocket reassembly, capture format
 internal/index/       # SQLite index: schema, span/snapshot writers, extractors
 internal/recording/   # on-disk layout, manifest, rotating writer, span reader, pid file
+internal/narrative/   # derives hook runs/failure state/status attribution from spans
 internal/synth/       # deterministic RPC scenario generator
-internal/viewer/      # bubbletea TUI (3-column layout + model picker)
+internal/viewer/      # bubbletea TUI (Events + Status + Logs, model picker)
+internal/export/      # writes the derived-narrative export folder
+docs/                 # user documentation (tutorials, how-to, reference, explanation)
 VISION.md             # full design document
 justfile              # build / test / run / demo recipes
 ```
 
 ## Recording on disk
 
-A recording is a plain directory. Nothing is compressed. The SQLite index
-is a build artifact and can be re-created at any time with
-`juju-lens index <recording>`.
-
-```
-recordings/2026-07-03T14-30-12--mycontroller/
-├── manifest.json                       # controller, models, versions, sources,
-│                                       # end reason, attach mode + targets
-├── recorder.pid                        # PID of the running recorder (removed on clean exit)
-├── index.db                            # SQLite (WAL); rebuildable from raw/
-├── raw/
-│   └── rpc/
-│       └── default/                    # one directory per model
-│           └── calls-2026-07-03T14.jsonl  # captured Juju API RPCs, one per line
-└── derived/                            # cached snapshots/diffs (later milestones)
-```
+A recording is a plain directory; nothing is compressed, and the SQLite
+index is a rebuildable build artifact. See the [recording layout
+reference](docs/reference/recording-layout.md) for the full breakdown.
 
 ## Just recipes
 

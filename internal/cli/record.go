@@ -318,7 +318,7 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 	var totalDrops uint64
 	onDrops := func(n uint64) {
 		totalDrops = n
-		fmt.Fprintf(os.Stderr, "juju-lens: probe reports %d frames dropped so far (it's falling behind — see docs/profiling-and-architecture.md)\n", n)
+		fmt.Fprintf(os.Stderr, "juju-lens: probe reports %d frames dropped so far (it's falling behind — see docs/explanation/from-wire-to-viewer.md)\n", n)
 	}
 	ingestErr := probe.Ingest(ctx, stdout, resolver, w.sink, onDrops)
 	cancel()

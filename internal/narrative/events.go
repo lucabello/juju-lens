@@ -22,9 +22,9 @@ import (
 )
 
 // Event is a meaningful timeline transition. The default timeline shows one
-// thing: the Juju hooks a unit ran (VISION §6.2; docs/event-timeline.md), one
-// row per hook execution — from the run-hook marker to the matching continue —
-// carrying the hook's duration.
+// thing: the Juju hooks a unit ran (VISION §6.2; docs/explanation/hook-timeline.md),
+// one row per hook execution — from the run-hook marker to the matching
+// continue — carrying the hook's duration.
 //
 // The raw RPC transitions the hooks are made of (status setters, EnterScope,
 // secret management) are also events, but they are VerboseOnly: hidden until
@@ -320,9 +320,9 @@ func hideRedundantMarkers(events []Event) {
 }
 
 // HookRun is one execution of a hook on a unit: the run-hook..continue bracket
-// the uniter writes in its SetState blobs (docs/event-timeline.md §2). RepSpan
-// is the span a consumer drills into — the CommitHookChanges when the hook
-// committed, else the run-hook marker itself. RemoteApp/StorageID come from
+// the uniter writes in its SetState blobs (docs/explanation/hook-timeline.md).
+// RepSpan is the span a consumer drills into — the CommitHookChanges when the
+// hook committed, else the run-hook marker itself. RemoteApp/StorageID come from
 // the run-hook marker and reconstruct the charm-visible hook name.
 type HookRun struct {
 	Unit       string
@@ -347,7 +347,7 @@ type HookRun struct {
 // classify decides how a hook run went wrong, if at all. The distinguisher for a
 // retried hook is whether it reached `continue`: the uniter re-writes the same
 // run-hook marker each time it retries a failed hook, then writes `continue`
-// once the retry finally succeeds (docs/event-timeline.md §9).
+// once the retry finally succeeds (docs/explanation/hook-timeline.md).
 //
 //   - retried and still open at the tail  → FailErrored: the unit is in error
 //     state *now*; this is the only red, "the charm is broken" signal.
@@ -388,7 +388,7 @@ func (r *HookRun) classify() {
 // pending, then done); a run-hook for the hook already open is that later
 // opstep, not a new hook. When no run-hook marker is present (the recorder
 // attached mid-hook, or synthetic test data) it falls back to a maximal run of
-// consecutive spans sharing the same labelled Hook (docs/event-timeline.md §8).
+// consecutive spans sharing the same labelled Hook (docs/explanation/hook-timeline.md).
 func BuildHookRuns(spans []recording.SpanRow) []HookRun {
 	byUnit := map[string][]recording.SpanRow{}
 	var order []string
@@ -635,7 +635,7 @@ func parseRelationKey(key, localApp string) (localEp, remoteApp string, ok bool)
 // status setters (which live in the Status pane), scope changes, secret
 // management and actions. Spans that belong to a hook (sp.Hook set) are dropped
 // here — they surface inside that hook's inspector instead of doubling as their
-// own row (docs/event-timeline.md §5).
+// own row (docs/explanation/hook-timeline.md).
 func rawTransition(sp recording.SpanRow) (Event, bool) {
 	if sp.Hook != "" {
 		return Event{}, false
