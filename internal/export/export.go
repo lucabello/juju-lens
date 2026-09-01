@@ -110,6 +110,7 @@ type LogDetail struct {
 	Level  string    `json:"level,omitempty"`
 	Module string    `json:"module,omitempty"`
 	Body   string    `json:"body"`
+	SpanID string    `json:"span_id,omitempty"` // the span this log line correlated to, if any (index.DB.Logs' exact-match join)
 }
 
 // Item is one line of the merged, time-ordered export: either an event or a
@@ -208,7 +209,7 @@ func Build(dir string, opts Options) (*Result, error) {
 		lg := logs[i]
 		items = append(items, Item{TS: lg.Ts, Kind: "log", Log: &LogDetail{
 			TS: lg.Ts, Source: lg.Source, Unit: lg.Unit, Entity: lg.Entity,
-			Level: lg.Level, Module: lg.Module, Body: lg.Body,
+			Level: lg.Level, Module: lg.Module, Body: lg.Body, SpanID: lg.SpanID,
 		}})
 		summary.TotalLogs++
 	}

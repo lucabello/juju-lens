@@ -119,6 +119,13 @@ func (l Layout) StatusConfigFile(model string) string {
 // DerivedDir returns the derived/ directory where cached artifacts live.
 func (l Layout) DerivedDir() string { return filepath.Join(l.Root, "derived") }
 
+// ExportDir returns derived/export/, the default destination for `juju-lens
+// export`'s folder output (SUMMARY.md, timeline.jsonl, events.jsonl,
+// details/, report.md, AGENTS.md). It lives under derived/ alongside other
+// artifacts rebuilt from raw/ and index.db, and is safe to delete and
+// regenerate.
+func (l Layout) ExportDir() string { return filepath.Join(l.DerivedDir(), "export") }
+
 // IndexDB returns the path where the SQLite index would live. M1 does not
 // build one, but the path is stable so later milestones can find it.
 func (l Layout) IndexDB() string { return filepath.Join(l.Root, "index.db") }
