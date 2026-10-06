@@ -1,7 +1,7 @@
 // Package viewer implements the bubbletea TUI shown by `juju-lens view`.
 //
-// The layout is two rows, all synchronised to a single selected instant
-// (VISION §6). The top row holds Events and Status side by side; the Logs
+// The layout is two rows, all synchronised to a single selected instant.
+// The top row holds Events and Status side by side; the Logs
 // stream spans the full width beneath them:
 //
 //   - [1] Events — the timeline of meaningful transitions (hooks, status

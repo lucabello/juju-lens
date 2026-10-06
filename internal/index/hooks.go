@@ -13,7 +13,7 @@ import (
 // when it finishes, so we can attribute every RPC a unit made between those
 // markers to the hook that was running — which is what turns the timeline from
 // a list of "Uniter.CommitHookChanges" into a readable "config-changed" /
-// "relation-changed" sequence (VISION §6.2 mockup).
+// "relation-changed" sequence.
 var (
 	uniterOpRe        = regexp.MustCompile(`(?m)^op:\s*(\S+)`)
 	uniterOpstepRe    = regexp.MustCompile(`(?m)^opstep:\s*(\S+)`)

@@ -318,7 +318,7 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 	var totalDrops uint64
 	onDrops := func(n uint64) {
 		totalDrops = n
-		fmt.Fprintf(os.Stderr, "juju-lens: probe reports %d frames dropped so far (it's falling behind — see docs/profiling-and-architecture.md)\n", n)
+		fmt.Fprintf(os.Stderr, "juju-lens: probe reports %d frames dropped so far (it's falling behind — see docs/explanation/from-wire-to-viewer.md#limitations)\n", n)
 	}
 	ingestErr := probe.Ingest(ctx, stdout, resolver, w.sink, onDrops)
 	cancel()
@@ -448,11 +448,11 @@ func buildProbeCommand(mode string, f recordFlags, filter probeFilter) (*exec.Cm
 		args = append(args, probeArgs...)
 		return exec.Command("juju", args...), target, nil
 	case "kubectl-debug", "daemonset":
-		// Kubernetes-native probe deployment (VISION.md §9) is deferred with no
+		// Kubernetes-native probe deployment is deferred with no
 		// milestone scheduled, not "coming soon" — CAAS log ingestion (k8sIngester)
 		// doesn't need this at all; only RPC-probe attach to containeragent inside
 		// a pod would.
-		return nil, "", fmt.Errorf("attach mode %q (Kubernetes) is not implemented (deferred, see VISION.md §9)", mode)
+		return nil, "", fmt.Errorf("attach mode %q (Kubernetes) is not implemented yet", mode)
 	default:
 		return nil, "", fmt.Errorf("unknown attach mode %q (want local|ssh)", mode)
 	}

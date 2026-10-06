@@ -21,7 +21,7 @@ type AttachConfig struct {
 }
 
 // Run is unsupported off Linux. eBPF uprobes require a Linux kernel ≥ 5.8 on
-// the host running the target process (VISION §9.9).
+// the host running the target process.
 func Run(_ context.Context, _ AttachConfig) error {
 	return fmt.Errorf("juju-lens-probe requires Linux (eBPF uprobes); this host is %s", runtime.GOOS)
 }

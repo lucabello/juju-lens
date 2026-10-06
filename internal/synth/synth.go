@@ -74,7 +74,7 @@ func Generate(sc Scenario, opts Options) ([]wire.CapturedMessage, error) {
 // BootstrapStatus returns a `juju status --format=json` document describing the
 // model's ground truth at recording start, for the given scenario. The recorder
 // captures the equivalent from a live controller; synth ships one so the viewer
-// shows real statuses from t0 instead of "unknown" (VISION M8).
+// shows real statuses from t0 instead of "unknown".
 //
 // The trivial bootstrap deliberately differs from where the RPC deltas end up,
 // so scrubbing the timeline shows state evolving: grafana/prometheus start in
@@ -123,7 +123,7 @@ type LogLine struct {
 }
 
 // DebugLog returns the synthetic debug-log stream for a scenario, interleaved
-// with the RPC timeline so the viewer's merged Logs pane (VISION §7) has real
+// with the RPC timeline so the viewer's merged Logs pane has real
 // content to fold events into. Lines are honestly *time-adjacent* to events, not
 // span-tagged: the trivial scenario deliberately includes traefik/0 — a unit
 // with no captured RPCs — so the pane shows a log source that no event ever
@@ -248,7 +248,7 @@ func commitHookParams(unitTag, hook string, relationID int) map[string]any {
 // relation settings after a `relation-set`. When settings is nil no databag is
 // written. Crucially — like real Juju — it sends the *entire* databag each
 // time, so re-committing identical settings must produce no databag change once
-// the extractor dedups (VISION M7).
+// the extractor dedups.
 func commitHookParamsWithDatabag(unitTag, hook string, relationID int, relationTag string, settings map[string]string) map[string]any {
 	arg := map[string]any{"tag": unitTag, "update-network-info": false, "hook": hook}
 	if relationID >= 0 {
