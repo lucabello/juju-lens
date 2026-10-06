@@ -20,7 +20,7 @@ jobs:
 
       - uses: extractions/setup-just@v2
 
-      - run: just release
+      - run: just dist
 
       - run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/checksums.txt --generate-notes
         env:

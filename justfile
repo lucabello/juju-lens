@@ -40,15 +40,8 @@ lint:
 test:
     go test -race -count=1 {{PKG}}
 
-# Run tests with coverage
-[group("dev")]
-coverage:
-    go test -race -count=1 -coverprofile=coverage.out {{PKG}}
-    go tool cover -func=coverage.out | tail -1
-    @echo "Full report: go tool cover -html=coverage.out"
-
 # ============================================================================
-# Build & Run
+# Build & Demo
 # ============================================================================
 
 # Build the binaries into ./bin/ (juju-lens and the eBPF probe)
@@ -58,15 +51,41 @@ build:
     go build -ldflags "{{LDFLAGS}}" -o bin/{{BIN}} ./cmd/juju-lens
     go build -ldflags "{{LDFLAGS}}" -o bin/{{BIN}}-probe ./cmd/juju-lens-probe
 
-# Install the binaries into $GOBIN (or $GOPATH/bin)
+# Cut a release: validate, run checks, then tag and push (CI builds and publishes)
 [group("build")]
-install:
-    go install -ldflags "{{LDFLAGS}}" ./cmd/juju-lens
-    go install -ldflags "{{LDFLAGS}}" ./cmd/juju-lens-probe
+release VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    die() { echo "error: $*" >&2; exit 1; }
+    version="{{VERSION}}"
+
+    [[ "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must look like vX.Y.Z, got '${version}'"
+    [[ "$(git rev-parse --abbrev-ref HEAD)" == main ]] || die "releases are cut from main"
+    git fetch --quiet origin main --tags
+    [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || die "main is not in sync with origin/main"
+    git rev-parse -q --verify "refs/tags/${version}" >/dev/null && die "tag ${version} already exists"
+
+    # The version is the tag itself (no VERSION file), so "bumping" means
+    # picking a tag that is strictly newer than the latest existing one.
+    latest="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+    if [[ -n "${latest}" ]]; then
+        newest="$(printf '%s\n%s\n' "${latest}" "${version}" | sort -V | tail -n1)"
+        [[ "${newest}" == "${version}" ]] || die "${version} is not newer than the latest tag ${latest}"
+    fi
+
+    just check
+    [[ -z "$(git status --porcelain)" ]] || die "working tree is dirty (uncommitted changes, or checks reformatted files)"
+
+    echo "latest tag: ${latest:-none}"
+    read -r -p "Tag and push ${version}? [y/N] " answer
+    [[ "${answer}" == y || "${answer}" == Y ]] || die "aborted"
+    git tag -a "${version}" -m "${version}"
+    git push origin "${version}"
+    echo "pushed ${version}; the release workflow will build and publish it"
 
 # Cross-compile release archives (linux/amd64, linux/arm64) into ./dist/
 [group("build")]
-release:
+dist:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p dist
@@ -93,41 +112,7 @@ release:
 # Remove build artifacts
 [group("build")]
 clean:
-    rm -rf bin dist coverage.out
-
-# Run the binary (arguments after `--`, e.g. `just run -- version`)
-[group("run")]
-run *ARGS:
-    go run -ldflags "{{LDFLAGS}}" ./cmd/juju-lens {{ARGS}}
-
-# Run `record` (eBPF probe capture) into a fresh recording directory
-[group("run")]
-record CONTROLLER="local":
-    #!/usr/bin/env bash
-    out="recordings/$(date -u +%Y-%m-%dT%H-%M-%S)--{{CONTROLLER}}"
-    mkdir -p "${out%/*}"
-    go run ./cmd/juju-lens record {{CONTROLLER}} --output "${out}"
-
-# Signal a running recorder to stop cleanly (detaches probes,
-# finalises manifest, builds index).
-[group("run")]
-stop RECORDING:
-    go run ./cmd/juju-lens stop {{RECORDING}}
-
-# Generate a synthetic recording (for viewer development)
-[group("run")]
-synth SCENARIO="trivial" OUT="recordings/synth-{{SCENARIO}}":
-    go run ./cmd/juju-lens synth {{SCENARIO}} --output {{OUT}}
-
-# Open a recording in the viewer
-[group("run")]
-view RECORDING:
-    go run ./cmd/juju-lens view {{RECORDING}}
-
-# Rebuild the SQLite index for a recording from its raw/ tree
-[group("run")]
-index RECORDING:
-    go run ./cmd/juju-lens index {{RECORDING}}
+    rm -rf bin dist
 
 # End-to-end smoke test: synth a recording and open it in the viewer
 [group("run")]
@@ -149,7 +134,15 @@ update:
     go get -u {{PKG}}
     go mod tidy
 
-# Print the tool version that would be built
+# Print the local build version, the latest tag and the latest GitHub release
 [group("maintenance")]
 version:
-    @echo "$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//') ($(git rev-parse --short HEAD 2>/dev/null || echo unknown))"
+    #!/usr/bin/env bash
+    echo "local build:    $(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//') ($(git rev-parse --short HEAD 2>/dev/null || echo unknown))"
+    git fetch --quiet --tags origin 2>/dev/null || echo "(could not fetch tags from origin)"
+    echo "latest tag:     $(git tag --list 'v*' --sort=-v:refname | head -n1 | grep . || echo none)"
+    if command -v gh >/dev/null; then
+        echo "latest release: $(gh release view --json tagName --jq .tagName 2>/dev/null || echo none)"
+    else
+        echo "latest release: (gh not installed)"
+    fi

@@ -62,7 +62,7 @@ just demo    # generate a synthetic recording and open it
 just check   # format, lint, and test
 ```
 
-Run `just` to list every recipe. To publish a release, push a `vX.Y.Z` tag; GitHub Actions builds the binaries and attaches them to a GitHub release.
+Run `just` to list every recipe. To publish a release, run `just release vX.Y.Z` from an up-to-date `main`. It checks the version is newer than the latest tag, runs `just check`, then tags and pushes; GitHub Actions builds the binaries (`just dist`) and attaches them to a GitHub release.
 
 ## License
 
