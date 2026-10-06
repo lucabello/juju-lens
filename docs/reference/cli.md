@@ -1,130 +1,121 @@
-# CLI reference
+# Command line
 
-Every `juju-lens` subcommand and its flags. For task-oriented walkthroughs,
-see the [how-to guides](../README.md#how-to-guides).
+All `juju-lens` commands and their flags. For tasks, see the [how-to guides](../README.md#how-to-guides).
 
 ## `record`
 
-```
+```text
 juju-lens record <name> [flags]
 ```
 
-Attaches the eBPF probe (locally or over SSH) and captures RPCs and logs
-into a new recording directory. `<name>` labels the recording; it is not
-passed to `juju`.
+Records a controller into a new recording directory. `<name>` labels the recording.
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--output`, `-o` | `./recordings/<ts>--<name>` | Recording directory. |
-| `--attach` | auto-detect | `local` or `ssh`. |
-| `--controller` | current controller | Scope to this Juju controller (all its models). |
-| `--model` | all models | Scope to a single model, as `model` or `controller:model`. |
-| `--ssh-target` | — | Machine to `juju ssh` into for `--attach ssh` (e.g. `controller/0`). |
+| `--attach` | `ssh` if `--ssh-target` is set, otherwise `local` | `local` or `ssh`. |
+| `--controller` | current controller | Record every model on this controller. |
+| `--model` | all models | Record only this model, written as `model` or `controller:model`. |
+| `--ssh-target` | none | Machine to `juju ssh` into for `--attach ssh`, such as `controller/0`. |
 | `--probe-path` | next to `juju-lens`, then `$PATH` | Path to the `juju-lens-probe` binary. |
-| `--pid` | all `jujud`/`containeragent` PIDs | Restrict the probe to these PIDs (repeatable). |
-| `--debug-log` | `true` | Stream `juju debug-log` for the scoped models. |
-| `--k8s-log` | `true` | Stream workload-container logs for CAAS models. |
-| `--machine-log` | `true` | Stream machine journald for IAAS models. |
-| `--max-duration` | no limit | Stop recording after this duration (e.g. `30m`, `2h`). |
+| `--pid` | all agent processes | Record only these agent process IDs. Repeatable. |
+| `--debug-log` | `true` | Stream `juju debug-log` for the recorded models. |
+| `--k8s-log` | `true` | Stream workload-container logs for Kubernetes models. |
+| `--machine-log` | `true` | Stream the systemd journal for machine models. |
+| `--max-duration` | no limit | Stop recording after this duration, such as `30m` or `2h`. |
 | `--max-size` | no limit | Stop recording after this many bytes of `raw/`. |
 
 ## `watch`
 
-```
+```text
 juju-lens watch [model] [flags]
 ```
 
-Records a live model or controller and immediately opens the viewer
-following it. Requires `sudo` (eBPF needs root). Quitting the viewer (`q`)
-stops the recording.
+Records a model or controller on the local host and opens the viewer on the recording. Quitting the viewer stops the recording. Run with `sudo`.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--model` | — | Scope to a single model (also accepted as the positional argument). |
-| `--controller` | — | Scope to a controller (all its models). |
+| `--model` | none | Watch only this model. Same as the `[model]` argument. |
+| `--controller` | none | Watch every model on this controller. |
 | `--output`, `-o` | `./recordings/<ts>--watch-<scope>` | Recording directory. |
-| `--probe-path` | — | Path to the `juju-lens-probe` binary. |
-| `--debug-log` | `true` | Stream `juju debug-log` for the scoped models. |
+| `--probe-path` | next to `juju-lens`, then `$PATH` | Path to the `juju-lens-probe` binary. |
+| `--debug-log` | `true` | Stream `juju debug-log` for the recorded models. |
 
 ## `stop`
 
-```
+```text
 juju-lens stop <recording> [flags]
 ```
 
-Signals a running recorder (found via `recorder.pid`) to shut down cleanly.
+Stops a running recorder, found through `recorder.pid`, with `SIGTERM`.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--timeout` | `30s` | Wait this long for the recorder to exit before giving up. |
+| `--timeout` | `30s` | How long to wait for the recorder to exit. |
 | `--force` | `false` | Send `SIGKILL` if the recorder is still alive after `--timeout`. |
 
 ## `index`
 
-```
+```text
 juju-lens index <recording> [flags]
 ```
 
-Rebuilds `index.db` from a recording's `raw/` tree. Safe to run repeatedly.
+Rebuilds `index.db` from a recording's `raw/` directory.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--rename` | — | Remap a model during rebuild, as `OLD=NEW` (repeatable); merges `OLD`'s spans, snapshots, and logs into `NEW`. |
+| `--rename` | none | Merge model `OLD` into model `NEW`, written as `OLD=NEW`. Repeatable. |
 
 ## `view`
 
-```
+```text
 juju-lens view <recording> [flags]
 ```
 
-Opens a recording in the TUI viewer.
+Opens a recording in the viewer. See [viewer keybindings](viewer-keybindings.md).
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--follow`, `-f` | `false` | Tail a live (still-growing) recording, refreshing as it grows. |
+| `--follow`, `-f` | `false` | Follow a recording that is still being written, and refresh as it grows. |
 
 ## `export`
 
-```
+```text
 juju-lens export <recording> [flags]
 ```
 
-Writes a recording's derived narrative as a folder of plain-text artifacts,
-or a single document to stdout. See [how to export a recording for an
-agent](../how-to/export-for-an-agent.md) for the file list.
+Writes a recording's hooks, state changes, and logs as a folder of plain-text files, or as one document on standard output. See [how to export a recording for an AI agent](../how-to/export-for-an-agent.md) for the files.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--format` | — | Write a single merged document to stdout instead of a folder: `json` or `md`. |
+| `--format` | none | Write a single merged document to stdout instead of a folder: `json` or `md`. |
 | `--out` | `<recording>/derived/export` | Folder to write the export into. |
-| `--parts` | all | Comma-separated subset to write: `summary,timeline,events,details,report`. |
-| `--model` | — | Focus on a single model (required if the recording has more than one). |
-| `--unit` | — | Restrict to this unit or application (repeatable). |
-| `--since` | — | RFC3339 lower time bound. |
-| `--until` | — | RFC3339 upper time bound. |
-| `--errors-only` | `false` | Only hook runs that ended errored/retried/rpc-warn, plus one same-unit neighbour on each side. |
+| `--parts` | all | Comma-separated files to write, from `summary`, `timeline`, `events`, `details`, and `report`. |
+| `--model` | none | Export only this model. Required when the recording has more than one. |
+| `--unit` | none | Export only this unit or application. Repeatable. |
+| `--since` | none | Export only events at or after this time, in RFC 3339 format. |
+| `--until` | none | Export only events at or before this time, in RFC 3339 format. |
+| `--errors-only` | `false` | Only hooks that errored, were retried, or had an RPC error, with the hook before and after each on the same unit. |
 
 ## `synth`
 
-```
+```text
 juju-lens synth <scenario> [flags]
 ```
 
-Writes a recording directory whose spans mimic a real Juju controller,
-without needing one. Reproducible byte-for-byte when `--start` is fixed.
-Available scenarios: `trivial` (two applications, `grafana` and
-`prometheus`, forming one relation).
+Writes a recording that imitates a Juju controller, without needing one. The output is identical on every run for the same flags. The only scenario is
+`trivial`: `grafana` and `prometheus` with one relation.
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--output`, `-o` | `./recordings/synth-<scenario>` | Recording directory. |
-| `--start` | scenario's deterministic default | RFC3339 start instant. |
-| `--model` | `default` | `juju.model` resource attribute stamped on every span. |
+| `--start` | fixed per scenario | Start time of the recording, in RFC 3339 format. |
+| `--model` | `default` | Model name to use in the recording. |
 
 ## `version`
 
-```
+```text
 juju-lens version
 ```
 
-Prints the build stamp (version and commit).
+Prints the version and the commit it was built from.

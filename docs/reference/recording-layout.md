@@ -1,48 +1,44 @@
 # Recording layout
 
-A recording is a plain directory — nothing is compressed, and every file
-under `raw/` is either JSON or JSONL, so the recording stays inspectable
-with standard tools even if `juju-lens` itself misbehaves. This page lists
-what's in one and what each piece is for. For the reasoning behind these
-choices, see [from wire to viewer](../explanation/from-wire-to-viewer.md).
+The files and directories in a recording. [From wire to viewer](../explanation/from-wire-to-viewer.md) describes how they're written.
 
-```
-recordings/2026-07-03T14-30-12--mycontroller/
-├── manifest.json      # controller, models, versions, sources, end reason, attach mode
-├── recorder.pid       # PID of the running recorder; removed on clean exit
-├── index.db           # SQLite (WAL); rebuildable from raw/
+```text
+recordings/2026-07-03T14-30-12--my-capture/
+├── manifest.json
+├── recorder.pid
+├── index.db
 ├── raw/
-│   ├── rpc/<model>/calls-*.jsonl        # captured Juju API RPCs, one per line
-│   ├── juju/<model>/debug-log.jsonl     # juju debug-log, one line per record
-│   ├── k8s/<model>/<pod>/<container>/*.log  # workload-container logs (CAAS)
-│   └── machine/<model>/<host>/journal.jsonl # journald (IAAS)
+│   ├── rpc/<model>/calls-<hour>.jsonl
+│   ├── juju/<model>/debug-log-<hour>.log
+│   ├── k8s/<model>/<pod>/<container>/logs-<hour>.log
+│   ├── machine/<model>/<host>/journal-<hour>.log
+│   └── status/<model>/
+│       ├── bootstrap.json
+│       ├── databags.json
+│       └── config.json
 └── derived/
-    └── export/         # written by `juju-lens export`; see its how-to guide
+    └── export/
 ```
 
-## `manifest.json`
+## Top-level files
 
-The authoritative description of the recording: the tool version that wrote
-it, the controller's name/UUID/version, every model observed, the attach
-mode and targets used, the recording's start/end time and end reason, and a
-per-source status list (what ran, how many records, any error). The viewer
-reads this to know what it's looking at; nothing here is inferred from
-`raw/`.
+| Path | Contents |
+|---|---|
+| `manifest.json` | The `juju-lens` version that wrote the recording; the controller's name, UUID, and version; the models recorded; the attach mode and targets; start and end times; why the recording ended; and the status of each data source. |
+| `recorder.pid` | The process ID of the running recorder, used by [`juju-lens stop`](../how-to/stop-a-recording.md). Removed when the recorder exits normally. |
+| `index.db` | A SQLite database in WAL mode, built from `raw/`. The viewer reads only this file. See the [SQLite index schema](sqlite-schema.md). |
+| `derived/export/` | The default output directory of [`juju-lens export`](../how-to/export-for-an-agent.md). |
 
-## `raw/`
+## Raw data
 
-Everything a source captured, verbatim, split into one subdirectory per
-source kind and then per model. Files rotate hourly for high-volume
-sources. This is the actual source of truth for a recording — `index.db` is
-a cache built from it, so it's always safe to delete and rebuild
-(`juju-lens index`, see [how to rebuild the index](../how-to/rebuild-the-index.md)).
+Files under `raw/` that grow during a recording start a new file every hour.
 
-## `index.db`
-
-A SQLite database (WAL mode) that the viewer queries read-only. See the
-[SQLite index schema reference](sqlite-schema.md) for its tables.
-
-## `derived/`
-
-Cached output from tools that process a recording after the fact —
-currently just `juju-lens export`'s output folder.
+| Path | Contents |
+|---|---|
+| `rpc/` | Captured Juju API messages, one JSON object per line. Requests and responses are separate lines. |
+| `juju/` | `juju debug-log` output for each model, as printed. |
+| `k8s/` | Workload-container logs from Kubernetes models, one directory per pod and container. |
+| `machine/` | The systemd journal of each machine in machine models. |
+| `status/<model>/bootstrap.json` | `juju status --format=json`, taken when the recording started. |
+| `status/<model>/databags.json` | `juju show-unit --format=json` for each unit, taken when the recording started. |
+| `status/<model>/config.json` | `juju config <app> --format=json` for each application, taken when the recording started. |

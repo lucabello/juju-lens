@@ -1,59 +1,35 @@
 # Viewer keybindings
 
-The viewer (`juju-lens view`) shows two rows: **Events** and **Status**
-side by side on top, and **Logs** spanning the full width beneath them,
-all synchronised to whichever event is currently selected. `Tab`/`Shift+Tab`
-cycle keyboard focus between panes.
+Keys for `juju-lens view` and `juju-lens watch`.
 
-## Navigation (any pane)
+## Main view
 
-| Key | Action |
-|---|---|
-| `↑`/`k`, `↓`/`j` | Move cursor. |
-| `PgUp`/`b`, `PgDn` | Page up/down. |
-| `g`/Home, `G`/End | Jump to first/last row. |
-| `←`/`h`, `→`/`l` | Scroll a long line horizontally. |
-| `w` | Toggle line wrapping instead of horizontal scroll. |
-| `Tab`, `Shift+Tab` | Cycle focus between panes. |
+| Key | Pane | Action |
+|---|---|---|
+| `↑`/`k`, `↓`/`j` | Any | Move the cursor. |
+| `PgUp`/`b`, `PgDn` | Any | Page up or down. |
+| `g`/`Home`, `G`/`End` | Any | Jump to the first or last row. |
+| `←`/`h`, `→`/`l` | Any | Scroll a long line horizontally. |
+| `w` | Any | Toggle line wrapping. |
+| `Tab`, `Shift+Tab` | Any | Move focus to the next or previous pane. |
+| `Enter` | Events | Open the inspector for the selected event: statuses, relation data changes, and RPCs. |
+| `.` | Events | Toggle verbose mode, which shows individual RPCs and hook outcomes hidden by default. See [what the viewer shows](../explanation/rpcs-to-hooks.md#what-the-viewer-shows). |
+| `n`, `N` | Events | Jump to the next or previous event on the same unit. |
+| `Space` | Status | Show only the selected application or unit in all panes, or remove that filter. Selecting an application includes its units. |
+| `f` | Logs | Toggle between following the selected event and scrolling freely. |
+| `/` | Events, Logs | Filter the focused pane by text. |
+| `r` | Any | Clear the `Space` and `/` filters. |
+| `m` | Any | Choose a model, in recordings with more than one. |
+| `q`, `Esc`, `Ctrl+C` | Any | Quit. |
 
-## Events pane
+## Inspector and model picker
 
-| Key | Action |
-|---|---|
-| `Enter` | Open the inspector for the selected event (statuses, databag diffs, the RPCs behind it). |
-| `.` | Toggle verbose mode — reveals raw status changes and relation-scope events folded into hooks by default. See [the hook timeline](../explanation/hook-timeline.md). |
-| `n`, `N` | Jump to the next/previous event for the same unit. |
-| `d` | Toggle diff mode for databag/state snapshots. |
-| `y`, `Y` | Copy the selected event's "after" / "before" value. |
-
-## Logs pane
-
-| Key | Action |
-|---|---|
-| `f` | Toggle follow (locked to the selected event) vs. free scrolling. |
-
-## Status pane
-
-| Key | Action |
-|---|---|
-| `space` | Pin/unpin an application or unit row as a scope filter (an app pins all its units). |
-
-## Global
-
-| Key | Action |
-|---|---|
-| `m` | Open the model picker (recordings with more than one model). |
-| `/` | Open a search prompt, scoped to whichever of Events/Logs is focused; filters that pane by substring. |
-| `r` | Reset both the scope filter and the search filter. |
-| `q`, `Esc`, `Ctrl+C` | Quit. |
-
-## Model picker
-
-Opened with `m`.
-
-| Key | Action |
-|---|---|
-| `↑`/`k`, `↓`/`j` | Move cursor. |
-| `g`/Home, `G`/End | Jump to first/last model. |
-| `Enter`, `Space` | Select. |
-| `q`, `Esc`, `Ctrl+C` | Close without changing model. |
+| Key | Window | Action |
+|---|---|---|
+| `d` | Inspector | Toggle showing changes as a diff. |
+| `y`, `Y` | Inspector | Copy the value after or before the change. |
+| `Enter`, `q`, `Esc` | Inspector | Close the inspector. |
+| `↑`/`k`, `↓`/`j` | Model picker | Move the cursor. |
+| `g`/`Home`, `G`/`End` | Model picker | Jump to the first or last model. |
+| `Enter`, `Space` | Model picker | Choose the selected model. |
+| `q`, `Esc`, `Ctrl+C` | Model picker | Close without changing model. |

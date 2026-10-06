@@ -1,49 +1,33 @@
 # juju-lens documentation
 
-This is the documentation for `juju-lens`, a time machine for Juju
-controllers: it records everything a controller and its models emit, then
-plays it back offline in a TUI where events, state changes, and logs are
-correlated by time and by trace. If you're new here, start with the
-[README](../README.md) for a one-paragraph pitch and current project status,
-or [VISION.md](../VISION.md) for the full long-term design (implemented and
-not-yet-implemented alike).
-
-The docs below are organised by what you're trying to do:
+`juju-lens` records what a Juju controller and its models do, and lets you browse the recording offline: hooks, status changes, relation data, and logs on one timeline. For what's implemented today, see the [project README](../README.md).
 
 ## Tutorials
 
-Learn `juju-lens` by doing.
-
-- [Your first recording](tutorials/first-recording.md) — capture a real
-  Juju controller while a charm's own integration tests run against it,
-  then explore the result in the viewer.
+- [Your first recording](tutorials/first-recording.md): record a controller while a charm's integration tests run against it, then explore the result.
 
 ## How-to guides
 
-Steps for a specific task, once you already know the basics.
-
-- [How to record a live Juju controller](how-to/record-a-controller.md)
-- [How to watch a live model](how-to/watch-a-live-model.md)
-- [How to stop a running recording](how-to/stop-a-recording.md)
-- [How to rebuild a recording's index](how-to/rebuild-the-index.md)
-- [How to export a recording for an agent](how-to/export-for-an-agent.md)
-- [How to generate a synthetic recording](how-to/generate-a-synthetic-recording.md) — no Juju controller needed.
+- [Record a Juju controller](how-to/record-a-controller.md)
+- [Watch a live model](how-to/watch-a-live-model.md)
+- [Stop a running recording](how-to/stop-a-recording.md)
+- [Rebuild a recording's index](how-to/rebuild-the-index.md)
+- [Export a recording for an AI agent](how-to/export-for-an-agent.md)
+- [Generate a synthetic recording](how-to/generate-a-synthetic-recording.md), without a Juju controller
 
 ## Reference
 
-Terse, lookup-oriented material.
-
-- [CLI reference](reference/cli.md) — every subcommand and flag.
-- [Recording layout](reference/recording-layout.md) — what's on disk and why.
-- [SQLite index schema](reference/sqlite-schema.md) — the tables the viewer queries.
+- [Command line](reference/cli.md)
+- [Recording layout](reference/recording-layout.md)
+- [SQLite index schema](reference/sqlite-schema.md)
 - [Viewer keybindings](reference/viewer-keybindings.md)
 
 ## Explanation
 
-Understanding-oriented: what `juju-lens` does and why it's built this way.
+These pages follow captured traffic from the agent to the Events pane. Each builds on the one before, so read them in order:
 
-- [How capture works](explanation/how-capture-works.md) — eBPF uprobes at the TLS boundary.
-- [From wire to viewer](explanation/from-wire-to-viewer.md) — how a captured byte becomes a row on screen.
-- [Why the wire, not the charm or the API](explanation/why-the-wire.md)
-- [The correlation model](explanation/correlation-model.md) — traces, spans, snapshots, logs.
-- [The hook timeline](explanation/hook-timeline.md) — how the event list is derived.
+1. [How capture works](explanation/how-capture-works.md): reading Juju API traffic from inside the agents with eBPF.
+2. [From wire to viewer](explanation/from-wire-to-viewer.md): the probe, the recorder, the index, and what can be lost along the way.
+3. [From RPCs to hooks](explanation/rpcs-to-hooks.md): how RPCs become hooks, state changes, and what the viewer shows.
+
+[Why the wire](explanation/why-the-wire.md) is an aside on why `juju-lens` doesn't use the charm process or the Juju API instead.

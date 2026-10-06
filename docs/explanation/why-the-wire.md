@@ -1,69 +1,25 @@
-# Why the wire, not the charm or the API
+# Why the wire
 
-`juju-lens` reconstructs "what happened" by reading Juju API traffic at the
-TLS boundary inside `jujud`/`containeragent` (see [how capture
-works](how-capture-works.md)). This page explains why that boundary was
-chosen over two plausible alternatives: attaching to the charm's own hook
-process, or watching the Juju API as a client.
+`juju-lens` reads Juju API traffic inside the agent processes, as described in [how capture works](how-capture-works.md). Two other sources look simpler: the charm's own hook processes, and the Juju API used as a client. This page explains why neither works for `juju-lens` on Juju 3.6 or 4.x.
 
-## The three candidate vantage points
+A third option, capturing packets on the network, doesn't work at all: agent traffic is TLS-encrypted, so a packet capture sees only ciphertext. Decrypting it would mean either reading keys out of the agent process, which is a harder version of what `juju-lens` already does, or putting a TLS proxy between the agent and the controller, which means installing certificates on the controller. `juju-lens` doesn't change anything on the machines it records.
 
-| Vantage point | What it sees |
-|---|---|
-| **The Juju API wire** (what `juju-lens` uses) | Every RPC that carries or produces the state in question, at the point it's written or read. |
-| The charm's own hook process | Only the *requests* it makes for that state, not the state itself — see below. |
-| The Juju API, as a client (e.g. the `AllWatcher` model-events stream) | Not usable on the versions this project targets — see below. |
+## The charm's hook process
 
-## Why not the charm process?
+A hook process doesn't hold the state `juju-lens` records. It asks the unit agent for the relation ID, the remote unit, the databag contents, and the status through hook tools like `relation-get` and `status-set`, and the agent makes the actual API calls. Watching the hook process would show that it ran `relation-get`, but the answer would still have to be read from the agent's traffic.
 
-A charm's hook process doesn't independently know the relation id, the
-remote unit, the databag contents, or the model's status — it asks for all
-of that through `jujuc` hook tools (`relation-get`, `status-set`, …), which
-are themselves RPCs to the unit agent. Watching the hook process from
-outside would show *that* it made those calls, not their structured
-content — decoding that content still means understanding the same
-protocol, just from a worse vantage point, and for one that's also:
+The hook process also has two practical problems:
 
-- **Not uniform.** `jujud`/`containeragent` is the same Go build regardless
-  of the charm installed. The hook process can be anything — Python, a
-  shell script, any future charming framework — so instrumenting it means
-  re-solving the problem per charm language, indefinitely.
-- **Short-lived.** A hook process lives for one hook, typically hundreds of
-  milliseconds — attaching per-process is a race. `jujud`/`containeragent`
-  lives for the unit's entire life, so attaching once at record start
-  misses nothing.
+- It can be written in anything: Python with `ops`, a shell script, a future framework. Instrumenting it would mean supporting each language separately. The agent is the same Go binary for every charm.
+- It lives for one hook, often a few hundred milliseconds. Attaching to each one as it starts is a race. The agent runs for the life of the unit, so attaching once when the recording starts is enough.
 
-This follows from the project's scope: `juju-lens` is not a charm profiler,
-and doesn't instrument charm code in any language.
+`juju-lens` isn't a charm profiler, and doesn't instrument charm code.
 
-## Why not the Juju API as a client?
+## The Juju API as a client
 
-The natural-sounding alternative — watch the Juju API's own model-events
-stream (`AllWatcher`) as an admin client — was tried and rejected, because
-it's broken on both versions this project targets:
+Juju has a stream of model changes for clients, the `AllWatcher`. It isn't usable for this:
 
-- **Juju 4.x removed it.** The relevant facades return "not implemented,"
-  and its documented replacement isn't built yet.
-- **Even on 3.6, it doesn't carry relation databag contents.** Databags live
-  behind the Uniter facade, which authenticates unit agents, not admin
-  clients — a one-shot inspection (`juju show-unit`), not a stream.
+- Juju 4.x removed it. Its facades return "not implemented", and the planned replacement doesn't exist yet.
+- On Juju 3.6 it doesn't include relation databag contents. Databags are only available through the `Uniter` facade, which authenticates unit agents, not clients. `juju show-unit` can read a databag once, but there's no stream of changes.
 
-`juju-lens` still uses the Juju API for what it does well and works on both
-versions: `Status()` to bootstrap the inventory, and `WatchDebugLog` for the
-log stream. It just isn't the primary source.
-
-## Why a network-level capture isn't an option either
-
-A true external capture — a network tap, a sidecar packet capture — sees
-only ciphertext, since the traffic is TLS-encrypted end to end. Getting the
-plaintext that way would mean either pulling it out of the process anyway
-(the same uprobe idea, described differently) or terminating TLS in the
-middle, which requires installing trust material on the target — something
-`juju-lens` doesn't do anywhere else, since it only ever attaches read-only
-probes and never changes what's running.
-
-## See also
-
-[How capture works](how-capture-works.md) for the mechanics, and [the
-correlation model](correlation-model.md) for how the captured data is
-stitched back together.
+`juju-lens` does use the Juju API for two things that work on both versions: `juju status` at the start of a recording, to know the initial state of the model, and `juju debug-log`, for logs.

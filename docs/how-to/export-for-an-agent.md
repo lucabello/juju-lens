@@ -1,79 +1,65 @@
-# How to export a recording for an agent
+# How to export a recording for an AI agent
 
-Use this guide to turn a recording into a folder of plain-text artifacts
-meant for an AI agent (or a human skimming in a text editor) to read
-incrementally, instead of ingesting an entire recording or querying SQLite
-directly. The export carries the same hook and failure classification the
-TUI shows — whether a unit was actually broken, or errored and recovered —
-so a reader doesn't have to re-derive it from raw RPC spans.
+Use this guide to export a recording as a folder of plain-text files that an AI agent can read a piece at a time, without querying SQLite. The export includes the hooks, their outcomes, the state they changed, and the logs, so the agent doesn't have to work them out from raw RPCs.
 
 ## Prerequisites
 
-- A recording with a built index (see [how to rebuild the
-  index](rebuild-the-index.md) if you're not sure it's current).
+- A recording with an up-to-date index. If you're not sure, [rebuild the index](rebuild-the-index.md).
 
-## Export the default set of files
+## Export a recording
+
+Pass the recording directory:
 
 ```bash
 juju-lens export ./recordings/my-capture
 ```
 
-This writes to `<recording>/derived/export/` by default (override with
-`--out`):
+The files are written to `derived/export/` in the recording directory. Use `--out` to choose a different directory.
 
 | File | Contents |
 |---|---|
-| `SUMMARY.md` | Orientation: time range, units involved, hook-outcome counts. |
-| `timeline.jsonl` | Events and logs merged, one JSON object per line, chronological — `grep -C` around a line for real context. |
-| `events.jsonl` | The same event lines, without the log volume. |
-| `details/<span_id>.json` | Full detail for one event: statuses set, databag/config diffs, failure explanation. |
-| `report.md` | The same data as one narrated document, for a human. |
-| `AGENTS.md` | A legend naming whichever of the above files are present. |
+| `AGENTS.md` | Instructions for the agent, describing the other files. |
+| `SUMMARY.md` | Time range, units, and how many hooks ended each way. |
+| `timeline.jsonl` | Events and log lines in time order, one JSON object per line. |
+| `events.jsonl` | Events only. |
+| `details/<span_id>.json` | One file per event: the statuses it set, relation data and configuration changes, and failure details. |
+| `report.md` | Everything above as a single document for people to read. |
 
-## Export only some files
+Point your agent at `AGENTS.md`.
+
+To write only some of the files, list them with `--parts`. The parts are `summary`, `timeline`, `events`, `details`, and `report`; `AGENTS.md` is always written.
 
 ```bash
 juju-lens export ./recordings/my-capture --parts summary,report
 ```
 
-Valid values: `summary`, `timeline`, `events`, `details`, `report`.
-
-## Narrow what's in scope
-
-These flags restrict content regardless of which files it lands in:
-
-```bash
-juju-lens export ./recordings/my-capture \
-    --model cos-lite \
-    --unit grafana/0 \
-    --since 2026-08-20T14:00:00Z \
-    --until 2026-08-20T15:00:00Z
-```
-
-`--model` is required if the recording has more than one model. `--unit` is
-repeatable and accepts either a unit or an application name.
-
-## Export only the failures
-
-```bash
-juju-lens export ./recordings/my-capture --errors-only
-```
-
-Restricts to hook runs that ended errored, retried, or with an RPC warning,
-plus one same-unit neighbour on each side for context.
-
-## Export a single document instead of a folder
+To write one JSON or Markdown document to standard output instead of a folder, use `--format`:
 
 ```bash
 juju-lens export ./recordings/my-capture --format json > capture.json
 juju-lens export ./recordings/my-capture --format md > capture.md
 ```
 
-`--format` writes one merged document to stdout and skips the folder
-entirely — useful for piping into another tool.
+## Limit the export
 
-## Next steps
+To export one model, some units, or a time range:
 
-See the full flag list in the [CLI reference](../reference/cli.md#export),
-or [the hook timeline explanation](../explanation/hook-timeline.md) for what
-the failure classification in `report.md` actually means.
+```bash
+juju-lens export ./recordings/my-capture \
+    --model cos \
+    --unit grafana/0 \
+    --since 2026-08-20T14:00:00Z \
+    --until 2026-08-20T15:00:00Z
+```
+
+`--model` is required when the recording has more than one model. `--unit` takes a unit or an application name, and can be repeated.
+
+To export only the hooks that went wrong, with the hook before and after each one on the same unit:
+
+```bash
+juju-lens export ./recordings/my-capture --errors-only
+```
+
+This includes hooks that errored, were retried, or had an RPC error. [From RPCs to hooks](../explanation/rpcs-to-hooks.md#how-a-hook-run-ended) describes each outcome.
+
+For every flag, see the [command line reference](../reference/cli.md#export).

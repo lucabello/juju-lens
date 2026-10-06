@@ -1,48 +1,27 @@
 # How to rebuild a recording's index
 
-Use this guide to regenerate `index.db` from a recording's raw captured
-data. The index is a build artifact, not a source of truth — everything the
-viewer needs can always be reconstructed from `raw/`.
+Use this guide to regenerate `index.db` from a recording's raw data. Rebuild it when:
 
-## Prerequisites
+- A new version of `juju-lens` changed the index schema or how it extracts hooks and state.
+- `index.db` is missing or damaged.
+- The recorder was stopped with [`stop --force`](stop-a-recording.md) and didn't finish indexing.
 
-- A recording directory with a `raw/` tree (any recording produced by
-  `record`, `watch`, or `synth`).
+Rebuilding only reads `raw/`, so it's safe to repeat. See [from wire to viewer](../explanation/from-wire-to-viewer.md#the-index) for why this works.
 
-## When to rebuild
+## Rebuild the index
 
-- You've upgraded `juju-lens` and the SQLite schema changed.
-- The recording was captured with an older build and you want it re-indexed
-  with the current extraction logic.
-- `index.db` is missing, corrupted, or was left stale by a forced
-  [`stop --force`](stop-a-recording.md).
-
-## Rebuild it
+Pass the recording directory:
 
 ```bash
 juju-lens index ./recordings/my-capture
 ```
 
-This reads every captured RPC under `raw/rpc/`, pairs requests with
-responses into spans, extracts derived state (application/unit status,
-databags, and so on), and writes a fresh `index.db` at the recording root.
-It's safe to run repeatedly.
-
-## Merge two model identities
-
-A model created partway through a recording can end up attributed under two
-different identities — its raw model UUID for early RPCs, its model name for
-later logs. `--rename` merges one into the other during rebuild:
+A model created during a recording can appear twice in the viewer: once under its UUID, for RPCs captured before `juju-lens` learned its name, and once under its name. To merge the first into the second, add `--rename` with the old and new names:
 
 ```bash
-juju-lens index ./recordings/my-capture --rename OLD=NEW
+juju-lens index ./recordings/my-capture --rename 0c4a9e1f-1b2c-4d3e-8f5a-6b7c8d9e0f1a=test-charm-x7k2
 ```
 
-This merges `OLD`'s spans, snapshots, and logs into `NEW`, so the viewer
-shows a single model instead of two. `--rename` is repeatable if you need to
-merge more than one pair.
+Repeat `--rename` to merge more than one pair.
 
-## Next steps
-
-See the [SQLite index schema reference](../reference/sqlite-schema.md) for
-what tables get rebuilt, or open the result with `juju-lens view`.
+For every flag, see the [command line reference](../reference/cli.md#index).

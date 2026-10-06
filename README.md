@@ -44,14 +44,14 @@ and already works.
 
 ## Documentation
 
-- [Your first recording](docs/tutorials/first-recording.md) — capture a
-  real Juju controller while a charm's integration tests run against it.
-- [How-to guides](docs/README.md#how-to-guides) — recording, watching,
-  stopping, exporting, or generating a synthetic recording instead.
-- [Reference](docs/README.md#reference) — CLI flags, on-disk layout, SQLite
-  schema, keybindings.
-- [Explanation](docs/README.md#explanation) — how capture works, how a
-  captured byte becomes a viewer row, why this architecture.
+- [Your first recording](docs/tutorials/first-recording.md): record a
+  controller while a charm's integration tests run against it.
+- [How-to guides](docs/README.md#how-to-guides): recording, watching,
+  stopping, exporting, and generating a synthetic recording.
+- [Reference](docs/README.md#reference): command line, recording layout,
+  SQLite schema, keybindings.
+- [Explanation](docs/README.md#explanation): how capture works, and how
+  captured traffic becomes hooks in the viewer.
 
 ## Requirements
 

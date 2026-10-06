@@ -1,62 +1,62 @@
 # How capture works
 
-This page explains where `juju-lens` gets its data from: what it reads,
-where it reads it from inside a running process, and why that's enough to
-see every Juju API call without talking to the Juju API for it. It applies
-to both Juju 3.6 and 4.x, and to machine and Kubernetes controllers alike.
+`juju-lens` records Juju API traffic by reading it out of the memory of the Juju agents themselves, at the moment it passes through Go's TLS library. This page describes that mechanism. It applies to Juju 3.6 and 4.x, and to machine and Kubernetes controllers alike.
 
-## The short version
+Every Juju agent (`jujud` on machines and controllers, `containeragent` in Kubernetes units) talks to the controller over a TLS-encrypted websocket. All the activity `juju-lens` cares about travels over that connection: a unit setting its status, a hook committing relation data, a leadership claim, a secret lookup. On the network this traffic is ciphertext. Inside the agent process it exists as plaintext for a short time: just before Go's `crypto/tls` package encrypts an outgoing write, and just after it decrypts an incoming read.
 
-Every `jujud` process — controller or unit agent, machine or Kubernetes —
-talks to its peers over TLS, using Go's `crypto/tls` package. `juju-lens`
-attaches an eBPF probe to that process and reads the plaintext at the two
-points where it briefly exists unencrypted inside the process: right before
-`crypto/tls` encrypts an outgoing write, and right after it decrypts an
-incoming read. The process itself is never paused, modified, or
-reconfigured to make this possible — the probe only reads memory the
-process already produces as part of doing its normal work.
+`juju-lens` reads the plaintext at those two points. It doesn't use the Juju API to watch the model, and it doesn't touch the charm processes. [Why the wire](why-the-wire.md) compares this with the alternatives.
 
-## What the wire carries
+## Attaching to the agent
 
-Every Juju API call — `Uniter.CommitHookChanges`, `SecretsManager.*`,
-status setters, relation scope changes — goes through this same connection
-as a JSON-over-websocket envelope, self-describing with a request id, a
-facade name, a method name, and (when tracing is configured upstream) a
-trace id. Reading it means seeing every RPC an agent makes or serves,
-verbatim, in order — there's no sampling and nothing needs to be inferred
-from a side effect.
+eBPF is a Linux kernel feature for running small, verified programs inside the kernel in response to events. The kernel checks each program before loading it, so a program can't crash the kernel or loop forever, and it can't write to the memory of the process it observes.
 
-This is also the reason `juju-lens` doesn't use the Juju API itself as its
-main source: the client-facing model-events watcher it would need is
-removed in Juju 4.x, and even on 3.6 it doesn't carry relation databag
-contents. See [why the wire, not the charm or the API](why-the-wire.md) for
-the comparison in full.
+A *uprobe* is one kind of event an eBPF program can attach to: "this process is about to execute the instruction at this address". `juju-lens-probe` places uprobes on two functions inside the agent binary:
 
-## Why the technique survives version upgrades
+- `crypto/tls.(*Conn).Write`, on entry. The buffer argument holds the plaintext about to be encrypted.
+- `crypto/tls.(*Conn).Read`, on entry and on return. The entry probe remembers where the buffer is, and the return probe copies the bytes that were decrypted into it.
 
-`juju-lens` depends on two things: Go's `crypto/tls` (standard library) and
-the JSON wire format Juju's own `rpc/jsoncodec` uses. Neither changes across
-Juju minor versions, so the same uprobe addresses and the same envelope
-decoder work on 3.6 and 4.x without version-specific logic in the capture
-path itself.
+The usual way to hook a function's return is a *uretprobe*, which works by rewriting the return address on the stack. That breaks the Go runtime, which moves goroutine stacks around. Instead, `juju-lens-probe` finds every `RET` instruction in `Read` and attaches an ordinary uprobe to each one.
 
-## How the probe finds its target on a stripped binary
+To place a probe, `juju-lens-probe` needs the address of each function. Production `jujud` binaries are stripped of debug symbols, so the usual symbol table doesn't list them. Every Go binary also carries `.gopclntab`, a table the Go runtime needs for stack traces and garbage collection, which stripping leaves in place, and `juju-lens-probe` reads the addresses from there. [`gojue/ecapture`](https://github.com/gojue/ecapture) uses the same technique.
 
-`jujud` binaries ship stripped in production — no debug symbols. The probe
-still finds `crypto/tls.(*Conn).Write`/`.Read` by reading `.gopclntab`, a
-symbol table every Go binary carries regardless of stripping, and resolving
-the addresses to attach to. This is the same technique used by
-[`gojue/ecapture`](https://github.com/gojue/ecapture), the reference
-implementation for uprobing Go TLS on stripped binaries.
+Each time a probe fires, its eBPF program copies the buffer into a ring buffer shared with userspace. The agent isn't paused or reconfigured, and nothing in it changes. Probes need Linux 5.8 or newer, and `CAP_BPF` or root on the host where the agent runs.
 
-## When capture runs
+Probes exist only while a `juju-lens record` or `juju-lens watch` command runs. They attach when the recorder starts and detach when it stops, whether by `Ctrl-C`, `juju-lens stop`, or a `--max-duration` or `--max-size` limit. There is no background daemon.
 
-Only for the lifetime of one `juju-lens record` (or `watch`) invocation.
-Probes attach when the recorder starts and detach cleanly on `Ctrl-C`,
-`juju-lens stop`, or a configured `--max-duration`/`--max-size` limit —
-there's no always-on daemon, and nothing is captured outside that window.
+## What the plaintext contains
 
-## What's next
+Once the websocket framing is removed, each message is a JSON object in the format of Juju's `rpc/jsoncodec` package. A request and its response share a `request-id`:
 
-Once captured, plaintext bytes still need to become the rows the viewer
-shows. See [from wire to viewer](from-wire-to-viewer.md) for that path.
+```json
+{
+  "request-id": 42,
+  "type": "Uniter",
+  "version": 19,
+  "request": "SetUnitStatus",
+  "params": {"entities": [{"tag": "unit-grafana-0", "status": "active", "info": ""}]}
+}
+```
+
+```json
+{
+  "request-id": 42,
+  "response": {"results": [{}]}
+}
+```
+
+| Field | Present in | Meaning |
+|---|---|---|
+| `request-id` | both | Pairs a response with its request on the same connection. |
+| `type` | request | The API facade, such as `Uniter` or `SecretsManager`. |
+| `version` | request | The facade version. |
+| `request` | request | The method, such as `CommitHookChanges`. |
+| `params` | request | The method arguments. |
+| `response` | response | The result, when the call succeeded. |
+| `error`, `error-code` | response | The failure, when it didn't. |
+| `trace-id`, `span-id` | either | Only present when tracing is enabled in Juju. |
+
+Every request names its facade and method, so `juju-lens` can tell a status change from a relation write without knowing anything about the charm.
+
+This is also why capture works the same on every supported Juju version. It depends on two things: the `crypto/tls` function names, which belong to the Go standard library, and the `rpc/jsoncodec` message format. Neither differs between Juju 3.6 and 4.x. Differences between versions show up in *which* facades and methods appear, and that's handled later, when RPCs are turned into hooks.
+
+[From wire to viewer](from-wire-to-viewer.md) follows the captured bytes from the ring buffer to the recording on disk.
