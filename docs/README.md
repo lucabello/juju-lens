@@ -1,6 +1,6 @@
 # juju-lens documentation
 
-`juju-lens` records what a Juju controller and its models do, and lets you browse the recording offline: hooks, status changes, relation data, and logs on one timeline. For what's implemented today, see the [project README](../README.md).
+`juju-lens` records what a Juju controller and its models do, and lets you browse the recording offline: hooks, status changes, relation data, and logs on one timeline. For installation, see the [project README](../README.md#install).
 
 ## Tutorials
 

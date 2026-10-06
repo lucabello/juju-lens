@@ -465,7 +465,7 @@ func decodeEvent(b []byte, topoCache map[int]Topology) (Frame, bool) {
 // bootNanoToWall converts a bpf_ktime_get_ns() value (CLOCK_MONOTONIC
 // nanoseconds since boot) into a wall-clock unix-nano timestamp using an offset
 // sampled once at startup: wall = monotonic + (wallNow - monotonicNow).
-// VISION §8.1 makes the eBPF clock canonical for RPC spans.
+// The eBPF clock is canonical for RPC spans.
 var bootOffsetNano = sampleBootOffset()
 
 func sampleBootOffset() int64 {

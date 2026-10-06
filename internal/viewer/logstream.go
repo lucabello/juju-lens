@@ -15,7 +15,7 @@ import (
 // timeline event (rendered as a ruler) or a log record. Merging the two by
 // timestamp is deliberately honest about correlation — we place logs next to
 // the events they surround chronologically, and only claim an exact join (the »
-// marker) when a log line literally carries the event's span id (VISION §6.2).
+// marker) when a log line literally carries the event's span id.
 type streamItem struct {
 	ts    time.Time
 	evIdx int           // >= 0 when this item is events[evIdx]; -1 for a log line

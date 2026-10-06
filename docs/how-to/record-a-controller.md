@@ -4,7 +4,7 @@ Use this guide to record the API traffic and logs of a running Juju controller, 
 
 ## Prerequisites
 
-- `juju-lens` and `juju-lens-probe` installed. See [installing](../../README.md#installing).
+- `juju-lens` and `juju-lens-probe` installed. See [install](../../README.md#install).
 - Linux 5.8 or newer, and root or `CAP_BPF`, on the host where the agents run.
 - A Juju client that can reach the controller, using the usual credentials in `~/.local/share/juju` or `$JUJU_DATA`.
 - To record a machine controller remotely: `juju-lens-probe` installed on the controller machine, in the `$PATH` of root. `juju-lens` doesn't copy it there.

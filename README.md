@@ -1,147 +1,68 @@
 # juju-lens
 
-A time machine for Juju controllers. `juju-lens` records everything a Juju
-controller and its models emit, then plays it back offline in a TUI where
-events, state changes, and logs are correlated by time and by trace.
+`juju-lens` records what a Juju controller and its models do, and lets you browse the recording offline. It shows the hooks each unit ran, the status and relation data they changed, and the logs written at the time, all on one timeline.
 
-See [`docs/`](./docs/README.md) for how it works and how to use it, and
-[VISION.md](./VISION.md) for the full long-term design — this README covers
-what's implemented today.
+It reads Juju API traffic from inside the Juju agents with read-only eBPF probes, so it works with any charm and doesn't change anything on the controller. It supports Juju 3.6 and 4.x, on machine and Kubernetes controllers.
 
-## Status
+## Install
 
-Working:
-
-- **`juju-lens record`** attaches a read-only eBPF probe to a `jujud`/
-  `containeragent` process — locally, or on a machine controller over `juju
-  ssh` — and captures Juju API RPCs plus `juju debug-log`, Kubernetes
-  workload-container logs, and machine journald. It never mutates the
-  controller. See [how to record a controller](docs/how-to/record-a-controller.md).
-- **`juju-lens watch`** does the same, live: record and view in one command,
-  so you can follow hooks, status, and relations in real time. See [how to
-  watch a live model](docs/how-to/watch-a-live-model.md).
-- **`juju-lens stop`** signals a running recorder to shut down cleanly. See
-  [how to stop a recording](docs/how-to/stop-a-recording.md).
-- **`juju-lens index`** rebuilds the SQLite index from raw captured data.
-  See [how to rebuild the index](docs/how-to/rebuild-the-index.md).
-- **`juju-lens view`** opens a recording in a bubbletea TUI: Events and
-  Status side by side, Logs spanning beneath, all synchronised to the
-  selected instant. See the [viewer keybindings
-  reference](docs/reference/viewer-keybindings.md).
-- **`juju-lens export`** writes a recording's derived narrative — hook runs
-  with failure classification, the state they changed, correlated logs — as
-  a folder meant for an agent to read incrementally. See [how to export for
-  an agent](docs/how-to/export-for-an-agent.md).
-- **`juju-lens synth trivial`** writes a byte-for-byte reproducible
-  synthetic recording, for trying the tool with no Juju controller at all.
-  See [how to generate a synthetic recording](docs/how-to/generate-a-synthetic-recording.md).
-
-Kubernetes-native probe attach (`kubectl-debug`, `daemonset` — capturing a
-CAAS unit's own RPC traffic) is designed in VISION.md but not yet built;
-`record`/`watch` currently support `--attach local` and `--attach ssh`
-only. Kubernetes *log* ingestion (workload-container stdout) is unaffected
-and already works.
-
-## Documentation
-
-- [Your first recording](docs/tutorials/first-recording.md): record a
-  controller while a charm's integration tests run against it.
-- [How-to guides](docs/README.md#how-to-guides): recording, watching,
-  stopping, exporting, and generating a synthetic recording.
-- [Reference](docs/README.md#reference): command line, recording layout,
-  SQLite schema, keybindings.
-- [Explanation](docs/README.md#explanation): how capture works, and how
-  captured traffic becomes hooks in the viewer.
-
-## Requirements
-
-- **Go** ≥ 1.25.
-- **just** (recipe runner) — install from
-  [github.com/casey/just](https://github.com/casey/just).
-
-## Installing
+Install the latest release of `juju-lens` and `juju-lens-probe`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lucabello/juju-lens/main/install.sh | sh
 ```
 
-Downloads and verifies the latest release from
-[GitHub Releases](https://github.com/lucabello/juju-lens/releases) and
-installs `juju-lens` + `juju-lens-probe` to `/usr/local/bin` (or
-`~/.local/bin` if that isn't writable). Only `linux/amd64` and
-`linux/arm64` are published — `juju-lens-probe` is eBPF-based and only
-functions on Linux; see [Just recipes](#just-recipes) below to build from
-source on other platforms (dev/TUI use only). Set `JUJU_LENS_VERSION` to
-pin a specific release, or `JUJU_LENS_INSTALL_DIR` to change where the
-binaries go.
+The script installs to `/usr/local/bin`, or `~/.local/bin` if that isn't writable. Set `JUJU_LENS_VERSION` to install a specific release, or `JUJU_LENS_INSTALL_DIR` to choose the directory. Releases are published for Linux on `amd64` and `arm64`.
 
-Releases are cut by pushing a tag (`git tag v0.1.0 && git push origin
-v0.1.0`); a GitHub Actions workflow builds and publishes from there — see
-`.github/workflows/release.yml`.
-
-Prefer to build it yourself? `go install
-github.com/lucabello/juju-lens/cmd/juju-lens@latest` (and, separately,
-`.../cmd/juju-lens-probe@latest`) works with just a Go toolchain, no
-release infrastructure involved.
-
-## Getting started
+To build from source instead, you need Go 1.25 or newer:
 
 ```bash
-just build   # → ./bin/juju-lens and ./bin/juju-lens-probe
-just demo    # generate a synthetic recording and open it in the viewer
+# install both binaries at once
+go install github.com/lucabello/juju-lens/cmd/...@latest
+
+# or, equivalently, one at a time
+go install github.com/lucabello/juju-lens/cmd/juju-lens@latest
+go install github.com/lucabello/juju-lens/cmd/juju-lens-probe@latest
 ```
 
-That's the fastest way to see the viewer, with a fabricated recording and
-no Juju controller involved. For a walkthrough that captures a real
-deployment instead, see the [first-recording
-tutorial](docs/tutorials/first-recording.md).
+Either way, the binaries go into `$GOBIN` (by default `~/go/bin`).
 
-## Repository layout
+Recording needs Linux 5.8 or newer, and root or `CAP_BPF`, on the host where the Juju agents run. Viewing a recording works anywhere `juju-lens` builds.
 
-```
-cmd/juju-lens/        # tiny main; delegates to internal/cli
-cmd/juju-lens-probe/  # standalone eBPF probe binary (TLS-boundary capture)
-internal/cli/         # cobra subcommands (record, watch, stop, synth, index, view, export, version)
-internal/probe/       # eBPF attach + frame protocol + symbol resolution + ingest
-internal/wire/        # Juju RPC envelope, websocket reassembly, capture format
-internal/index/       # SQLite index: schema, span/snapshot writers, extractors
-internal/recording/   # on-disk layout, manifest, rotating writer, span reader, pid file
-internal/narrative/   # derives hook runs/failure state/status attribution from spans
-internal/synth/       # deterministic RPC scenario generator
-internal/viewer/      # bubbletea TUI (Events + Status + Logs, model picker)
-internal/export/      # writes the derived-narrative export folder
-docs/                 # user documentation (tutorials, how-to, reference, explanation)
-VISION.md             # full design document
-justfile              # build / test / run / demo recipes
+## Use
+
+Record the current controller until you press `Ctrl-C`:
+
+```bash
+sudo juju-lens record my-capture
 ```
 
-## Recording on disk
+Then open the recording:
 
-A recording is a plain directory; nothing is compressed, and the SQLite
-index is a rebuildable build artifact. See the [recording layout
-reference](docs/reference/recording-layout.md) for the full breakdown.
-
-## Just recipes
-
+```bash
+juju-lens view ./recordings/<timestamp>--my-capture
 ```
-just build        # → ./bin/juju-lens
-just install      # go install into $GOBIN
-just release      # linux/amd64 + linux/arm64 archives + checksums → ./dist/
-just run -- version
-just record my-controller
-just stop /path/to/recording  # SIGTERM the background recorder
-just synth trivial /tmp/rec
-just index /tmp/rec           # rebuild index.db from raw/
-just view /tmp/rec
-just demo         # synth + open in the viewer
-just test         # go test -race -count=1 ./...
-just coverage
-just check        # format + lint + test
-just format       # gofmt + go mod tidy
-just lint         # go vet, staticcheck, govulncheck (skipped if not installed)
-just update       # go get -u ./...
-just clean
+
+To record and view at the same time, use `sudo juju-lens watch <model>`.
+
+[Your first recording](docs/tutorials/first-recording.md) walks through a full example. The [documentation](docs/README.md) covers the rest, including how capture works.
+
+## Limitations
+
+- Kubernetes controllers can only be recorded from the host they run on, such as a local MicroK8s. Recording a remote Kubernetes cluster isn't supported yet.
+- Machine controllers can be recorded remotely over `juju ssh`, but `juju-lens-probe` must already be installed on the controller machine.
+
+## Develop
+
+The repository uses [`just`](https://github.com/casey/just) for common tasks:
+
+```bash
+just build   # build ./bin/juju-lens and ./bin/juju-lens-probe
+just demo    # generate a synthetic recording and open it
+just check   # format, lint, and test
 ```
+
+Run `just` to list every recipe. To publish a release, push a `vX.Y.Z` tag; GitHub Actions builds the binaries and attaches them to a GitHub release.
 
 ## License
 

@@ -18,7 +18,7 @@ import (
 // tree. It remembers how far it has consumed each raw file, so repeated Sync
 // calls only process newly-appended bytes — this is what lets `record` keep the
 // index fresh while capturing, and `view --follow` tail a live recording,
-// instead of re-indexing the whole recording each time (VISION M5).
+// instead of re-indexing the whole recording each time.
 //
 // It carries the pairing and per-unit hook state across Syncs so a request in
 // one file/tick pairs with its response in a later one, and so a hook that

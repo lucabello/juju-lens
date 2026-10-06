@@ -17,7 +17,7 @@ import (
 // We implement just enough of RFC 6455 to read Juju's traffic: text/binary
 // data frames, continuation frames, client-side masking, and skipping control
 // frames (ping/pong/close). Juju never uses permessage-deflate on the API
-// socket today; if that changes the inflate step slots in here (see VISION §12).
+// socket today; if that changes the inflate step slots in here.
 
 // maxMessageBytes caps a single reassembled websocket message. Juju RPC
 // messages are small (databags, status); anything larger is almost certainly a

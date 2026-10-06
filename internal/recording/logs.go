@@ -14,7 +14,7 @@ import (
 )
 
 // LogRecord is one parsed line of a log stream. It is the "log observation" in
-// the correlation model (VISION §7): a text line attributed to a unit and a
+// the correlation model: a text line attributed to a unit and a
 // time, joined to spans by span-id when present or by (unit, time-window)
 // otherwise. The raw text lines remain the source of truth under raw/; the
 // LogRecord is derived and rebuildable.

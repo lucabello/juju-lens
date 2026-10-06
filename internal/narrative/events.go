@@ -22,7 +22,7 @@ import (
 )
 
 // Event is a meaningful timeline transition. The default timeline shows one
-// thing: the Juju hooks a unit ran (VISION §6.2; docs/explanation/rpcs-to-hooks.md),
+// thing: the Juju hooks a unit ran (docs/explanation/rpcs-to-hooks.md),
 // one row per hook execution — from the run-hook marker to the matching
 // continue — carrying the hook's duration.
 //

@@ -10,7 +10,7 @@ import (
 // This file builds the eBPF programs juju-lens-probe attaches at the crypto/tls
 // boundary. The programs are assembled in Go (via cilium/ebpf's asm package)
 // rather than compiled from C, so the module builds with no clang/libbpf
-// toolchain — matching VISION's "pure Go" constraint.
+// toolchain, keeping the build pure Go.
 //
 // Register layout (amd64, Go internal ABI): integer arguments are passed in
 // RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11 and integer results start in RAX.
@@ -21,8 +21,7 @@ import (
 //	RCX = b.len                  -> buffer length (Write: bytes to send)
 //	RAX (at return) = n          -> bytes actually read (Read)
 //
-// These offsets are the current-toolchain row of the per-Go-version table
-// VISION §5.1 describes; a toolchain bump that changes the register ABI adds a
+// These offsets are for the current Go toolchain; a toolchain bump that changes the register ABI adds a
 // new row here. pt_regs offsets are the stable x86_64 kernel layout.
 const (
 	// x86_64 struct pt_regs byte offsets.
