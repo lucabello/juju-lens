@@ -134,6 +134,18 @@ func TestRunSinkReportsAttachStatus(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- runSink(AttachConfig{Out: pw}, frames, &drops, status, nil, time.Hour) }()
 
+	// A first scan that finds nothing is still reported: it is how the
+	// recorder knows this probe supports readiness (AC10).
+	status.set(0)
+	select {
+	case got := <-gotCh:
+		if got.Attached != 0 || got.Drops != 0 || len(got.Data) != 0 {
+			t.Fatalf("want status frame with Attached=0, got %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for zero attach-status frame")
+	}
+
 	status.set(2)
 	select {
 	case got := <-gotCh:

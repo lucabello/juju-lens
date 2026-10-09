@@ -34,7 +34,7 @@ dir=<absolute recording directory>
 pid=<recorder process ID>
 ```
 
-If the recorder exits or doesn't become ready within `--detach-timeout`, `record` stops it, removes `recorder.pid`, and exits 1 with the cause and the end of `recorder.log` on standard error. See [how to record a controller in CI](../how-to/record-in-ci.md).
+If the recorder exits or doesn't become ready within `--detach-timeout`, `record` stops it, removes `recorder.pid`, and exits 1 with the cause and the end of `recorder.log` on standard error. A probe that never reports its attach status is too old for `--detach`; the error says so, and upgrading `juju-lens-probe` on the target fixes it. See [how to record a controller in CI](../how-to/record-in-ci.md).
 
 ## `watch`
 

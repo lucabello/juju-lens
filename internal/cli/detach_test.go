@@ -47,7 +47,9 @@ func TestMain(m *testing.M) {
 
 // runFakeProbe stands in for juju-lens-probe. "attach" reports one attached
 // agent and then streams an RPC frame every 50ms until killed; "fail" exits
-// like a probe that can't attach; "none" runs but attaches to nothing.
+// like a probe that can't attach; "none" runs and reports attaching to
+// nothing; "old" runs but, like a probe predating attach-status frames,
+// never reports anything.
 func runFakeProbe() {
 	switch os.Getenv(fakeProbeEnv) {
 	case "attach":
@@ -57,14 +59,43 @@ func runFakeProbe() {
 			time.Sleep(50 * time.Millisecond)
 			_ = probe.WriteFrame(os.Stdout, probe.Frame{TsUnixNano: time.Now().UnixNano(), PID: 4242, Dir: "write", Data: []byte("x")})
 		}
+	case "rpc":
+		emit := func(dir string, data []byte) {
+			_ = probe.WriteFrame(os.Stdout, probe.Frame{TsUnixNano: time.Now().UnixNano(), PID: 4242, Conn: 1, Unit: "grafana/0", Dir: dir, Data: data})
+		}
+		_ = probe.WriteFrame(os.Stdout, probe.Frame{TsUnixNano: time.Now().UnixNano(), Attached: 1})
+		emit("write", []byte("GET /model/12345678-1234-1234-1234-1234567890ab/api HTTP/1.1\r\n\r\n"))
+		emit("read", []byte("HTTP/1.1 101 Switching Protocols\r\n\r\n"))
+		for id := 1; ; id++ {
+			time.Sleep(20 * time.Millisecond)
+			emit("write", wsText(fmt.Sprintf(`{"request-id":%d,"type":"Uniter","request":"SetStatus","params":{}}`, id), true))
+			emit("read", wsText(fmt.Sprintf(`{"request-id":%d,"response":{}}`, id), false))
+		}
 	case "fail":
 		fmt.Fprintln(os.Stderr, "juju-lens-probe: loading eBPF collection: operation not permitted")
 		os.Exit(1)
+	case "none":
+		_ = probe.WriteFrame(os.Stdout, probe.Frame{TsUnixNano: time.Now().UnixNano()})
+		fallthrough
 	default:
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 		defer stop()
 		<-ctx.Done()
 	}
+}
+
+// wsText builds a single short websocket text frame, masked as a client's.
+func wsText(payload string, mask bool) []byte {
+	b := []byte{0x81}
+	if !mask {
+		return append(append(b, byte(len(payload))), payload...)
+	}
+	key := []byte{1, 2, 3, 4}
+	b = append(append(b, 0x80|byte(len(payload))), key...)
+	for i := range len(payload) {
+		b = append(b, payload[i]^key[i&3])
+	}
+	return b
 }
 
 // detachEnv sets up a fake probe and a failing `juju` on PATH (so scope
@@ -227,6 +258,30 @@ func TestDetachMaxDuration(t *testing.T) {
 	}
 }
 
+// TestDetachMaxSize covers the --max-size cap on a detached recorder.
+func TestDetachMaxSize(t *testing.T) {
+	probePath := detachEnv(t, "rpc")
+	dir := filepath.Join(t.TempDir(), "rec")
+	out, err := runCLI(t, "record", "--detach", "--attach=local", "--probe-path", probePath, "-o", dir, "--max-size=2000", "ci-run")
+	if err != nil {
+		t.Fatalf("record --detach: %v", err)
+	}
+	dir, pid := parseDetachOutput(t, out)
+	t.Cleanup(func() {
+		if recording.PidAlive(pid) {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+	})
+	waitGone(t, pid, 20*time.Second)
+	man, err := recording.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if man.EndReason != recording.EndReasonMaxSize {
+		t.Fatalf("end_reason = %q, want %q", man.EndReason, recording.EndReasonMaxSize)
+	}
+}
+
 // assertNothingLeft checks a failed --detach left no recorder or pid file.
 func assertNothingLeft(t *testing.T, dir string) {
 	t.Helper()
@@ -271,11 +326,34 @@ func TestDetachTimeout(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "rec")
 	start := time.Now()
 	_, err := runCLI(t, "record", "--detach", "--detach-timeout=1s", "--attach=local", "--probe-path", probePath, "-o", dir, "ci-run")
-	if err == nil || !strings.Contains(err.Error(), "--detach-timeout 1s") {
-		t.Fatalf("want a timeout error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "--detach-timeout 1s") || !strings.Contains(err.Error(), "attached to no agent process") {
+		t.Fatalf("want a no-targets timeout error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "too old") {
+		t.Fatalf("a probe that reported status must not be called too old: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("timeout took %s", elapsed)
+	}
+	assertNothingLeft(t, dir)
+}
+
+// TestDetachTimeoutOldProbe covers AC10: a probe that never sends an
+// attach-status frame gets an upgrade hint, not the no-targets message.
+func TestDetachTimeoutOldProbe(t *testing.T) {
+	probePath := detachEnv(t, "old")
+	dir := filepath.Join(t.TempDir(), "rec")
+	_, err := runCLI(t, "record", "--detach", "--detach-timeout=1s", "--attach=local", "--probe-path", probePath, "-o", dir, "ci-run")
+	if err == nil {
+		t.Fatal("want a timeout error")
+	}
+	for _, want := range []string{"--detach-timeout 1s", "too old", "upgrade juju-lens-probe"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q:\n%v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "attached to no agent process") {
+		t.Fatalf("old-probe error reused the no-targets message: %v", err)
 	}
 	assertNothingLeft(t, dir)
 }

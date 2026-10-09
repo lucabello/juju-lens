@@ -45,7 +45,9 @@ type Frame struct {
 	// whenever it changes. Uprobes are in place before the frame is queued,
 	// so a recorder that has read Attached>0 is already capturing: this is
 	// the readiness signal `record --detach` waits for. Older recorders see
-	// an empty stats frame and skip it.
+	// an empty stats frame and skip it. A frame with no Data and no Drops is
+	// an attach-status frame even when Attached is 0: the probe sends one
+	// after its first scan whatever it found.
 	Attached int `json:"attached,omitempty"`
 }
 

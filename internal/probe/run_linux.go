@@ -218,7 +218,10 @@ func runSink(cfg AttachConfig, frames <-chan Frame, queueDrops *atomic.Uint64, s
 	if status != nil && cfg.OnFrame == nil {
 		statusCh = status.changed
 	}
-	lastAttached := 0
+	// -1 so the first count is always sent, even 0: any attach-status frame
+	// tells the recorder this probe speaks the readiness protocol, which is
+	// how `record --detach` tells "no targets" from "probe too old".
+	lastAttached := -1
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	var lastReported uint64 // queueDrops is cumulative (Ingest's onDrops contract); only emit on change

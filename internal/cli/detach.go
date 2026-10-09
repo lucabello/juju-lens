@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -32,22 +33,35 @@ const readyFD = 3
 // attached. Anything else, including EOF, means it didn't get there.
 const readyLine = "ready"
 
+// statusLine is what the daemon writes on the readiness pipe on the probe's
+// first attach-status frame, before it has necessarily attached to anything.
+// It lets the parent tell a probe that found no agents from one too old to
+// send status frames at all, which would otherwise time out identically.
+const statusLine = "status"
+
 // logTailLines bounds how much of recorder.log a failed --detach prints.
 const logTailLines = 20
 
-// readySignaller returns the daemon's onAttached callback: on the first call
-// it tells the waiting parent the recorder is capturing, then closes the pipe.
-// The parent never sees "ready" unless the probe has reported an attached
-// agent, so a probe that attaches to nothing ends in a timeout, not a false
-// success.
+// readySignaller returns the daemon's onAttached callback. On the first call
+// it tells the waiting parent the probe speaks the readiness protocol; on the
+// first call with n>0 it tells it the recorder is capturing, then closes the
+// pipe. The parent never sees "ready" unless the probe has reported an
+// attached agent, so a probe that attaches to nothing ends in a timeout, not
+// a false success.
 func readySignaller() func(int) {
-	var once sync.Once
+	var statusOnce, readyOnce sync.Once
+	var pipe *os.File
 	return func(n int) {
-		once.Do(func() {
-			pipe := os.NewFile(readyFD, "ready-pipe")
-			if pipe == nil {
-				return
+		statusOnce.Do(func() {
+			pipe = os.NewFile(readyFD, "ready-pipe")
+			if pipe != nil {
+				_, _ = fmt.Fprintln(pipe, statusLine)
 			}
+		})
+		if n == 0 || pipe == nil {
+			return
+		}
+		readyOnce.Do(func() {
 			fmt.Fprintf(os.Stderr, "juju-lens: probe attached to %d agent process(es); recorder ready\n", n)
 			_, _ = fmt.Fprintln(pipe, readyLine)
 			_ = pipe.Close()
@@ -120,9 +134,24 @@ func runDetached(cmd *cobra.Command, name string, f recordFlags) error {
 	exited := make(chan error, 1)
 	go func() { exited <- child.Wait() }()
 	ready := make(chan bool, 1)
+	var sawStatus atomic.Bool
 	go func() {
-		line, _ := bufio.NewReader(readR).ReadString('\n')
-		ready <- strings.TrimSpace(line) == readyLine
+		br := bufio.NewReader(readR)
+		for {
+			line, err := br.ReadString('\n')
+			switch strings.TrimSpace(line) {
+			case statusLine:
+				sawStatus.Store(true)
+				continue
+			case readyLine:
+				ready <- true
+				return
+			}
+			if err != nil {
+				ready <- false
+				return
+			}
+		}
 	}()
 
 	fail := func(format string, args ...any) error {
@@ -139,6 +168,9 @@ func runDetached(cmd *cobra.Command, name string, f recordFlags) error {
 	case <-time.After(f.detachTimeout):
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		<-exited
+		if !sawStatus.Load() {
+			return fail("detached recorder (pid %d) not ready after --detach-timeout %s: the probe never reported its attach status, so it may be too old to support --detach; upgrade juju-lens-probe on the target machines (plain `record` still works with it); killed it", pid, f.detachTimeout)
+		}
 		return fail("detached recorder (pid %d) not ready after --detach-timeout %s: the probe attached to no agent process; killed it", pid, f.detachTimeout)
 	}
 

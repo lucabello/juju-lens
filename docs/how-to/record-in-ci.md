@@ -28,7 +28,9 @@ If the recorder fails to start, the command exits non-zero and prints the cause 
 juju-lens record --detach ci-run --ssh-target controller/0 --detach-timeout 2m -o ./recording
 ```
 
-In both cases no recorder is left running and no `recorder.pid` is left behind.
+If the error says the probe may be too old to support `--detach`, the probe never reported its attach status. To use `record --detach` in ssh mode, upgrade `juju-lens-probe` on the controller machines. Older probes cause `--detach` to fail after `--detach-timeout`. Plain `record` is unaffected.
+
+In all these cases no recorder is left running and no `recorder.pid` is left behind.
 
 To read the output in a script:
 

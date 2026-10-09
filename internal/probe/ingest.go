@@ -26,8 +26,8 @@ type NameResolver func(controllerUUID, modelUUID string) (controllerName, modelN
 // reported by the probe so the recorder can record gap intervals.
 //
 // onAttached, if non-nil, is called with the probe's attached-process count
-// whenever it reports a nonzero one. Every frame read after the first call
-// was captured with the uprobes in place.
+// on every attach-status frame, including ones reporting 0. Every frame read
+// after a call with n>0 was captured with the uprobes in place.
 func Ingest(
 	ctx context.Context,
 	r io.Reader,
@@ -55,7 +55,7 @@ func Ingest(
 		if f.Drops > 0 && onDrops != nil {
 			onDrops(f.Drops)
 		}
-		if f.Attached > 0 && onAttached != nil {
+		if len(f.Data) == 0 && f.Drops == 0 && onAttached != nil {
 			onAttached(f.Attached)
 		}
 		if len(f.Data) == 0 {

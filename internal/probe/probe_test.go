@@ -122,6 +122,25 @@ func TestIngestEndToEnd(t *testing.T) {
 	}
 }
 
+// TestIngestReportsAttachStatus checks onAttached fires for every
+// attach-status frame, including a zero count, but not for drop-stats frames.
+func TestIngestReportsAttachStatus(t *testing.T) {
+	var stream bytes.Buffer
+	for _, f := range []Frame{{Attached: 0}, {Drops: 3}, {Attached: 2}} {
+		if err := WriteFrame(&stream, f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []int
+	err := Ingest(context.Background(), &stream, nil, func(wire.CapturedMessage) error { return nil }, nil, func(n int) { got = append(got, n) })
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	if len(got) != 2 || got[0] != 0 || got[1] != 2 {
+		t.Fatalf("onAttached calls = %v, want [0 2]", got)
+	}
+}
+
 // ws builds a single masked/unmasked text frame carrying payload.
 func ws(t *testing.T, payload string, mask bool) []byte {
 	t.Helper()
