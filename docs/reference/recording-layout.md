@@ -6,6 +6,7 @@ The files and directories in a recording. [From wire to viewer](../explanation/f
 recordings/2026-07-03T14-30-12--my-capture/
 ├── manifest.json
 ├── recorder.pid
+├── recorder.log
 ├── index.db
 ├── raw/
 │   ├── rpc/<model>/calls-<hour>.jsonl
@@ -26,6 +27,7 @@ recordings/2026-07-03T14-30-12--my-capture/
 |---|---|
 | `manifest.json` | The `juju-lens` version that wrote the recording; the controller's name, UUID, and version; the models recorded; the attach mode and targets; start and end times; why the recording ended; and the status of each data source. |
 | `recorder.pid` | The process ID of the running recorder, used by [`juju-lens stop`](../how-to/stop-a-recording.md). Removed when the recorder exits normally. |
+| `recorder.log` | The recorder's output, including the probe's. Written only by recorders started with [`record --detach`](../how-to/record-in-ci.md). Appended to, never rotated. |
 | `index.db` | A SQLite database in WAL mode, built from `raw/`. The viewer reads only this file. See the [SQLite index schema](sqlite-schema.md). |
 | `derived/export/` | The default output directory of [`juju-lens export`](../how-to/export-for-an-agent.md). |
 

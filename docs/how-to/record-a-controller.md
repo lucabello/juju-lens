@@ -55,6 +55,8 @@ sudo juju-lens record my-capture --debug-log=false --k8s-log=false --machine-log
 
 Press `Ctrl-C`. If the recorder runs in the background, see [how to stop a running recording](stop-a-recording.md). Either way, `juju-lens` detaches from the agents, writes the manifest, and finishes building the index.
 
+To record in the background from a CI job or script, see [how to record a controller in CI](record-in-ci.md).
+
 For unattended recordings, set a limit when you start, and the recorder stops by itself after a time or once the raw data reaches a size in bytes:
 
 ```bash

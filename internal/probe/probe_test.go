@@ -107,7 +107,7 @@ func TestIngestEndToEnd(t *testing.T) {
 	err := Ingest(context.Background(), &stream, nil, func(cm wire.CapturedMessage) error {
 		got = append(got, cm)
 		return nil
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}

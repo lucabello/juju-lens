@@ -22,9 +22,10 @@ import (
 const maxFrameBytes = 64 << 20
 
 // Frame is one captured chunk of plaintext at the TLS boundary, or a periodic
-// stats frame reporting ring-buffer drops. Data is base64-encoded by
-// encoding/json automatically. A frame with len(Data)==0 and Drops>0 is a
-// pure stats frame.
+// stats frame reporting ring-buffer drops or attach status. Data is
+// base64-encoded by encoding/json automatically. A frame with len(Data)==0 is
+// a pure stats frame: Drops>0 reports loss, Attached>0 reports how many agent
+// processes the probe currently has uprobes on.
 type Frame struct {
 	TsUnixNano int64  `json:"ts"`
 	PID        int    `json:"pid"`
@@ -40,6 +41,12 @@ type Frame struct {
 	Unit       string `json:"unit,omitempty"`       // unit name, e.g. "grafana/0"
 	Data       []byte `json:"data,omitempty"`
 	Drops      uint64 `json:"drops,omitempty"` // ring-buffer records lost since the last frame
+	// Attached is the number of agent processes with live uprobes, sent
+	// whenever it changes. Uprobes are in place before the frame is queued,
+	// so a recorder that has read Attached>0 is already capturing: this is
+	// the readiness signal `record --detach` waits for. Older recorders see
+	// an empty stats frame and skip it.
+	Attached int `json:"attached,omitempty"`
 }
 
 // TopoFilter restricts which agent processes the probe attaches to, by the

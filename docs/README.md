@@ -9,6 +9,7 @@
 ## How-to guides
 
 - [Record a Juju controller](how-to/record-a-controller.md)
+- [Record a controller in CI](how-to/record-in-ci.md)
 - [Watch a live model](how-to/watch-a-live-model.md)
 - [Stop a running recording](how-to/stop-a-recording.md)
 - [Rebuild a recording's index](how-to/rebuild-the-index.md)

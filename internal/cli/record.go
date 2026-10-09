@@ -36,6 +36,12 @@ type recordFlags struct {
 	machineLog  bool
 	maxDuration time.Duration
 	maxSize     int64
+
+	detach        bool
+	detachTimeout time.Duration
+	// detachedChild marks the re-executed daemon started by --detach. It
+	// reports readiness on readyFD and ignores SIGHUP.
+	detachedChild bool
 }
 
 func newRecordCmd() *cobra.Command {
@@ -64,6 +70,12 @@ machine journald for IAAS models ('juju ssh … journalctl'). Disable any of
 them with --debug-log=false / --k8s-log=false / --machine-log=false.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("detach-timeout") && !f.detach {
+				return errors.New("--detach-timeout requires --detach")
+			}
+			if f.detach {
+				return runDetached(cmd, args[0], *f)
+			}
 			return runRecord(cmd.Context(), args[0], *f)
 		},
 	}
@@ -79,10 +91,20 @@ them with --debug-log=false / --k8s-log=false / --machine-log=false.`,
 	cmd.Flags().BoolVar(&f.machineLog, "machine-log", true, "also stream machine journald for IAAS models ('juju ssh … journalctl')")
 	cmd.Flags().DurationVar(&f.maxDuration, "max-duration", 0, "stop recording after this duration (0 = no limit)")
 	cmd.Flags().Int64Var(&f.maxSize, "max-size", 0, "stop recording after this many bytes of raw/ (0 = no limit)")
+	cmd.Flags().BoolVar(&f.detach, "detach", false, "run the recorder in the background; return once the probe has attached, printing the recording dir and pid")
+	cmd.Flags().DurationVar(&f.detachTimeout, "detach-timeout", 30*time.Second, "with --detach, fail if the probe hasn't attached within this long")
+	cmd.Flags().BoolVar(&f.detachedChild, detachedChildFlag, false, "internal: set on the daemon started by --detach")
+	_ = cmd.Flags().MarkHidden(detachedChildFlag)
 	return cmd
 }
 
 func runRecord(ctx context.Context, name string, f recordFlags) error {
+	if f.detachedChild {
+		// The readiness pipe arrives without close-on-exec; keep it out of
+		// the probe and log subprocesses so the parent sees EOF as soon as
+		// this process dies, not when its last child does.
+		syscall.CloseOnExec(readyFD)
+	}
 	if f.output == "" {
 		f.output = filepath.Join("recordings", recording.SuggestedDirName(name, time.Now()))
 	}
@@ -268,7 +290,15 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 
 	endReason := recording.EndReasonUnknown
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	if f.detachedChild {
+		// A daemon has no terminal to hang up; a stray SIGHUP (for example
+		// from a CI runner tearing down the step's process tree) must not
+		// end the recording. Only `stop` (SIGTERM) and the caps do.
+		signal.Ignore(syscall.SIGHUP)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	} else {
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	}
 	defer signal.Stop(sigCh)
 	go func() {
 		select {
@@ -320,7 +350,11 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 		totalDrops = n
 		fmt.Fprintf(os.Stderr, "juju-lens: probe reports %d frames dropped so far (it's falling behind — see docs/explanation/from-wire-to-viewer.md#limitations)\n", n)
 	}
-	ingestErr := probe.Ingest(ctx, stdout, resolver, w.sink, onDrops)
+	var onAttached func(int)
+	if f.detachedChild {
+		onAttached = readySignaller()
+	}
+	ingestErr := probe.Ingest(ctx, stdout, resolver, w.sink, onDrops, onAttached)
 	cancel()
 	if totalDrops > 0 {
 		fmt.Fprintf(os.Stderr, "juju-lens: recording finished with %d frames dropped by the probe; some hooks may show a \"capture gap\"\n", totalDrops)

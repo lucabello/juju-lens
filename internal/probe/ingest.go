@@ -24,12 +24,17 @@ type NameResolver func(controllerUUID, modelUUID string) (controllerName, modelN
 //
 // onDrops, if non-nil, is called with the cumulative ring-buffer drop count
 // reported by the probe so the recorder can record gap intervals.
+//
+// onAttached, if non-nil, is called with the probe's attached-process count
+// whenever it reports a nonzero one. Every frame read after the first call
+// was captured with the uprobes in place.
 func Ingest(
 	ctx context.Context,
 	r io.Reader,
 	resolve NameResolver,
 	sink func(wire.CapturedMessage) error,
 	onDrops func(total uint64),
+	onAttached func(n int),
 ) error {
 	demuxes := map[connKey]*wire.ConnDemux{}
 	// suppressed remembers, per connection, the request-ids of RPCs we dropped
@@ -49,6 +54,9 @@ func Ingest(
 		}
 		if f.Drops > 0 && onDrops != nil {
 			onDrops(f.Drops)
+		}
+		if f.Attached > 0 && onAttached != nil {
+			onAttached(f.Attached)
 		}
 		if len(f.Data) == 0 {
 			continue // pure stats frame
