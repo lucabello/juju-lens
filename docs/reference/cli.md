@@ -24,6 +24,17 @@ Records a controller into a new recording directory. `<name>` labels the recordi
 | `--machine-log` | `true` | Stream the systemd journal for machine models. |
 | `--max-duration` | no limit | Stop recording after this duration, such as `30m` or `2h`. |
 | `--max-size` | no limit | Stop recording after this many bytes of `raw/`. |
+| `--detach` | `false` | Run the recorder in the background. Return once the probe has attached to at least one agent process. |
+| `--detach-timeout` | `30s` | With `--detach`, fail if the probe hasn't attached within this time. Requires `--detach`. |
+
+With `--detach`, the recorder writes its output to `recorder.log` in the recording directory. When it's ready, `record` exits 0 and prints two lines to standard output:
+
+```text
+dir=<absolute recording directory>
+pid=<recorder process ID>
+```
+
+If the recorder exits or doesn't become ready within `--detach-timeout`, `record` stops it, removes `recorder.pid`, and exits 1 with the cause and the end of `recorder.log` on standard error. A probe that never reports its attach status is too old for `--detach`; the error says so, and upgrading `juju-lens-probe` on the target fixes it. See [how to record a controller in CI](../how-to/record-in-ci.md).
 
 ## `watch`
 

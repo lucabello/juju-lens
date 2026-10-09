@@ -70,7 +70,8 @@ func Run(ctx context.Context, cfg AttachConfig) error {
 	}
 	defer coll.Close()
 
-	tracker := &pidTracker{coll: coll, jujuc: cfg.AttachJujuc, filter: cfg.Filter, logf: logf, attached: map[int][]link.Link{}}
+	status := newAttachStatus()
+	tracker := &pidTracker{coll: coll, jujuc: cfg.AttachJujuc, filter: cfg.Filter, logf: logf, attached: map[int][]link.Link{}, status: status}
 	defer tracker.closeAll()
 
 	if watch {
@@ -130,7 +131,7 @@ func Run(ctx context.Context, cfg AttachConfig) error {
 	frames := make(chan Frame, frameQueueCap)
 	var queueDrops atomic.Uint64
 	sinkDone := make(chan error, 1)
-	go func() { sinkDone <- runSink(cfg, frames, &queueDrops, logf, dropStatsInterval) }()
+	go func() { sinkDone <- runSink(cfg, frames, &queueDrops, status, logf, dropStatsInterval) }()
 
 	topoCache := map[int]Topology{}
 	err = func() error {
@@ -189,7 +190,7 @@ const dropStatsInterval = 2 * time.Second
 // buffering/flushing/drop-reporting logic is unit-testable without a real
 // eBPF ring buffer (M13). interval is normally dropStatsInterval; tests pass
 // something much shorter so they don't have to wait on real wall-clock time.
-func runSink(cfg AttachConfig, frames <-chan Frame, queueDrops *atomic.Uint64, logf func(string, ...any), interval time.Duration) error {
+func runSink(cfg AttachConfig, frames <-chan Frame, queueDrops *atomic.Uint64, status *attachStatus, logf func(string, ...any), interval time.Duration) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -211,6 +212,16 @@ func runSink(cfg AttachConfig, frames <-chan Frame, queueDrops *atomic.Uint64, l
 		}
 		return bw.Flush()
 	}
+	// Attach-status frames are part of the binary stream protocol only; the
+	// human-readable OnFrame modes have no use for them.
+	var statusCh <-chan struct{}
+	if status != nil && cfg.OnFrame == nil {
+		statusCh = status.changed
+	}
+	// -1 so the first count is always sent, even 0: any attach-status frame
+	// tells the recorder this probe speaks the readiness protocol, which is
+	// how `record --detach` tells "no targets" from "probe too old".
+	lastAttached := -1
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	var lastReported uint64 // queueDrops is cumulative (Ingest's onDrops contract); only emit on change
@@ -230,6 +241,18 @@ func runSink(cfg AttachConfig, frames <-chan Frame, queueDrops *atomic.Uint64, l
 				if err := flush(); err != nil {
 					return err
 				}
+			}
+		case <-statusCh:
+			n := int(status.count.Load())
+			if n == lastAttached {
+				continue
+			}
+			lastAttached = n
+			if err := emit(Frame{TsUnixNano: time.Now().UnixNano(), Attached: n}); err != nil {
+				return fmt.Errorf("writing attach-status frame: %w", err)
+			}
+			if err := flush(); err != nil {
+				return err
 			}
 		case <-t.C:
 			n := queueDrops.Load()
@@ -262,6 +285,30 @@ type pidTracker struct {
 
 	mu       sync.Mutex
 	attached map[int][]link.Link // nil slice = attempted but failed/skip
+
+	// status, if set, is told the attached count after every reconcile so
+	// the sink can report it to the recorder.
+	status *attachStatus
+}
+
+// attachStatus carries the latest attached-process count from the tracker to
+// the sink. changed is a 1-slot wakeup: the sink always reads the newest count,
+// so coalescing several updates into one wakeup loses nothing.
+type attachStatus struct {
+	count   atomic.Int64
+	changed chan struct{}
+}
+
+func newAttachStatus() *attachStatus {
+	return &attachStatus{changed: make(chan struct{}, 1)}
+}
+
+func (s *attachStatus) set(n int) {
+	s.count.Store(int64(n))
+	select {
+	case s.changed <- struct{}{}:
+	default:
+	}
 }
 
 // matches reports whether a process's topology passes the tracker's filter.
@@ -323,6 +370,9 @@ func (t *pidTracker) reconcile(want []int) {
 		}
 	}
 	t.mu.Unlock()
+	if t.status != nil {
+		t.status.set(t.count())
+	}
 }
 
 // count returns how many PIDs are currently attached with at least one uprobe.

@@ -134,6 +134,10 @@ func (l Layout) IndexDB() string { return filepath.Join(l.Root, "index.db") }
 // reads this file to send SIGTERM without needing shell job control.
 func (l Layout) PidFile() string { return filepath.Join(l.Root, "recorder.pid") }
 
+// RecorderLog is where a detached recorder (`record --detach`) writes its
+// output, so it travels with the recording.
+func (l Layout) RecorderLog() string { return filepath.Join(l.Root, "recorder.log") }
+
 // RPCFileFor returns a PathForHourFunc that names the per-hour calls file for
 // a single model: raw/rpc/<model>/calls-<hour>.jsonl. Pass the result to a
 // RotatingWriter so one writer exists per model.
