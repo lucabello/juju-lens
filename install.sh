@@ -47,9 +47,14 @@ esac
 version="${JUJU_LENS_VERSION:-}"
 if [ -z "${version}" ]; then
     log "resolving latest release..."
-    version="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" |
-        grep '"tag_name"' | head -1 | cut -d'"' -f4)"
-    [ -n "${version}" ] || die "could not resolve the latest release tag"
+    # Resolve via the /releases/latest redirect, not api.github.com: the API
+    # allows only 60 unauthenticated requests/hour per IP, and CI runners share
+    # IPs, so it intermittently returns 403.
+    version="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+        "https://github.com/${repo}/releases/latest")" ||
+        die "could not resolve the latest release tag"
+    version="${version##*/}"
+    [ -n "${version}" ] && [ "${version}" != "latest" ] || die "could not resolve the latest release tag"
 fi
 version_num="${version#v}"
 
