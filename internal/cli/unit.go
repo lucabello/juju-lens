@@ -225,7 +225,7 @@ func unitTargets(controller, model, modelType string) ([]unitTarget, error) {
 		}
 		return out, nil
 	}
-	out, err := runJuju("status", "-m", controller+":"+model, "--format", "json")
+	out, err := runJuju("status", "-m", modelArg(controller, model), "--format", "json")
 	if err != nil {
 		return nil, err
 	}
@@ -312,7 +312,7 @@ func (ui *unitIngester) probeScript(t unitTarget) string {
 
 func (ui *unitIngester) launch(st *unitStream, t unitTarget) error {
 	name, full := jujuCommand([]string{
-		"ssh", "-m", ui.controller + ":" + t.model, "--pty=false", t.ssh, ui.probeScript(t),
+		"ssh", "-m", modelArg(ui.controller, t.model), "--pty=false", t.ssh, ui.probeScript(t),
 	})
 	cmd := exec.CommandContext(ui.ctx, name, full...)
 	// On machines `juju ssh` runs ssh as a child, which keeps the session

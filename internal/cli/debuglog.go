@@ -123,7 +123,7 @@ func (li *logIngester) launch(st *logStream) error {
 	})
 	// --tail follows new lines from now; --date --ms --utc give the
 	// deterministic timestamp ParseDebugLogLine expects.
-	args := []string{"debug-log", "-m", li.controller + ":" + st.model, "--tail", "--date", "--ms", "--utc"}
+	args := []string{"debug-log", "-m", modelArg(li.controller, st.model), "--tail", "--date", "--ms", "--utc"}
 	name, full := jujuCommand(args)
 	cmd := exec.CommandContext(li.ctx, name, full...)
 	cmd.WaitDelay = 3 * time.Second

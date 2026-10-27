@@ -38,7 +38,7 @@ func captureStatusLog(layout recording.Layout, controller string, since time.Tim
 			sem <- struct{}{}
 			go func() {
 				defer func() { <-sem; wg.Done() }()
-				out, err := runJuju("show-status-log", "-m", controller+":"+model,
+				out, err := runJuju("show-status-log", "-m", modelArg(controller, model),
 					"--type", "juju-unit", "--days", days, "--format", "json", u)
 				if err != nil || !json.Valid(out) {
 					fmt.Fprintf(os.Stderr, "juju-lens: status log of %s failed: %v\n", u, err)

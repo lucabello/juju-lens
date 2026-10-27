@@ -140,7 +140,7 @@ func (mi *machineIngester) launch(st *journalStream, model, machineID string) er
 	// JSON object per line that ParseJournalLine decodes. --pty=false keeps the
 	// stream line-buffered rather than going through a terminal.
 	name, full := jujuCommand([]string{
-		"ssh", "-m", mi.controller + ":" + model, "--pty=false", machineID,
+		"ssh", "-m", modelArg(mi.controller, model), "--pty=false", machineID,
 		"journalctl -f -o json --no-pager",
 	})
 	cmd := exec.CommandContext(mi.ctx, name, full...)

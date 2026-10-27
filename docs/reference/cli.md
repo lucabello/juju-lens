@@ -15,7 +15,7 @@ Records a controller and its models into a new recording directory. `<name>` lab
 | `--output`, `-o` | `./recordings/<ts>--<name>` | Recording directory. |
 | `--attach` | `host` | What to capture, as a comma-separated set of `host` and `unit`, or `none`. See [attach modes](#attach-modes). |
 | `--controller` | current controller | Record every model on this controller. |
-| `--model` | all models | Record only this model, written as `model` or `controller:model`. |
+| `--model` | all models | Record only this model, written as `model`, `owner/model` or `controller:model`. A model that another user or service account owns, such as one on a JAAS controller, is written `controller:owner/model`, for example `jaas:ci@serviceaccount/dev`; `juju models` lists the names. A short name that two owners share is ambiguous and needs the owner. |
 | `--ssh-target` | none | With `--attach host`, run the probe on this machine over `juju ssh`, such as `controller/0`. The target is resolved in the current Juju model (`juju switch`), not in `--model`. Without it, the probe runs on this host. |
 | `--pid` | all agent processes | Record only these agent process IDs. Repeatable. |
 | `--debug-log` | `true` | Stream `juju debug-log` for the recorded models. |

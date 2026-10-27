@@ -152,13 +152,17 @@ type controllersJSON struct {
 
 // modelsJSON mirrors the fields we read from `juju models --format json`.
 type modelsJSON struct {
-	Models []struct {
-		ShortName      string `json:"short-name"`
-		ModelUUID      string `json:"model-uuid"`
-		ModelType      string `json:"model-type"` // "caas" | "iaas"
-		ControllerUUID string `json:"controller-uuid"`
-		ControllerName string `json:"controller-name"`
-	} `json:"models"`
+	Models []jujuModel `json:"models"`
+}
+
+// jujuModel is one model of `juju models --format json`.
+type jujuModel struct {
+	Name           string `json:"name"` // "owner/short-name"
+	ShortName      string `json:"short-name"`
+	ModelUUID      string `json:"model-uuid"`
+	ModelType      string `json:"model-type"` // "caas" | "iaas"
+	ControllerUUID string `json:"controller-uuid"`
+	ControllerName string `json:"controller-name"`
 }
 
 // resolveScope builds the juju topology inventory for a recording and the probe
@@ -202,17 +206,30 @@ func resolveScope(controllerName, modelName string) (*jujuTopology, probeFilter,
 
 	var filter probeFilter
 	if modelName != "" {
-		uuid := ""
-		for _, m := range mj.Models {
-			if m.ShortName == modelName {
-				uuid = m.ModelUUID
-				break
+		// A model is named by its short name, or by "owner/model", which tells
+		// apart models that share a short name: those of a JAAS controller
+		// belong to many users and service accounts.
+		var matches []int
+		for i, m := range mj.Models {
+			if m.Name == modelName || m.ShortName == modelName {
+				matches = append(matches, i)
 			}
 		}
-		if uuid == "" {
+		switch len(matches) {
+		case 0:
 			return nil, probeFilter{}, fmt.Errorf("model %q not found on controller %q", modelName, controllerName)
+		case 1:
+		default:
+			var names []string
+			for _, i := range matches {
+				names = append(names, mj.Models[i].Name)
+			}
+			return nil, probeFilter{}, fmt.Errorf("model %q is ambiguous on controller %q: it is %s; write it as owner/model",
+				modelName, controllerName, strings.Join(names, ", "))
 		}
-		filter.modelUUID = uuid
+		chosen := mj.Models[matches[0]]
+		pinModel(controllerName, chosen.ShortName, chosen.Name)
+		filter.modelUUID = chosen.ModelUUID
 	} else {
 		filter.controllerUUID = topo.controllerUUID
 	}
@@ -288,7 +305,7 @@ func runJujuControllers() (*controllersJSON, error) {
 // runJujuMachines returns the machine ids of a model, sorted. It is used by the
 // journald ingester to discover which hosts to tail.
 func runJujuMachines(controller, model string) ([]string, error) {
-	out, err := runJuju("machines", "-m", controller+":"+model, "--format", "json")
+	out, err := runJuju("machines", "-m", modelArg(controller, model), "--format", "json")
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +332,67 @@ func runJujuModels(controller string) (*modelsJSON, error) {
 	if err := json.Unmarshal(out, &mj); err != nil {
 		return nil, fmt.Errorf("parsing juju models output: %w", err)
 	}
+	rememberModels(controller, &mj)
 	return &mj, nil
+}
+
+// Models are keyed by their short name everywhere in a recording (paths,
+// labels, the index), but the juju client only finds a model owned by someone
+// else by its qualified name, "owner/model": the models of a JAAS controller,
+// for one, belong to users and service accounts other than the one logged in.
+// So every `juju -m` goes through modelArg, which qualifies the model with
+// the owner `juju models` listed.
+var modelRefs = struct {
+	sync.RWMutex
+	by map[string]string // controller, NUL and short name -> "owner/short name"
+}{by: map[string]string{}}
+
+// rememberModels records the qualified name of each model of controller that
+// has one. A short name that more than one owner has is left out, unless it was
+// pinned: it can't be told apart from the short name alone.
+func rememberModels(controller string, mj *modelsJSON) {
+	owners := map[string]map[string]bool{}
+	for _, m := range mj.Models {
+		if m.ShortName != "" && strings.Contains(m.Name, "/") {
+			if owners[m.ShortName] == nil {
+				owners[m.ShortName] = map[string]bool{}
+			}
+			owners[m.ShortName][m.Name] = true
+		}
+	}
+	modelRefs.Lock()
+	defer modelRefs.Unlock()
+	for short, names := range owners {
+		key := controller + "\x00" + short
+		if len(names) == 1 {
+			for name := range names {
+				modelRefs.by[key] = name
+			}
+		}
+	}
+}
+
+// pinModel makes qualified the name modelArg gives for a model, when the user
+// chose that one of several that share a short name.
+func pinModel(controller, short, qualified string) {
+	if strings.Contains(qualified, "/") {
+		modelRefs.Lock()
+		modelRefs.by[controller+"\x00"+short] = qualified
+		modelRefs.Unlock()
+	}
+}
+
+// modelArg is the value of the juju client's -m flag for a model of a
+// controller: "controller:owner/model", or "controller:model" for a model
+// whose owner isn't known.
+func modelArg(controller, model string) string {
+	modelRefs.RLock()
+	q, ok := modelRefs.by[controller+"\x00"+model]
+	modelRefs.RUnlock()
+	if ok {
+		model = q
+	}
+	return controller + ":" + model
 }
 
 // runJuju invokes the juju client. record needs root for eBPF, but the juju

@@ -33,7 +33,7 @@ func captureStatusBootstrap(layout recording.Layout, controller string, models [
 		if bootstrapHasApps(layout.StatusBootstrapFile(model)) {
 			continue // already captured with real content
 		}
-		out, err := runJuju("status", "-m", controller+":"+model, "--format", "json")
+		out, err := runJuju("status", "-m", modelArg(controller, model), "--format", "json")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "juju-lens: status bootstrap for %s failed: %v\n", model, err)
 			continue
@@ -77,7 +77,7 @@ func captureConfigBootstrap(layout recording.Layout, controller, model string, s
 	}
 	combined := make(map[string]json.RawMessage, len(apps))
 	for _, app := range apps {
-		out, err := runJuju("config", app, "-m", controller+":"+model, "--format", "json")
+		out, err := runJuju("config", app, "-m", modelArg(controller, model), "--format", "json")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "juju-lens: config bootstrap for %s/%s failed: %v\n", model, app, err)
 			continue
@@ -125,7 +125,7 @@ func captureDatabagBootstrap(layout recording.Layout, controller, model string, 
 		return
 	}
 	args := append([]string{"show-unit"}, units...)
-	args = append(args, "-m", controller+":"+model, "--format", "json")
+	args = append(args, "-m", modelArg(controller, model), "--format", "json")
 	out, err := runJuju(args...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "juju-lens: databag bootstrap for %s failed: %v\n", model, err)

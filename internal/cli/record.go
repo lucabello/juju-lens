@@ -131,7 +131,7 @@ connection with --attach unit, which needs no cluster access; else with
 	cmd.Flags().StringVarP(&f.output, "output", "o", "", "recording directory (default: ./recordings/<ts>--<name>)")
 	cmd.Flags().StringVar(&f.attach, "attach", "host", "what to capture, comma-separated: "+attachValues+" (see above)")
 	cmd.Flags().StringVar(&f.controller, "controller", "", "scope to this juju controller (all its models); default: current controller")
-	cmd.Flags().StringVar(&f.model, "model", "", "scope to a single model, as \"model\" or \"controller:model\"")
+	cmd.Flags().StringVar(&f.model, "model", "", "scope to a single model, as \"model\", \"owner/model\" or \"controller:model\" (\"controller:owner/model\" for a model another user owns, such as on a JAAS controller)")
 	cmd.Flags().StringVar(&f.sshTarget, "ssh-target", "", "with --attach host, run the probe on this machine over 'juju ssh' (e.g. 'controller/0')")
 	cmd.Flags().IntSliceVar(&f.pids, "pid", nil, "restrict the probe to these PIDs (default: all jujud/containeragent)")
 	cmd.Flags().BoolVar(&f.debugLog, "debug-log", true, "also stream 'juju debug-log' for the scoped models")
