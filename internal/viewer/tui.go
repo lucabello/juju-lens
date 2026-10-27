@@ -52,11 +52,17 @@ import (
 func Run(dir string, follow bool) error {
 	man, err := recording.Load(dir)
 	if err != nil {
+		if hint := recording.OwnerHint(dir); hint != "" {
+			return fmt.Errorf("loading manifest at %s: %w\n%s", dir, err, hint)
+		}
 		return fmt.Errorf("loading manifest at %s: %w", dir, err)
 	}
 	layout := recording.NewLayout(dir)
 	db, err := index.Open(layout.IndexDB())
 	if err != nil {
+		if hint := recording.OwnerHint(dir); hint != "" {
+			return fmt.Errorf("opening index: %w\n%s", err, hint)
+		}
 		return fmt.Errorf("opening index (run `juju-lens index %s`): %w", dir, err)
 	}
 	defer db.Close()

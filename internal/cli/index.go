@@ -79,6 +79,9 @@ func runIndex(dir string, renames map[string]string) error {
 	// A fresh index avoids surprises when re-indexing after schema changes.
 	// The file is derived; removing it is safe.
 	if err := os.Remove(layout.IndexDB()); err != nil && !os.IsNotExist(err) {
+		if hint := recording.OwnerHint(dir); hint != "" {
+			return fmt.Errorf("removing old index: %w\n%s", err, hint)
+		}
 		return fmt.Errorf("removing old index: %w", err)
 	}
 

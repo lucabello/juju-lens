@@ -162,6 +162,11 @@ func runRecord(ctx context.Context, name string, f recordFlags, sides attachSide
 	if err := layout.Init(); err != nil {
 		return err
 	}
+	// Under sudo, give the recording to the invoking user as it grows, so
+	// `view --follow` and `index` need no root. The files created while
+	// recording are handed over again at the end.
+	defer func() { _ = recording.HandToInvoker(layout.Root) }()
+	_ = recording.HandToInvoker(layout.Root)
 
 	// Refuse to overwrite an in-flight recording. Two recorders writing the
 	// same raw/ would produce corrupt JSONL.
@@ -356,6 +361,9 @@ func runRecord(ctx context.Context, name string, f recordFlags, sides attachSide
 	// safely replace index.db without racing it.
 	var idxDone chan struct{}
 	if idxDB, derr := index.Open(layout.IndexDB()); derr == nil {
+		// Before the live viewer can open it: SQLite gives index.db-wal and
+		// -shm the owner of index.db.
+		_ = recording.HandToInvoker(layout.Root)
 		idxDone = make(chan struct{})
 		indexer := index.NewIndexer(idxDB)
 		go func() {
