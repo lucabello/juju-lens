@@ -32,6 +32,7 @@ type recordFlags struct {
 	model       string
 	sshTarget   string
 	pids        []int
+	logs        bool
 	debugLog    bool
 	k8sLog      bool
 	machineLog  bool
@@ -133,6 +134,7 @@ connection with --attach unit, which needs no cluster access; else with
 			if _, err := f.scope(sides); err != nil {
 				return err
 			}
+			f.applyLogs()
 			if f.detach {
 				return runDetached(cmd, args[0], *f)
 			}
@@ -145,6 +147,7 @@ connection with --attach unit, which needs no cluster access; else with
 	cmd.Flags().StringVar(&f.model, "model", "", "scope to a single model, as \"model\", \"owner/model\" or \"controller:model\" (\"controller:owner/model\" for a model another user owns, such as on a JAAS controller)")
 	cmd.Flags().StringVar(&f.sshTarget, "ssh-target", "", "with --attach host, run the probe on this machine over 'juju ssh' (e.g. 'controller/0')")
 	cmd.Flags().IntSliceVar(&f.pids, "pid", nil, "restrict the probe to these PIDs (default: all jujud/containeragent)")
+	cmd.Flags().BoolVar(&f.logs, "logs", true, "record logs at all; --logs=false turns off --debug-log, --k8s-log and --machine-log")
 	cmd.Flags().BoolVar(&f.debugLog, "debug-log", true, "also stream 'juju debug-log' for the scoped models")
 	cmd.Flags().BoolVar(&f.k8sLog, "k8s-log", true, "also record workload-container logs for CAAS models (through the unit probes with --attach unit, else 'kubectl logs')")
 	cmd.Flags().BoolVar(&f.machineLog, "machine-log", true, "also stream machine journald for IAAS models ('juju ssh … journalctl')")
@@ -159,6 +162,13 @@ connection with --attach unit, which needs no cluster access; else with
 	cmd.Flags().BoolVar(&f.detachedChild, detachedChildFlag, false, "internal: set on the daemon started by --detach")
 	_ = cmd.Flags().MarkHidden(detachedChildFlag)
 	return cmd
+}
+
+// applyLogs turns every log source off for --logs=false.
+func (f *recordFlags) applyLogs() {
+	if !f.logs {
+		f.debugLog, f.k8sLog, f.machineLog = false, false, false
+	}
 }
 
 // scope checks --app and --unit, which name things inside one model.

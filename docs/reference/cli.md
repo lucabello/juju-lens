@@ -20,6 +20,7 @@ Records a controller and its models into a new recording directory. `<name>` lab
 | `--unit` | all | With `--model`, record only this unit, such as `grafana/0`. Repeatable. With `--attach unit`, only these units get a probe on Kubernetes, and only the machines that host them on a machine model, where the probe still covers every unit on the machine. `juju debug-log` is limited to them too. `--attach host` still records every agent's traffic, and the status snapshot covers the whole model. |
 | `--ssh-target` | none | With `--attach host`, run the probe on this machine over `juju ssh`, such as `controller/0`. The target is resolved in the current Juju model (`juju switch`), not in `--model`. Without it, the probe runs on this host. |
 | `--pid` | all agent processes | Record only these agent process IDs. Repeatable. |
+| `--logs` | `true` | Set to `false` to record no logs: it turns off `--debug-log`, `--k8s-log` and `--machine-log`, and wins over them. |
 | `--debug-log` | `true` | Stream `juju debug-log` for the recorded models. |
 | `--k8s-log` | `true` | Record workload-container logs for Kubernetes models. With `--attach unit` they are read through each unit probe's Pebble connection, which needs no `kubectl` or cluster access; otherwise they are streamed with `kubectl logs`, which needs `kubectl` pointing at the cluster of the model, and the recorder says so if it can't list the pods. |
 | `--machine-log` | `true` | Stream the systemd journal for machine models. |
@@ -83,6 +84,7 @@ Records a model or controller and opens the viewer on the recording. Quitting th
 | `--output`, `-o` | `./recordings/<ts>--watch-<scope>` | Recording directory. |
 | `--attach` | `host` | What to capture. Same values as for [`record`](#attach-modes). |
 | `--ssh-target` | none | With `--attach host`, run the probe on this machine over `juju ssh`. |
+| `--logs` | `true` | Set to `false` to record no logs. |
 | `--debug-log` | `true` | Stream `juju debug-log` for the recorded models. |
 
 ## `stop`

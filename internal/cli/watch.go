@@ -28,7 +28,7 @@ import (
 // for eBPF, so the whole thing runs under sudo and the TUI renders as root
 // (the recorder's juju calls still drop to $SUDO_USER internally).
 func newWatchCmd() *cobra.Command {
-	f := &recordFlags{debugLog: true}
+	f := &recordFlags{logs: true, debugLog: true}
 	cmd := &cobra.Command{
 		Use:   "watch [model]",
 		Short: "Record a live model/controller and follow it in the viewer",
@@ -63,6 +63,7 @@ Examples:
 	cmd.Flags().StringVarP(&f.output, "output", "o", "", "recording directory (default: ./recordings/<ts>--watch-<scope>)")
 	cmd.Flags().StringVar(&f.attach, "attach", "host", "what to capture, comma-separated: "+attachValues+" (see 'juju-lens record --help')")
 	cmd.Flags().StringVar(&f.sshTarget, "ssh-target", "", "with --attach host, run the probe on this machine over 'juju ssh' (e.g. 'controller/0')")
+	cmd.Flags().BoolVar(&f.logs, "logs", true, "record logs at all; --logs=false turns off every log source")
 	cmd.Flags().BoolVar(&f.debugLog, "debug-log", true, "also stream 'juju debug-log' for the scoped models")
 	cmd.Flags().StringSliceVar(&f.apps, "app", nil, "with a model, record only this application's units; repeatable")
 	cmd.Flags().StringSliceVar(&f.units, "unit", nil, "with a model, record only this unit, such as \"grafana/0\"; repeatable")
@@ -99,6 +100,9 @@ func runWatch(ctx context.Context, f recordFlags) error {
 	}
 	if f.controller != "" {
 		recArgs = append(recArgs, "--controller", f.controller)
+	}
+	if !f.logs {
+		recArgs = append(recArgs, "--logs=false")
 	}
 	if !f.debugLog {
 		recArgs = append(recArgs, "--debug-log=false")
