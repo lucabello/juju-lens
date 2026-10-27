@@ -108,8 +108,9 @@ func pad(s string, n int) string {
 // state ("error"/"retried"/"rpc error" always; "interrupted"/"capture gap"
 // only in verbose mode, since neither says the charm itself is broken — see
 // the M14 comments on those two cases below), "(running)" for a hook still
-// open at the tail of a live recording, or its run duration, plus a
-// "(databag changes)" tag when its commit changed a databag. A promoted
+// open at the tail of a live recording, or its run duration, then "not
+// instrumented" or "truncated" when the tap missed it or cut it short (unit
+// capture), plus a "(databag changes)" tag when its commit changed a databag. A promoted
 // status-change marker (EvStatus, M12) instead trails which hook produced it,
 // e.g. "→ active  (config-changed)" — the status itself is already the row's
 // label, not repeated here (statusSummary is for a hook row's own Statuses,
@@ -147,6 +148,11 @@ func (m *model) eventSuffix(ev event) string {
 		b.WriteString("  " + styleDim.Render("(running)"))
 	case ev.dur > 0:
 		b.WriteString("  " + styleDim.Render("("+formatDur(ev.dur)+")"))
+	}
+	if l := ev.tapLabel(); l != "" {
+		// Not a charm problem, but the hook's tree is missing or partial:
+		// absent events and observers must not read as none.
+		b.WriteString("  " + styleWarn.Render(l))
 	}
 	if ev.kind != evStatus {
 		if s := ev.statusSummary(m.verbose); s != "" {

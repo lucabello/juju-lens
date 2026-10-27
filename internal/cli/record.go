@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -18,6 +19,7 @@ import (
 	"github.com/lucabello/juju-lens/internal/index"
 	"github.com/lucabello/juju-lens/internal/probe"
 	"github.com/lucabello/juju-lens/internal/recording"
+	"github.com/lucabello/juju-lens/internal/unit"
 	"github.com/lucabello/juju-lens/internal/wire"
 
 	"github.com/spf13/cobra"
@@ -29,13 +31,14 @@ type recordFlags struct {
 	controller  string
 	model       string
 	sshTarget   string
-	probePath   string
 	pids        []int
 	debugLog    bool
 	k8sLog      bool
 	machineLog  bool
 	maxDuration time.Duration
 	maxSize     int64
+	profile     bool
+	linger      time.Duration
 
 	detach        bool
 	detachTimeout time.Duration
@@ -48,57 +51,104 @@ func newRecordCmd() *cobra.Command {
 	f := &recordFlags{}
 	cmd := &cobra.Command{
 		Use:   "record <name>",
-		Short: "Record Juju API RPCs captured at the TLS boundary via eBPF",
-		Long: `record attaches juju-lens-probe to a controller's jujud/containeragent
-processes, captures every Juju API RPC at the crypto/tls boundary, and writes
-them to a recording directory. It stops cleanly on Ctrl-C, on SIGTERM
-(delivered by 'juju-lens stop'), or when a --max-* cap is reached.
+		Short: "Record a Juju controller and its models",
+		Long: `record captures what a Juju controller and its models do into a recording
+directory. It stops cleanly on Ctrl-C, on SIGTERM (delivered by 'juju-lens
+stop'), or when a --max-* cap is reached.
 
 The <name> argument labels the recording; it becomes part of the directory
 name and is stored in manifest.json.
 
-record never mutates the controller: it only attaches read-only uprobes.
-Attach modes:
+--attach chooses what is captured, as a comma-separated set:
 
-  local   run the probe on this host (for a locally-installed jujud snap)
-  ssh     run the probe on a machine controller over 'juju ssh' (default when
-          --controller or --ssh-target is given)
+  host   run the probe where the Juju agents run, and capture every Juju
+         API RPC at their crypto/tls boundary with read-only eBPF uprobes. The
+         probe runs on this host (juju-lens runs itself as 'juju-lens probe'),
+         or on --ssh-target, to which juju-lens uploads it over 'juju ssh' and
+         runs it with sudo. Needs root or CAP_BPF there. This is the default.
+  unit   run the probe inside every unit in scope over 'juju ssh': in
+         the charm container on Kubernetes, next to the machine agent (with
+         sudo) on machine models. Needs nothing but 'juju ssh'. Records the
+         charm's side of each hook: ops events, observers, hook tool and
+         Pebble calls, CPU and memory, and Python stacks sampled every 10 ms
+         (--profile=false turns the stacks off).
+  none   capture nothing from the agents: record only logs and the status
+         snapshot. Needs nothing but the juju client.
 
-Alongside the RPC probe, record ingests logs for the scoped models: 'juju
-debug-log', workload-container stdout for CAAS models ('kubectl logs'), and
-machine journald for IAAS models ('juju ssh … journalctl'). Disable any of
-them with --debug-log=false / --k8s-log=false / --machine-log=false.`,
+'host,unit' runs both in one recording. The probe is part of juju-lens: it
+carries a static build for linux/amd64 and linux/arm64, and uploads the one
+that matches each machine's architecture.
+
+record never changes the controller: host attach only adds read-only uprobes.
+Unit attach writes into each unit for as long as it runs:
+
+  - the probe binary, uploaded to /tmp, which deletes itself as it starts;
+  - a lock, /tmp/juju-lens-unit.lock, and a spool, /tmp/juju-lens-tap;
+  - in every charm venv, a Python module, _juju_lens_tap.py, and a loader
+    that imports it as a hook starts: _juju_lens_tap.pth in site-packages,
+    or sitecustomize.py for charms that put the venv on PYTHONPATH;
+  - in each Kubernetes workload container, one 'sh' started through Pebble
+    exec, to read the container's cgroup about 10 times a second while a
+    hook runs and for --linger after the last Pebble change it caused.
+
+When the recording ends, the probes remove all of it, with the bytecode
+Python cached for the module, and the shells exit; on Kubernetes this can
+take up to about 30 seconds. If a probe dies first, the module and loader
+stay in the venvs, and the spool and lock may stay in /tmp, but they do
+nothing: the module is inert once the probe's heartbeat in the spool is 30
+seconds old, and the next --attach unit recording on the unit removes them.
+On Kubernetes 'juju ssh' itself leaves a small /tmp/<random>.pid per session.
+
+Alongside, record ingests logs for the scoped models: 'juju debug-log',
+workload-container logs for CAAS models (read through each unit probe's Pebble
+connection with --attach unit, which needs no cluster access; else with
+'kubectl logs'), and machine journald for IAAS models ('juju ssh … journalctl'). Disable any of them with
+--debug-log=false / --k8s-log=false / --machine-log=false.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed("detach-timeout") && !f.detach {
 				return errors.New("--detach-timeout requires --detach")
 			}
+			sides, err := parseAttach(f.attach)
+			if err != nil {
+				return err
+			}
+			if cmd.Flags().Changed("profile") && !sides.unit {
+				return errors.New("--profile needs --attach unit")
+			}
+			if cmd.Flags().Changed("linger") && !sides.unit {
+				return errors.New("--linger needs --attach unit")
+			}
+			if f.linger < 0 {
+				return errors.New("--linger can't be negative")
+			}
 			if f.detach {
 				return runDetached(cmd, args[0], *f)
 			}
-			return runRecord(cmd.Context(), args[0], *f)
+			return runRecord(cmd.Context(), args[0], *f, sides)
 		},
 	}
 	cmd.Flags().StringVarP(&f.output, "output", "o", "", "recording directory (default: ./recordings/<ts>--<name>)")
-	cmd.Flags().StringVar(&f.attach, "attach", "", "attach mode: local|ssh (default: auto-detect)")
+	cmd.Flags().StringVar(&f.attach, "attach", "host", "what to capture, comma-separated: "+attachValues+" (see above)")
 	cmd.Flags().StringVar(&f.controller, "controller", "", "scope to this juju controller (all its models); default: current controller")
 	cmd.Flags().StringVar(&f.model, "model", "", "scope to a single model, as \"model\" or \"controller:model\"")
-	cmd.Flags().StringVar(&f.sshTarget, "ssh-target", "", "machine to 'juju ssh' into for ssh attach (e.g. 'controller/0')")
-	cmd.Flags().StringVar(&f.probePath, "probe-path", "", "path to the juju-lens-probe binary (default: next to juju-lens, then $PATH)")
+	cmd.Flags().StringVar(&f.sshTarget, "ssh-target", "", "with --attach host, run the probe on this machine over 'juju ssh' (e.g. 'controller/0')")
 	cmd.Flags().IntSliceVar(&f.pids, "pid", nil, "restrict the probe to these PIDs (default: all jujud/containeragent)")
 	cmd.Flags().BoolVar(&f.debugLog, "debug-log", true, "also stream 'juju debug-log' for the scoped models")
-	cmd.Flags().BoolVar(&f.k8sLog, "k8s-log", true, "also stream workload-container logs for CAAS models ('kubectl logs')")
+	cmd.Flags().BoolVar(&f.k8sLog, "k8s-log", true, "also record workload-container logs for CAAS models (through the unit probes with --attach unit, else 'kubectl logs')")
 	cmd.Flags().BoolVar(&f.machineLog, "machine-log", true, "also stream machine journald for IAAS models ('juju ssh … journalctl')")
 	cmd.Flags().DurationVar(&f.maxDuration, "max-duration", 0, "stop recording after this duration (0 = no limit)")
 	cmd.Flags().Int64Var(&f.maxSize, "max-size", 0, "stop recording after this many bytes of raw/ (0 = no limit)")
-	cmd.Flags().BoolVar(&f.detach, "detach", false, "run the recorder in the background; return once the probe has attached, printing the recording dir and pid")
-	cmd.Flags().DurationVar(&f.detachTimeout, "detach-timeout", 30*time.Second, "with --detach, fail if the probe hasn't attached within this long")
+	cmd.Flags().BoolVar(&f.profile, "profile", true, "with --attach unit, sample the charms' Python stacks")
+	cmd.Flags().DurationVar(&f.linger, "linger", unit.DefaultLinger, "with --attach unit, keep sampling workloads 10 times a second this long after a hook's last Pebble change is ready")
+	cmd.Flags().BoolVar(&f.detach, "detach", false, "run the recorder in the background; return once it is capturing, printing the recording dir and pid")
+	cmd.Flags().DurationVar(&f.detachTimeout, "detach-timeout", 30*time.Second, "with --detach, fail if the recorder isn't capturing within this long")
 	cmd.Flags().BoolVar(&f.detachedChild, detachedChildFlag, false, "internal: set on the daemon started by --detach")
 	_ = cmd.Flags().MarkHidden(detachedChildFlag)
 	return cmd
 }
 
-func runRecord(ctx context.Context, name string, f recordFlags) error {
+func runRecord(ctx context.Context, name string, f recordFlags, sides attachSides) error {
 	if f.detachedChild {
 		// The readiness pipe arrives without close-on-exec; keep it out of
 		// the probe and log subprocesses so the parent sees EOF as soon as
@@ -124,15 +174,6 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 	}
 	defer recording.RemovePidFile(layout.PidFile())
 
-	mode := f.attach
-	if mode == "" {
-		if f.sshTarget != "" {
-			mode = "ssh"
-		} else {
-			mode = "local"
-		}
-	}
-
 	// Resolve the controller/model scope to a probe filter and a UUID->name
 	// resolver via the juju client. An explicit scope must resolve; with no
 	// scope we try the current controller and fall back to unfiltered capture
@@ -141,6 +182,9 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 	if scopeErr != nil {
 		if f.controller != "" || f.model != "" {
 			return scopeErr
+		}
+		if !sides.host {
+			return fmt.Errorf("--attach %s needs the juju client: %w", sides, scopeErr)
 		}
 		fmt.Fprintf(os.Stderr, "juju-lens: could not query juju (%v); recording all agents unfiltered, without name resolution\n", scopeErr)
 		topo, filter = nil, probeFilter{}
@@ -155,19 +199,28 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 
 	man := recording.New("juju-lens", "record", "", name)
 	man.Controller.Name = controllerLabel
-	man.AttachMode = mode
+	man.AttachMode = sides.String()
 	if err := man.Save(layout.Root); err != nil {
 		return fmt.Errorf("writing initial manifest: %w", err)
 	}
 
-	probeCmd, target, err := buildProbeCommand(mode, f, filter)
-	if err != nil {
-		return err
-	}
-	if target != "" {
+	var probeCmd *exec.Cmd
+	var err error
+	if sides.host {
+		var target string
+		probeCmd, target, err = buildProbeCommand(f, filter)
+		if err != nil {
+			return err
+		}
 		man.AttachTargets = []string{target}
+		man.AddSource(recording.SourceStatus{Name: "rpc", Kind: "rpc", Started: time.Now().UTC()})
 	}
-	man.AddSource(recording.SourceStatus{Name: "rpc", Kind: "rpc", Started: time.Now().UTC()})
+	if sides.unit {
+		// The unit probe is uploaded from here: the one juju-lens carries.
+		if err = probeAvailable(); err != nil {
+			return err
+		}
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -179,7 +232,19 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 	var logIng *logIngester
 	var k8sIng *k8sIngester
 	var machIng *machineIngester
+	var unitIng *unitIngester
 	var logWG sync.WaitGroup
+	var ready *readyPipe
+	if f.detachedChild {
+		var waitFor []string
+		if sides.host {
+			waitFor = append(waitFor, "host")
+		}
+		if sides.unit {
+			waitFor = append(waitFor, "unit")
+		}
+		ready = newReadyPipe(waitFor...)
+	}
 	if topo != nil {
 		models := modelsToStream(topo, filter)
 		// Ground-truth status bootstrap (M8): snapshot `juju status` for each
@@ -220,38 +285,62 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 			logIng.start(ctx, &logWG, models)
 		}
 		caas, iaas := splitByModelType(topo, models)
+		// Workload logs of a CAAS model: through the unit probes' Pebble
+		// connection when they run, which needs no cluster access, else with
+		// `kubectl logs`.
 		if f.k8sLog && (len(caas) > 0 || discover) {
-			k8sIng = newK8sIngester(layout, topo.controllerName, discover, caas)
 			man.AddSource(recording.SourceStatus{Name: "k8s-log", Kind: "k8s-logs", Started: time.Now().UTC()})
-			k8sIng.start(ctx, &logWG)
+			if !sides.unit {
+				k8sIng = newK8sIngester(layout, topo.controllerName, discover, caas)
+				k8sIng.start(ctx, &logWG)
+			}
 		}
 		if f.machineLog && (len(iaas) > 0 || discover) {
 			machIng = newMachineIngester(layout, topo.controllerName, discover, iaas)
 			man.AddSource(recording.SourceStatus{Name: "machine-log", Kind: "machine-journald", Started: time.Now().UTC()})
 			machIng.start(ctx, &logWG)
 		}
-	}
-
-	stdout, err := probeCmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	// Surface probe stderr so attach failures are visible to the operator.
-	stderr, err := probeCmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-	if err := probeCmd.Start(); err != nil {
-		return fmt.Errorf("starting probe (%s): %w", probeCmd.Path, err)
-	}
-	go func() {
-		sc := bufio.NewScanner(stderr)
-		for sc.Scan() {
-			fmt.Fprintf(os.Stderr, "probe: %s\n", sc.Text())
+		if sides.unit {
+			byType := map[string]string{}
+			for _, m := range caas {
+				byType[m] = "caas"
+			}
+			for _, m := range iaas {
+				byType[m] = "iaas"
+			}
+			var onAllLive func(int)
+			if ready != nil {
+				onAllLive = func(n int) {
+					ready.partReady("unit", fmt.Sprintf("unit probes running on %d target(s)", n))
+				}
+			}
+			unitIng = newUnitIngester(layout, topo.controllerName, discover, byType, f.maxDuration, f.profile, f.linger, f.k8sLog, onAllLive)
+			unitIng.start(ctx, &logWG)
 		}
-	}()
+	}
 
-	fmt.Fprintf(os.Stderr, "juju-lens: recording %q via %s attach (pid %d)\n", name, mode, os.Getpid())
+	var stdout io.ReadCloser
+	if probeCmd != nil {
+		if stdout, err = probeCmd.StdoutPipe(); err != nil {
+			return err
+		}
+		// Surface probe stderr so attach failures are visible to the operator.
+		stderr, err := probeCmd.StderrPipe()
+		if err != nil {
+			return err
+		}
+		if err := probeCmd.Start(); err != nil {
+			return fmt.Errorf("starting probe (%s): %w", probeCmd.Path, err)
+		}
+		go func() {
+			sc := bufio.NewScanner(stderr)
+			for sc.Scan() {
+				fmt.Fprintf(os.Stderr, "probe: %s\n", sc.Text())
+			}
+		}()
+	}
+
+	fmt.Fprintf(os.Stderr, "juju-lens: recording %q with --attach %s (pid %d)\n", name, sides, os.Getpid())
 	fmt.Fprintf(os.Stderr, "juju-lens: stop this recording with `juju-lens stop %s` (or SIGINT/SIGTERM)\n", layout.Root)
 
 	// The sink demultiplexes captured messages into one rotating writer per
@@ -350,22 +439,36 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 		totalDrops = n
 		fmt.Fprintf(os.Stderr, "juju-lens: probe reports %d frames dropped so far (it's falling behind — see docs/explanation/from-wire-to-viewer.md#limitations)\n", n)
 	}
-	var onAttached func(int)
-	if f.detachedChild {
-		onAttached = readySignaller()
+	var ingestErr error
+	if probeCmd != nil {
+		var onAttached func(int)
+		if ready != nil {
+			onAttached = ready.onAttached
+		}
+		ingestErr = probe.Ingest(ctx, stdout, resolver, w.sink, onDrops, onAttached)
+	} else {
+		// No RPC probe: the log sources (and unit probes) are the recording,
+		// and they run until a signal or a cap cancels ctx. With no capture
+		// side, the log sources are already started, so the recorder is
+		// capturing now; unit probes report their own readiness.
+		if ready != nil && !sides.unit {
+			ready.partReady("logs", "recording logs and status only")
+		}
+		<-ctx.Done()
 	}
-	ingestErr := probe.Ingest(ctx, stdout, resolver, w.sink, onDrops, onAttached)
 	cancel()
 	if totalDrops > 0 {
 		fmt.Fprintf(os.Stderr, "juju-lens: recording finished with %d frames dropped by the probe; some hooks may show a \"capture gap\"\n", totalDrops)
 	}
-	// The probe is a child (local) or an ssh session; either way, killing the
-	// process group ends it and its remote peer.
-	_ = probeCmd.Process.Kill()
-	_ = probeCmd.Wait()
+	if probeCmd != nil {
+		// The probe is a child (local) or an ssh session; either way, killing
+		// the process ends it and its remote peer.
+		_ = probeCmd.Process.Kill()
+		_ = probeCmd.Wait()
+	}
 
-	// Stop the log ingesters (ctx is already cancelled, which signals them) and
-	// wait for their goroutines to flush.
+	// Stop the log ingesters (ctx is already cancelled, which signals them and
+	// ends the unit probe sessions) and wait for their goroutines to flush.
 	if logIng != nil {
 		logIng.stop()
 	}
@@ -385,6 +488,17 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 	if machIng != nil {
 		man.FinishSourceRecords("machine-log", machIng.count(), nil)
 	}
+	if unitIng != nil {
+		unitIng.closeLogs()
+		if f.k8sLog {
+			man.FinishSourceRecords("k8s-log", unitIng.podLogCount(), nil)
+		}
+		for _, s := range unitIng.sessionSources() {
+			man.AddSource(s)
+		}
+		// The hooks the units ran, to cross-check what the tap recorded.
+		captureStatusLog(layout, topo.controllerName, man.Started)
+	}
 
 	if endReason == recording.EndReasonUnknown {
 		if ingestErr != nil && !errors.Is(ingestErr, context.Canceled) {
@@ -393,7 +507,9 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 			endReason = recording.EndReasonUserRequested
 		}
 	}
-	man.FinishSource("rpc", nil)
+	if probeCmd != nil {
+		man.FinishSource("rpc", nil)
+	}
 	man.Finalize(endReason)
 	if err := man.Save(layout.Root); err != nil {
 		return fmt.Errorf("finalising manifest: %w", err)
@@ -422,6 +538,9 @@ func runRecord(ctx context.Context, name string, f recordFlags) error {
 	logMsg := ""
 	if logLines > 0 {
 		logMsg = fmt.Sprintf(", %d log lines", logLines)
+	}
+	if unitIng != nil {
+		logMsg += fmt.Sprintf(", %d unit probe records", unitIng.count())
 	}
 	fmt.Fprintf(os.Stderr, "juju-lens: recording saved to %s (%d RPC messages%s captured)\n",
 		layout.Root, w.count(), logMsg)
@@ -454,42 +573,49 @@ func reindexInPlace(layout recording.Layout) error {
 	return rebuildIndex(db, layout.Root, nil, true)
 }
 
-// buildProbeCommand constructs the exec.Cmd that runs the probe for the chosen
-// attach mode and returns a human-readable target for the manifest.
-func buildProbeCommand(mode string, f recordFlags, filter probeFilter) (*exec.Cmd, string, error) {
-	probeArgs := probeArgs(f, filter)
-	switch mode {
-	case "local":
-		bin, err := findProbeBinary(f.probePath)
+// buildProbeCommand constructs the exec.Cmd that runs the host probe, locally
+// or on --ssh-target over `juju ssh`, and returns a human-readable target for
+// the manifest. Locally the probe is this binary, as `juju-lens probe`; on a
+// remote machine juju-lens uploads the probe for its architecture and runs it
+// with sudo.
+func buildProbeCommand(f recordFlags, filter probeFilter) (*exec.Cmd, string, error) {
+	args := probeArgs(f, filter)
+	if f.sshTarget == "" {
+		self, err := os.Executable()
 		if err != nil {
 			return nil, "", err
 		}
-		return exec.Command(bin, probeArgs...), "localhost", nil
-	case "ssh":
-		target := f.sshTarget
-		if target == "" {
-			target = "controller/0" // sensible default machine controller
-		}
-		remoteProbe := f.probePath
-		if remoteProbe == "" {
-			remoteProbe = "juju-lens-probe" // assume it is on the remote PATH
-		}
-		args := []string{"ssh"}
-		if f.controller != "" {
-			args = append(args, "-m", f.controller+":controller")
-		}
-		args = append(args, target, "--", "sudo", remoteProbe)
-		args = append(args, probeArgs...)
-		return exec.Command("juju", args...), target, nil
-	case "kubectl-debug", "daemonset":
-		// Kubernetes-native probe deployment is deferred with no
-		// milestone scheduled, not "coming soon" — CAAS log ingestion (k8sIngester)
-		// doesn't need this at all; only RPC-probe attach to containeragent inside
-		// a pod would.
-		return nil, "", fmt.Errorf("attach mode %q (Kubernetes) is not implemented yet", mode)
-	default:
-		return nil, "", fmt.Errorf("unknown attach mode %q (want local|ssh)", mode)
+		return exec.Command(self, append([]string{"probe"}, args...)...), "localhost", nil
 	}
+	if err := probeAvailable(); err != nil {
+		return nil, "", err
+	}
+	ssh := []string{"ssh"}
+	if f.controller != "" {
+		ssh = append(ssh, "-m", f.controller+":controller")
+	}
+	ssh = append(ssh, f.sshTarget)
+	out, err := exec.Command("juju", append(ssh, "uname -m")...).Output()
+	if err != nil {
+		return nil, "", fmt.Errorf("asking %s for its architecture over juju ssh: %w", f.sshTarget, err)
+	}
+	arch, err := goArchOf(string(out))
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: %w", f.sshTarget, err)
+	}
+	bin, err := openProbe(arch)
+	if err != nil {
+		return nil, "", err
+	}
+	path := uploadPath(newRunID())
+	quoted := make([]string, 0, len(args)+3)
+	quoted = append(quoted, "sudo", path, "--unlink-self")
+	for _, a := range args {
+		quoted = append(quoted, shellQuote(a))
+	}
+	cmd := exec.Command("juju", append(ssh, uploadScript(path, strings.Join(quoted, " "), false))...)
+	cmd.Stdin = bin
+	return cmd, f.sshTarget, nil
 }
 
 func probeArgs(f recordFlags, filter probeFilter) []string {
@@ -503,27 +629,6 @@ func probeArgs(f recordFlags, filter probeFilter) []string {
 	}
 	args = append(args, filter.args()...)
 	return args
-}
-
-// findProbeBinary locates juju-lens-probe: an explicit --probe-path wins, then
-// a sibling of the running juju-lens binary, then $PATH.
-func findProbeBinary(explicit string) (string, error) {
-	if explicit != "" {
-		if _, err := os.Stat(explicit); err != nil {
-			return "", fmt.Errorf("--probe-path %q: %w", explicit, err)
-		}
-		return explicit, nil
-	}
-	if self, err := os.Executable(); err == nil {
-		sibling := filepath.Join(filepath.Dir(self), "juju-lens-probe")
-		if _, err := os.Stat(sibling); err == nil {
-			return sibling, nil
-		}
-	}
-	if p, err := exec.LookPath("juju-lens-probe"); err == nil {
-		return p, nil
-	}
-	return "", errors.New("juju-lens-probe not found; build it (`go build ./cmd/juju-lens-probe`) and pass --probe-path")
 }
 
 // rpcWriters owns one RotatingWriter per model and delivers captured messages

@@ -26,6 +26,8 @@ import (
 type Indexer struct {
 	db            *DB
 	pairer        *recording.Pairer
+	ops           *recording.OpsAssembler
+	res           *recording.ResourceReader
 	offsets       map[string]int64  // raw file (relative path) -> bytes consumed
 	lineNo        map[string]int    // raw file -> lines consumed (for log RawLine)
 	hookByUnit    map[string]string // unit -> hook currently running
@@ -37,6 +39,8 @@ func NewIndexer(db *DB) *Indexer {
 	return &Indexer{
 		db:         db,
 		pairer:     recording.NewPairer(),
+		ops:        recording.NewOpsAssembler(),
+		res:        recording.NewResourceReader(),
 		offsets:    map[string]int64{},
 		lineNo:     map[string]int{},
 		hookByUnit: map[string]string{},
@@ -56,7 +60,38 @@ func (ix *Indexer) Sync(root string) error {
 	if err := ix.syncCalls(root, filepath.Join(l.RawDir(), "rpc")); err != nil {
 		return err
 	}
+	if err := ix.syncUnits(root, filepath.Join(l.RawDir(), "unit")); err != nil {
+		return err
+	}
 	return ix.syncLogs(root, l.RawDir())
+}
+
+// syncUnits inserts the span tree of each hook process whose spool_end
+// arrived since the last Sync, its stack samples, and the resource samples
+// and Pebble changes. A hook still running at the end of the recording
+// appears with the authoritative rebuild the recorder runs at stop.
+func (ix *Indexer) syncUnits(root, unitRoot string) error {
+	return ix.eachFile(root, unitRoot, ".jsonl", func(rel string, lines []lineAt) error {
+		model, ok := recording.UnitFileModel(rel)
+		if !ok {
+			return nil
+		}
+		var res recording.UnitResources
+		for _, ln := range lines {
+			for _, sp := range ix.ops.Feed(model, ln.data, rel, ln.offset) {
+				if err := ix.db.InsertSpan(sp); err != nil {
+					return err
+				}
+			}
+			for _, p := range ix.ops.TakeProfiles() {
+				if err := ix.db.InsertProfile(p); err != nil {
+					return err
+				}
+			}
+			ix.res.Feed(model, ln.data, rel, &res)
+		}
+		return ix.db.InsertUnitResources(res)
+	})
 }
 
 // syncBootstrap seeds baseline app/unit status from raw/status once per run.
@@ -124,7 +159,7 @@ func (ix *Indexer) syncCalls(root, rpcRoot string) error {
 
 func (ix *Indexer) syncLogs(root, rawDir string) error {
 	for _, kind := range []string{"juju", "k8s", "machine"} {
-		err := ix.eachLogFile(root, filepath.Join(rawDir, kind), func(rel string, lines []lineAt) error {
+		err := ix.eachFile(root, filepath.Join(rawDir, kind), ".log", func(rel string, lines []lineAt) error {
 			for _, ln := range lines {
 				rec, ok := recording.ParseLogLine(rel, string(ln.data))
 				if !ok {
@@ -146,13 +181,13 @@ func (ix *Indexer) syncLogs(root, rawDir string) error {
 	return nil
 }
 
-// eachLogFile walks every "*.log" file under kindRoot (recursively, so the
-// deeper raw/k8s/<model>/<pod>/<container>/ layout is covered) in path order and
-// calls fn with the newly-appended complete lines of each file, advancing the
-// per-file offset. The log trees vary in depth, so unlike eachModelFile it does
-// not assume a fixed <model>/<file> shape — ParseLogLine derives identity from
-// the relative path instead.
-func (ix *Indexer) eachLogFile(root, kindRoot string, fn func(rel string, lines []lineAt) error) error {
+// eachFile walks every file ending in suffix under kindRoot (recursively, so
+// the deeper raw/k8s/<model>/<pod>/<container>/ and raw/unit/<model>/<host>/
+// layouts are covered) in path order and calls fn with the newly-appended
+// complete lines of each file, advancing the per-file offset. The trees vary
+// in depth, so unlike eachModelFile it does not assume a fixed <model>/<file>
+// shape — the callers derive identity from the relative path instead.
+func (ix *Indexer) eachFile(root, kindRoot, suffix string, fn func(rel string, lines []lineAt) error) error {
 	var paths []string
 	err := filepath.WalkDir(kindRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -161,7 +196,7 @@ func (ix *Indexer) eachLogFile(root, kindRoot string, fn func(rel string, lines 
 			}
 			return err
 		}
-		if !d.IsDir() && strings.HasSuffix(d.Name(), ".log") {
+		if !d.IsDir() && strings.HasSuffix(d.Name(), suffix) {
 			paths = append(paths, path)
 		}
 		return nil

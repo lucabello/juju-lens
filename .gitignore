@@ -22,3 +22,6 @@
 # Go workspace files (never committed for single-module repos)
 go.work
 go.work.sum
+
+# Probe binaries embedded into juju-lens by `just build` / `just dist`
+/internal/probebin/linux_*

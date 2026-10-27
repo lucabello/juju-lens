@@ -229,23 +229,31 @@ func TestSnapshotLatest(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	since := base.Add(-time.Hour)
 	// Before t: no snapshot for grafana.
-	if s, err := db.LatestSnapshotBefore(modelID, "unit-status:grafana/0", base.Add(-time.Second)); err != nil {
+	if s, err := db.LatestSnapshotBetween(modelID, "unit-status:grafana/0", since, base.Add(-time.Second)); err != nil {
 		t.Fatal(err)
 	} else if s != "" {
 		t.Fatalf("expected empty snapshot, got %q", s)
 	}
 	// At t: the "maintenance" snapshot.
-	if s, err := db.LatestSnapshotBefore(modelID, "unit-status:grafana/0", base); err != nil {
+	if s, err := db.LatestSnapshotBetween(modelID, "unit-status:grafana/0", since, base); err != nil {
 		t.Fatal(err)
 	} else if s == "" || s[:20] != `{"value":"maintenanc` {
 		t.Fatalf("wrong snapshot at t: %q", s)
 	}
 	// At t+2s: the later "active" snapshot.
-	if s, err := db.LatestSnapshotBefore(modelID, "unit-status:grafana/0", base.Add(2*time.Second)); err != nil {
+	if s, err := db.LatestSnapshotBetween(modelID, "unit-status:grafana/0", since, base.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	} else if s == "" || s[:15] != `{"value":"activ` {
 		t.Fatalf("wrong snapshot at t+2s: %q", s)
+	}
+	// A window that starts after the last snapshot finds none: what was in
+	// effect before it isn't what was read within it.
+	if s, err := db.LatestSnapshotBetween(modelID, "unit-status:grafana/0", base.Add(1500*time.Millisecond), base.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	} else if s != "" {
+		t.Fatalf("expected no snapshot within the window, got %q", s)
 	}
 
 	// LatestPerScope returns exactly two rows, most recent per scope.

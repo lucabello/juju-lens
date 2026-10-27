@@ -1,0 +1,7 @@
+name: fake
+requires:
+  db:
+    interface: fake-db
+  charm-tracing:
+    interface: tracing
+    limit: 1

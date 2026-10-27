@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "tool": {
+    "name": "juju-lens",
+    "version": "record"
+  },
+  "controller": {
+    "name": "lxd"
+  },
+  "started": "2026-10-22T20:12:17.349939067Z",
+  "ended": "2026-10-22T20:13:50.554787735Z",
+  "end_reason": "signal",
+  "sources": [
+    {
+      "name": "rpc",
+      "kind": "rpc",
+      "started": "2026-10-22T20:12:17.350087743Z",
+      "stopped": "2026-10-22T20:13:50.554787563Z"
+    },
+    {
+      "name": "unit charmprof-machines/machine-0",
+      "kind": "unit-probe",
+      "started": "2026-10-22T20:12:18.402499539Z",
+      "stopped": "2026-10-22T20:13:34.901155082Z",
+      "records": 409
+    }
+  ],
+  "attach_mode": "host,unit",
+  "attach_targets": [
+    "0"
+  ]
+}

@@ -31,7 +31,11 @@ type event struct {
 	running        bool
 	verboseOnly    bool
 	settleWorkload string
-	cause          string // hook that produced this promoted status marker (EvStatus, M12)
+	cause          string   // hook that produced this promoted status marker (EvStatus, M12)
+	opsSpans       []string // root span of each process that ran the hook (narrative.Event.OpsSpans)
+	opsNames       string   // lower-cased event and observer names in those processes, for search
+	tap            string   // recording.TapMissing or TapTruncated
+	tapReason      string
 }
 
 // Aliased so the rest of the package can keep writing evHook, failErrored,
@@ -60,6 +64,8 @@ func fromNarrative(e narrative.Event) event {
 		detail: e.Detail, spanID: e.SpanID, fail: e.Fail, statuses: e.Statuses,
 		hasDatabag: e.HasDatabag, dur: e.Dur, running: e.Running,
 		verboseOnly: e.VerboseOnly, settleWorkload: e.SettleWorkload, cause: e.Cause,
+		opsSpans: e.OpsSpans,
+		tap:      e.Tap, tapReason: e.TapReason,
 	}
 }
 
@@ -132,6 +138,19 @@ func (e event) failLabel() string {
 	default:
 		return ""
 	}
+}
+
+// tapLabel is the trailing tag of a hook the tap didn't record in full: one
+// it recorded nothing of, or one whose records stop before the process
+// ended. "" when the tap recorded it, or the recording has no unit capture.
+func (e event) tapLabel() string {
+	switch e.tap {
+	case recording.TapMissing:
+		return "not instrumented"
+	case recording.TapTruncated:
+		return "truncated"
+	}
+	return ""
 }
 
 // statusSummary renders the status changes a hook produced as a compact suffix,

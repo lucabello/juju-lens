@@ -1,0 +1,1 @@
+import sys; exec('try:\n import _juju_lens_tap\nexcept Exception:\n pass')

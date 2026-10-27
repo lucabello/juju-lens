@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "tool": {
+    "name": "juju-lens",
+    "version": "record"
+  },
+  "controller": {
+    "name": "k8s"
+  },
+  "started": "2026-10-22T22:19:39.054616241Z",
+  "ended": "2026-10-22T22:23:58.365519186Z",
+  "end_reason": "signal",
+  "sources": [
+    {
+      "name": "debug-log",
+      "kind": "juju-debug-log",
+      "started": "2026-10-22T22:19:39.98238623Z",
+      "stopped": "2026-10-22T22:23:58.065770923Z",
+      "records": 102
+    },
+    {
+      "name": "k8s-log",
+      "kind": "k8s-logs",
+      "started": "2026-10-22T22:19:39.982727744Z",
+      "stopped": "2026-10-22T22:23:58.065771068Z",
+      "records": 160
+    },
+    {
+      "name": "unit lens-t9/bashy-0",
+      "kind": "unit-probe",
+      "started": "2026-10-22T22:19:40.406867413Z",
+      "stopped": "2026-10-22T22:23:58.065757815Z",
+      "records": 48
+    },
+    {
+      "name": "unit lens-t9/otelcol-0",
+      "kind": "unit-probe",
+      "started": "2026-10-22T22:19:40.407287225Z",
+      "stopped": "2026-10-22T22:22:08.948435463Z",
+      "records": 436,
+      "error": "session ended: ERROR \"command terminated with exit code 137\""
+    },
+    {
+      "name": "unit lens-t9/otelcol-0",
+      "kind": "unit-probe",
+      "started": "2026-10-22T22:22:20.655858204Z",
+      "stopped": "2026-10-22T22:23:58.065758021Z",
+      "records": 130
+    }
+  ],
+  "attach_mode": "unit"
+}

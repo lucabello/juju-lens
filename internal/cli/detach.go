@@ -29,48 +29,101 @@ const detachedChildFlag = "detached-child"
 // first entry of exec.Cmd.ExtraFiles is always fd 3.
 const readyFD = 3
 
-// readyLine is what the daemon writes on the readiness pipe once the probe has
-// attached. Anything else, including EOF, means it didn't get there.
+// readyLine is what the daemon writes on the readiness pipe once it is
+// capturing. Anything else, including EOF, means it didn't get there.
 const readyLine = "ready"
 
-// statusLine is what the daemon writes on the readiness pipe on the probe's
-// first attach-status frame, before it has necessarily attached to anything.
-// It lets the parent tell a probe that found no agents from one too old to
-// send status frames at all, which would otherwise time out identically.
+// statusLine is what the daemon writes on the readiness pipe on the host
+// probe's first attach-status frame, before it has necessarily attached to
+// anything. It lets the parent tell a probe that found no agents from one too
+// old to send status frames at all, which would otherwise time out
+// identically.
 const statusLine = "status"
+
+// partPrefix starts the line the daemon writes when one capture side is
+// capturing ("part host", "part unit"), so a parent that times out can say
+// which side didn't get there.
+const partPrefix = "part "
 
 // logTailLines bounds how much of recorder.log a failed --detach prints.
 const logTailLines = 20
 
-// readySignaller returns the daemon's onAttached callback. On the first call
-// it tells the waiting parent the probe speaks the readiness protocol; on the
-// first call with n>0 it tells it the recorder is capturing, then closes the
-// pipe. The parent never sees "ready" unless the probe has reported an
-// attached agent, so a probe that attaches to nothing ends in a timeout, not
-// a false success.
-func readySignaller() func(int) {
-	var statusOnce, readyOnce sync.Once
-	var pipe *os.File
-	return func(n int) {
-		statusOnce.Do(func() {
-			pipe = os.NewFile(readyFD, "ready-pipe")
-			if pipe != nil {
-				_, _ = fmt.Fprintln(pipe, statusLine)
-			}
-		})
-		if n == 0 || pipe == nil {
-			return
-		}
-		readyOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "juju-lens: probe attached to %d agent process(es); recorder ready\n", n)
-			_, _ = fmt.Fprintln(pipe, readyLine)
-			_ = pipe.Close()
-		})
+// readyPipe is the daemon's end of the readiness pipe. The parent never sees
+// "ready" until every capture side is capturing: for host, once the probe
+// has reported an attached agent, so a probe that attaches to nothing ends in
+// a timeout, not a false success; for unit, once every unit in scope has a
+// probe running.
+type readyPipe struct {
+	mu         sync.Mutex
+	pipe       *os.File
+	opened     bool
+	hostStatus bool
+	done       bool
+	pending    map[string]bool
+}
+
+// newReadyPipe waits for the named sides. With none, the first partReady
+// makes the daemon ready.
+func newReadyPipe(sides ...string) *readyPipe {
+	r := &readyPipe{pending: map[string]bool{}}
+	for _, s := range sides {
+		r.pending[s] = true
+	}
+	return r
+}
+
+// openLocked opens the pipe, once.
+func (r *readyPipe) openLocked() {
+	if !r.opened {
+		r.opened = true
+		r.pipe = os.NewFile(readyFD, "ready-pipe")
 	}
 }
 
+// onAttached is the host probe's attach-status callback: the first call
+// tells the parent the probe speaks the readiness protocol, the first with
+// n>0 makes the host side ready.
+func (r *readyPipe) onAttached(n int) {
+	r.mu.Lock()
+	r.openLocked()
+	if !r.hostStatus && !r.done && r.pipe != nil {
+		r.hostStatus = true
+		_, _ = fmt.Fprintln(r.pipe, statusLine)
+	}
+	r.mu.Unlock()
+	if n > 0 {
+		r.partReady("host", fmt.Sprintf("probe attached to %d agent process(es)", n))
+	}
+}
+
+// partReady marks a side as capturing. When no side is left, it tells the
+// parent the recorder is ready and closes the pipe.
+func (r *readyPipe) partReady(side, why string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.done {
+		return
+	}
+	r.openLocked()
+	if r.pipe == nil {
+		return
+	}
+	if r.pending[side] {
+		delete(r.pending, side)
+		_, _ = fmt.Fprintln(r.pipe, partPrefix+side)
+	}
+	fmt.Fprintf(os.Stderr, "juju-lens: %s\n", why)
+	if len(r.pending) > 0 {
+		return
+	}
+	r.done = true
+	fmt.Fprintln(os.Stderr, "juju-lens: recorder ready")
+	_, _ = fmt.Fprintln(r.pipe, readyLine)
+	_ = r.pipe.Close()
+}
+
 // runDetached starts the recorder as a session-leading daemon and waits on a
-// pipe until it reports the probe attached, it exits, or detachTimeout passes.
+// pipe until it reports it is capturing, it exits, or detachTimeout passes.
 //
 // It re-executes this binary rather than forking, because a Go process can't
 // safely fork without exec. The daemon writes its own recorder.pid exactly as a
@@ -135,15 +188,22 @@ func runDetached(cmd *cobra.Command, name string, f recordFlags) error {
 	go func() { exited <- child.Wait() }()
 	ready := make(chan bool, 1)
 	var sawStatus atomic.Bool
+	var mu sync.Mutex
+	sidesReady := map[string]bool{}
 	go func() {
 		br := bufio.NewReader(readR)
 		for {
 			line, err := br.ReadString('\n')
-			switch strings.TrimSpace(line) {
-			case statusLine:
+			switch l := strings.TrimSpace(line); {
+			case l == statusLine:
 				sawStatus.Store(true)
 				continue
-			case readyLine:
+			case strings.HasPrefix(l, partPrefix):
+				mu.Lock()
+				sidesReady[strings.TrimPrefix(l, partPrefix)] = true
+				mu.Unlock()
+				continue
+			case l == readyLine:
 				ready <- true
 				return
 			}
@@ -163,15 +223,27 @@ func runDetached(cmd *cobra.Command, name string, f recordFlags) error {
 	case ok := <-ready:
 		if !ok {
 			err := <-exited
-			return fail("detached recorder (pid %d) exited before the probe attached: %v", pid, exitDescription(err))
+			return fail("detached recorder (pid %d) exited before it was capturing: %v", pid, exitDescription(err))
 		}
 	case <-time.After(f.detachTimeout):
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		<-exited
-		if !sawStatus.Load() {
-			return fail("detached recorder (pid %d) not ready after --detach-timeout %s: the probe never reported its attach status, so it may be too old to support --detach; upgrade juju-lens-probe on the target machines (plain `record` still works with it); killed it", pid, f.detachTimeout)
+		sides, _ := parseAttach(f.attach)
+		mu.Lock()
+		hostMissing := sides.host && !sidesReady["host"]
+		unitMissing := sides.unit && !sidesReady["unit"]
+		mu.Unlock()
+		var why []string
+		switch {
+		case hostMissing && !sawStatus.Load():
+			why = append(why, "the probe never reported its attach status, so it may be too old to support --detach; upgrade juju-lens-probe on the target machines (plain `record` still works with it)")
+		case hostMissing:
+			why = append(why, "the probe attached to no agent process")
 		}
-		return fail("detached recorder (pid %d) not ready after --detach-timeout %s: the probe attached to no agent process; killed it", pid, f.detachTimeout)
+		if unitMissing {
+			why = append(why, "not every unit in scope has a running unit probe")
+		}
+		return fail("detached recorder (pid %d) not ready after --detach-timeout %s: %s; killed it", pid, f.detachTimeout, strings.Join(why, "; "))
 	}
 
 	if got, err := recording.ReadPidFile(layout.PidFile()); err != nil || got != pid {
@@ -225,7 +297,7 @@ func exitDescription(err error) string {
 }
 
 // describeLog points at the daemon's log and quotes its tail, which is where
-// the actual cause (a bad --probe-path, an ssh or permission error) lands.
+// the actual cause (an ssh or permission error) lands.
 func describeLog(path string) string {
 	tail, err := tailLines(path, logTailLines)
 	if err != nil || len(tail) == 0 {

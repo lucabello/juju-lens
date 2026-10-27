@@ -1,17 +1,18 @@
 #!/bin/sh
-# Installs juju-lens + juju-lens-probe from a GitHub Release.
+# Installs juju-lens from a GitHub Release. It is one binary: it carries the
+# probe it uploads to units, for linux/amd64 and linux/arm64.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/lucabello/juju-lens/main/install.sh | sh
 #
 # Env overrides:
 #   JUJU_LENS_VERSION      release tag to install, e.g. "v0.1.0" (default: latest)
-#   JUJU_LENS_INSTALL_DIR  where to put the binaries (default: /usr/local/bin,
+#   JUJU_LENS_INSTALL_DIR  where to put the binary (default: /usr/local/bin,
 #                          falling back to ~/.local/bin if not writable)
 #
-# Only linux/amd64 and linux/arm64 are published - juju-lens-probe is an
-# eBPF tool and only functions on Linux. See ./cmd/juju-lens-probe or
-# `go build`/`just build` for other platforms (dev/TUI use only).
+# Only linux/amd64 and linux/arm64 are published - the probe is an eBPF tool
+# and only functions on Linux. See `just build` for other platforms (viewing,
+# and recording with --attach unit, work there).
 
 set -eu
 
@@ -34,7 +35,7 @@ need tar
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 case "${os}" in
 linux) ;;
-*) die "unsupported OS '${os}': only linux binaries are published (juju-lens-probe is eBPF/Linux-only); build from source with 'go install ${repo}/cmd/${bin}@latest' instead" ;;
+*) die "unsupported OS '${os}': only linux binaries are published; build from source with 'just build' instead (see the README)" ;;
 esac
 
 arch_raw="$(uname -m)"
@@ -94,13 +95,23 @@ if [ -z "${install_dir}" ]; then
 fi
 mkdir -p "${install_dir}"
 
-for f in juju-lens juju-lens-probe; do
-    install -m 0755 "${workdir}/${f}" "${install_dir}/${f}" 2>/dev/null ||
-        cp "${workdir}/${f}" "${install_dir}/${f}"
-    chmod 0755 "${install_dir}/${f}"
-done
+install -m 0755 "${workdir}/${bin}" "${install_dir}/${bin}" 2>/dev/null ||
+    cp "${workdir}/${bin}" "${install_dir}/${bin}"
+chmod 0755 "${install_dir}/${bin}"
 
-log "installed to ${install_dir}/juju-lens and ${install_dir}/juju-lens-probe"
+# Earlier releases shipped the probe as a second binary, which they need;
+# later ones carry it inside juju-lens, so a copy left by an earlier install
+# is removed.
+if [ -e "${workdir}/juju-lens-probe" ]; then
+    install -m 0755 "${workdir}/juju-lens-probe" "${install_dir}/juju-lens-probe" 2>/dev/null ||
+        cp "${workdir}/juju-lens-probe" "${install_dir}/juju-lens-probe"
+    chmod 0755 "${install_dir}/juju-lens-probe"
+elif [ -e "${install_dir}/juju-lens-probe" ]; then
+    rm -f "${install_dir}/juju-lens-probe" &&
+        log "removed ${install_dir}/juju-lens-probe, which juju-lens now carries inside itself"
+fi
+
+log "installed to ${install_dir}/${bin}"
 case ":${PATH}:" in
 *":${install_dir}:"*) ;;
 *) log "note: ${install_dir} is not on your PATH" ;;

@@ -24,9 +24,9 @@ import (
 // Under the hood it runs `record` as a child process — so the recorder's
 // progress output goes to a log file instead of fighting the TUI's alt-screen,
 // and the child gets a clean SIGTERM (finalise manifest + authoritative index)
-// when the viewer quits. It needs root for eBPF, so the whole thing runs under
-// sudo and the TUI renders as root (the recorder's juju calls still drop to
-// $SUDO_USER internally).
+// when the viewer quits. With --attach host and no --ssh-target it needs root
+// for eBPF, so the whole thing runs under sudo and the TUI renders as root
+// (the recorder's juju calls still drop to $SUDO_USER internally).
 func newWatchCmd() *cobra.Command {
 	f := &recordFlags{debugLog: true}
 	cmd := &cobra.Command{
@@ -37,13 +37,19 @@ the viewer following the capture, so you can watch hooks, status and relation
 databags update in real time. Quitting the viewer (q) stops the recording; the
 recording directory is kept so you can 'juju-lens view' it again later.
 
+--attach and --ssh-target choose what is captured, as for 'juju-lens record'.
+
 Examples:
-  sudo juju-lens watch cos-lite            # follow one model on the current controller
-  sudo juju-lens watch --controller kub    # follow every model on a controller`,
+  sudo juju-lens watch cos-lite                 # follow one model on the current controller
+  sudo juju-lens watch --controller kub         # follow every model on a controller
+  juju-lens watch cos-lite --attach none        # logs and status only, no root needed`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
 				f.model = args[0]
+			}
+			if _, err := parseAttach(f.attach); err != nil {
+				return err
 			}
 			return runWatch(cmd.Context(), *f)
 		},
@@ -51,7 +57,8 @@ Examples:
 	cmd.Flags().StringVar(&f.model, "model", "", "scope to a single model (also accepted as a positional arg)")
 	cmd.Flags().StringVar(&f.controller, "controller", "", "scope to a controller (all its models)")
 	cmd.Flags().StringVarP(&f.output, "output", "o", "", "recording directory (default: ./recordings/<ts>--watch-<scope>)")
-	cmd.Flags().StringVar(&f.probePath, "probe-path", "", "path to the juju-lens-probe binary")
+	cmd.Flags().StringVar(&f.attach, "attach", "host", "what to capture, comma-separated: "+attachValues+" (see 'juju-lens record --help')")
+	cmd.Flags().StringVar(&f.sshTarget, "ssh-target", "", "with --attach host, run the probe on this machine over 'juju ssh' (e.g. 'controller/0')")
 	cmd.Flags().BoolVar(&f.debugLog, "debug-log", true, "also stream 'juju debug-log' for the scoped models")
 	return cmd
 }
@@ -77,15 +84,15 @@ func runWatch(ctx context.Context, f recordFlags) error {
 	if err != nil {
 		return fmt.Errorf("locating juju-lens binary: %w", err)
 	}
-	recArgs := []string{"record", name, "-o", dir}
+	recArgs := []string{"record", name, "-o", dir, "--attach", f.attach}
+	if f.sshTarget != "" {
+		recArgs = append(recArgs, "--ssh-target", f.sshTarget)
+	}
 	if f.model != "" {
 		recArgs = append(recArgs, "--model", f.model)
 	}
 	if f.controller != "" {
 		recArgs = append(recArgs, "--controller", f.controller)
-	}
-	if f.probePath != "" {
-		recArgs = append(recArgs, "--probe-path", f.probePath)
 	}
 	if !f.debugLog {
 		recArgs = append(recArgs, "--debug-log=false")

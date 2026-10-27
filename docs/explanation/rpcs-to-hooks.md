@@ -50,11 +50,21 @@ To show the state at a given moment, the viewer takes the latest snapshot for ea
 
 The Events pane lists, by default:
 
-- **Hook runs**, one row each, at the time the hook started. The row shows the hook name, its duration, and whether it wrote relation data.
+- **Hook runs**, one row each, at the time the hook started. The row shows the hook name, its duration, and whether it wrote relation data. With unit capture, a hook the tap recorded nothing of is marked `not instrumented`, and one whose records stop early is marked `truncated`; see [hooks the tap missed](#hooks-the-tap-missed).
 - **Status changes**, one row each, at the time of the RPC that made the change, with the hook that caused it.
 - **Settled units**, a row each time a unit's agent goes `idle` and stays there for at least three seconds. This is when a unit's status, such as `active / idle`, can be read as the result of the hooks before it.
 
 Verbose mode (`.`) also shows the individual RPCs that the default view folds into hook rows: each status RPC, relation scope changes (`EnterScope`, `LeaveScope`), leadership claims, secret operations, and actions, plus the repeated status changes described above.
+
+For a hook recorded with `--attach unit`, the inspector opens on a trace of what the charm did, one for each process that ran the hook, so a hook that Juju retried shows each attempt. A recording with only `--attach unit` has no `run-hook` markers: each hook process is a hook run of its own, and the processes of a hook that failed and ran again fold into one run. Each trace shows:
+
+- **The charm's `__init__`**, from `ops.main` to the first event: ops builds the charm. In the recording this is a *charm init* span, which the viewer shows as the charm's `__init__` function when the hook was profiled, because nearly all of it is that function, and as `charm __init__` otherwise. A charm that reconciles in `__init__` spends most of the hook here, so under it the trace shows the functions of the charm's own code that ran and how long each took, from the stack samples. Observers that ran for a while show theirs the same way. A function marked `mostly waiting` used little CPU for the time it took, and the mark says what it was waiting for: a Pebble call, a hook tool, a subprocess, the network, or the function it was blocked in.
+- **Deferred events** that ops re-emitted before the hook's own event, marked `re-emitted`.
+- **Each event**, in the order ops emitted it, with the observers it reached. An event an observer deferred is marked `deferred`, on the event and on that observer. Events that a handler emits, such as a library's custom events, sit under that handler.
+- **Hook tool and Pebble calls**, under the span that made them. The trace lists the calls that took long, as rows under the charm function that made them; `.` shows every call, and `export` writes every span in JSON. The Markdown export folds the calls into one line per span: a hook tool call keeps its own line when it set a status, took 50 ms or more, or failed, the rest of the hook tool calls fold into one line, and all the Pebble calls fold into another, each with their count, their total time and the most frequent names. Pebble reads that fail are folded too, because charms often check for files that don't exist yet. Events that no observer handled fold into one line.
+- **Python subprocesses** the charm started, under the observer that was running when they started.
+
+An exception shows on the innermost span it was raised in, usually an observer or charm init; the spans it passed through are marked `✗`. "of it Python code, not calls" is the time a span spent running Python between the hook tool and Pebble calls it made.
 
 Log lines aren't tied to RPCs when they're recorded, so the Logs pane doesn't try to attribute them. It merges events and log lines from every source into one stream ordered by time and scrolls to the selected event, so the lines around it are the ones written while it happened. The exception is a log line that carries the event's span ID, which the pane marks with `»`. This only happens when tracing is enabled in Juju and the log source writes span IDs.
 
@@ -100,3 +110,22 @@ A hook that hasn't reached `continue` yet and matches none of the rules is still
 The default view marks errored, retried, and RPC warning hooks. Capture gaps and interrupted hooks describe the recording, not the charm, so they're only marked in verbose mode.
 
 The same classification appears in `juju-lens export`. See [how to export a recording for an agent](../how-to/export-for-an-agent.md).
+
+## Hooks the tap missed
+
+With `record --attach unit`, a module in the charm's venv records each hook from inside the charm process: its events, observers and calls. A hook it records nothing of would simply be missing from the timeline, and a missing hook reads the same as one that never ran. So `juju-lens` looks for hooks in three other places, and marks the ones the tap didn't see as `not instrumented`:
+
+- **The unit probe's view of the processes.** The probe in each unit polls `/proc` for children of the unit agent, ten times a second while nothing runs. A hook or action it finds with no tap records becomes a hook run with its exact start, its end to within the poll, and what it cost, as soon as it ends.
+- **The unit agent's status log.** The agent sets its status to `executing` with a message such as `running config-changed hook` or `running action reconcile` each time it runs a hook or an action. When the recording stops, the recorder fetches each covered unit's log with `juju show-status-log --type juju-unit`.
+- **The `run-hook` markers**, when the recording also captured the agents' RPCs (`--attach host,unit`).
+
+A hook from any of these with no tapped process of the same unit and hook at the same time becomes a hook run of its own, with the reason when the probe's records give one. The reasons come from what the probe saw: a charm with no venv isn't built on ops, so the tap can't load into it; a hook that ran after a refresh recreated the pod, but before the probe installed the tap in the new venv, was missed for that reason; and `juju exec` runs as the action `juju-exec`, which runs commands, not the charm.
+
+Not every hook can be cross-checked this way:
+
+- **A short hook can slip between two polls.** A process that starts and ends within one poll interval, about 100 milliseconds, isn't seen by the probe.
+- **`update-status` isn't in the status log.** Juju doesn't log it, so in a recording with only `--attach unit`, an `update-status` the tap missed appears only if the probe's poll caught it. With `--attach host,unit`, its `run-hook` marker still shows it.
+- **The status log is fetched when the recording stops.** A live view shows the hooks the probe found as they end, but the reasons, and the hooks only the status log saw, once the recording has stopped and been indexed. A recorder that was killed before it could stop has no status log.
+- **Only units a unit probe covered are checked.** A hook on a unit that never had a probe isn't marked.
+
+A hook the tap did record can still be incomplete. A process that the out-of-memory killer or `SIGKILL` stopped never writes its last record, and on Kubernetes a hook still running when its pod is deleted loses its probe session with it. Such hooks are marked `truncated`: the events and observers shown are the ones that ran before the records stop.

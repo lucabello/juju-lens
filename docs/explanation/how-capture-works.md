@@ -4,7 +4,7 @@
 
 Every Juju agent (`jujud` on machines and controllers, `containeragent` in Kubernetes units) talks to the controller over a TLS-encrypted websocket. All the activity `juju-lens` cares about travels over that connection: a unit setting its status, a hook committing relation data, a leadership claim, a secret lookup. On the network this traffic is ciphertext. Inside the agent process it exists as plaintext for a short time: just before Go's `crypto/tls` package encrypts an outgoing write, and just after it decrypts an incoming read.
 
-`juju-lens` reads the plaintext at those two points. It doesn't use the Juju API to watch the model, and it doesn't touch the charm processes. [Why the wire](why-the-wire.md) compares this with the alternatives.
+With `--attach host`, `juju-lens` reads the plaintext at those two points. It doesn't use the Juju API to watch the model, and it doesn't touch the charm processes; [how unit capture works](how-unit-capture-works.md) describes `--attach unit`, which does. [Why the wire](why-the-wire.md) compares this with the alternatives.
 
 ## Attaching to the agent
 

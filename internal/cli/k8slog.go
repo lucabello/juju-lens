@@ -36,6 +36,7 @@ type k8sIngester struct {
 	wg  *sync.WaitGroup
 
 	mu     sync.Mutex
+	warned map[string]bool       // problems already reported, by namespace or ""
 	models map[string]bool       // namespace (== model short-name) in scope
 	active map[string]*podStream // by "model\x00pod\x00container"
 	n      int64                 // total lines written across all streams
@@ -54,6 +55,7 @@ func newK8sIngester(layout recording.Layout, controller string, discover bool, m
 		discover:   discover,
 		models:     map[string]bool{},
 		active:     map[string]*podStream{},
+		warned:     map[string]bool{},
 	}
 	for _, m := range models {
 		ki.models[m] = true
@@ -65,6 +67,9 @@ func newK8sIngester(layout recording.Layout, controller string, discover bool, m
 func (ki *k8sIngester) start(ctx context.Context, wg *sync.WaitGroup) {
 	ki.ctx = ctx
 	ki.wg = wg
+	if _, err := exec.LookPath("kubectl"); err != nil {
+		ki.warn("", "k8s logs: kubectl not found, so workload logs aren't recorded. Use --attach unit to read them through Pebble, or --k8s-log=false to skip them")
+	}
 	ki.reconcile()
 	wg.Add(1)
 	go func() {
@@ -106,13 +111,29 @@ func (ki *k8sIngester) reconcile() {
 	for _, ns := range namespaces {
 		pods, err := k8sPodContainers(ki.ctx, ns)
 		if err != nil {
-			continue // cluster unreachable / namespace gone: try again next tick
+			// Cluster unreachable or namespace gone: say so once, and try
+			// again next tick.
+			if ki.ctx.Err() == nil {
+				ki.warn(ns, fmt.Sprintf("k8s logs: kubectl can't list the pods of namespace %q (%v); its workload logs aren't recorded until it can. Use --attach unit to read them through Pebble, or --k8s-log=false to skip them", ns, err))
+			}
+			continue
 		}
 		for pod, containers := range pods {
 			for _, c := range containers {
 				ki.ensureStream(ns, pod, c)
 			}
 		}
+	}
+}
+
+// warn prints a problem once for key.
+func (ki *k8sIngester) warn(key, msg string) {
+	ki.mu.Lock()
+	seen := ki.warned[key]
+	ki.warned[key] = true
+	ki.mu.Unlock()
+	if !seen {
+		fmt.Fprintf(os.Stderr, "juju-lens: %s\n", msg)
 	}
 }
 

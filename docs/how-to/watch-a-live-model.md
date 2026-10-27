@@ -4,7 +4,7 @@ Use this guide to follow a model's activity as it happens, for example while you
 
 ## Prerequisites
 
-- The same as for [recording a controller](record-a-controller.md#prerequisites). `watch` only supports agents on the local host.
+- The same as for [recording a controller](record-a-controller.md#prerequisites).
 
 ## Start watching
 
@@ -21,6 +21,12 @@ sudo juju-lens watch --controller microk8s
 ```
 
 Juju commands that `watch` runs internally run as the user who invoked `sudo`, so your own Juju credentials are used. The recording is written to `./recordings/<timestamp>--watch-cos`, or to the directory given with `--output`.
+
+`watch` takes the same `--attach` and `--ssh-target` flags as `record`. To watch a machine controller's agents remotely, pass `--ssh-target`; to follow only logs and status, without the probe and without `sudo`, pass `--attach none`:
+
+```bash
+juju-lens watch cos --attach none
+```
 
 `watch` waits up to 30 seconds for the recording to start before opening the viewer. If it gives up, read `record.log` in the recording directory: the recorder writes its output there instead of the terminal, so it doesn't interfere with the viewer. Common causes are missing root or `CAP_BPF`, a controller that can't be reached, and `juju-lens-probe` not being installed.
 

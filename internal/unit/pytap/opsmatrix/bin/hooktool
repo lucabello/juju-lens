@@ -1,0 +1,26 @@
+#!/bin/sh
+# Fake Juju hook tool for the tap's ops version matrix: the matrix links every
+# tool name to this script. It prints canned output, some of it holding
+# MARKER values the tap must never record.
+t=$(basename "$0")
+case "$t" in
+  is-leader) echo true ;;
+  config-get) echo '{"password": "MARKER-config-value"}' ;;
+  relation-ids) echo '["db:1"]' ;;
+  relation-list) echo '["remote/0"]' ;;
+  relation-get) echo '{"host": "MARKER-remote-databag"}' ;;
+  status-get) echo '{"status": "unknown", "message": ""}' ;;
+  action-get) echo '{}' ;;
+  goal-state) echo '{"units": {}, "relations": {}}' ;;
+  relation-set|state-set|action-set|secret-set) cat > /dev/null ;;
+  secret-add) cat > /dev/null; echo 'secret:abc123' ;;
+  status-set)
+    for a in "$@"; do
+      if [ "$a" = boom ]; then
+        printf 'ERROR invalid status: %0600d\n' 0 >&2
+        exit 2
+      fi
+    done
+    ;;
+esac
+exit 0

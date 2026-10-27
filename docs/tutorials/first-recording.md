@@ -35,7 +35,7 @@ juju controllers
 The current controller is marked with `*`. In the directory where you built `juju-lens`, start a recording called `int-test`:
 
 ```bash
-sudo ./bin/juju-lens record int-test --attach local
+sudo ./bin/juju-lens record int-test
 ```
 
 Without `--controller` or `--model`, `juju-lens` records every model on the current controller, including models created after it starts. The tests will create one. Leave this command running.

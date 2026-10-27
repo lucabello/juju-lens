@@ -1,6 +1,6 @@
 # From wire to viewer
 
-[How capture works](how-capture-works.md) ends with plaintext bytes in a kernel ring buffer. This page follows those bytes through the processes and files that turn them into a recording on disk and an index the viewer can query. It's the same for local and SSH attach.
+[How capture works](how-capture-works.md) ends with plaintext bytes in a kernel ring buffer. This page follows those bytes through the processes and files that turn them into a recording on disk and an index the viewer can query. It's the same whether the probe runs locally or over SSH.
 
 ```mermaid
 flowchart LR
@@ -14,11 +14,13 @@ flowchart LR
 
 ## The probe
 
-`juju-lens-probe` is a separate binary that runs on the same host as the agents it observes. It drains the ring buffer and writes each captured buffer to its standard output as a *frame*: a length-prefixed JSON object holding the bytes, a timestamp, the process ID, the TLS connection the bytes belong to, and whether they were written or read.
+The probe is part of `juju-lens`: it runs on the same host as the agents it observes, as `juju-lens probe` on this host, or uploaded to the machine you name with `--ssh-target`. It drains the ring buffer and writes each captured buffer to its standard output as a *frame*: a length-prefixed JSON object holding the bytes, a timestamp, the process ID, the TLS connection the bytes belong to, and whether they were written or read.
 
 The probe also labels each frame with the agent's identity. When it first sees a process, it reads that agent's `agent.conf` to learn the controller UUID, the model UUID, and the unit name. Frames from a unit agent therefore arrive already attributed to a unit, even if the connection's opening handshake was never captured.
 
-With `--attach local`, `juju-lens record` starts the probe as a child process. With `--attach ssh`, it runs the probe on the remote machine through `juju ssh` and reads frames from the SSH session. Everything after this point is the same in both modes.
+On a machine, one `jujud` process runs the agents of every unit on it, so its `agent.conf` names the machine, not a unit. Each unit's agent keeps its own API connection, though, and its `Uniter` and `LeadershipService` calls name the unit they act for. The recorder takes a connection's unit from the first such call and gives it to every RPC on that connection. An RPC seen before that call has no unit.
+
+With `--attach host`, `juju-lens record` starts the probe as a child process, or, when `--ssh-target` is set, runs it on that machine through `juju ssh` and reads frames from the SSH session. Everything after this point is the same either way.
 
 ## The recorder
 

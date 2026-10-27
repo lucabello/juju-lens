@@ -44,9 +44,12 @@ type Event struct {
 	Dur         time.Duration // hook duration (run-hook → continue)
 	Running     bool          // hook still open at the tail of a live recording
 	VerboseOnly bool          // a raw transition: hidden in the default view
+	Tap         string        // recording.TapMissing or TapTruncated: the tap didn't record the hook in full
+	TapReason   string        // why, when known
 
-	SettleWorkload string // workload status at an EvSettle marker (for colouring)
-	Cause          string // the hook that produced a promoted EvStatus marker (M12)
+	SettleWorkload string   // workload status at an EvSettle marker (for colouring)
+	Cause          string   // the hook that produced a promoted EvStatus marker (M12)
+	OpsSpans       []string // EvHook: the root span of each process that ran the hook (HookRun.OpsSpans)
 }
 
 // FailState classifies how a hook run ended. A single boolean "failed" would
@@ -135,13 +138,14 @@ func BuildEventsWithStatus(spans []recording.SpanRow, databagChanged map[string]
 		ev := Event{
 			TS: r.StartTs, Kind: EvHook, Unit: r.Unit, App: r.App,
 			Summary: hookDisplayName(r, resolver), SpanID: r.RepSpan,
-			Fail: r.Fail, HasDatabag: databagChanged[r.RepSpan],
+			Fail: r.Fail, HasDatabag: databagChanged[r.RepSpan], OpsSpans: r.OpsSpans,
 		}
 		if r.Open {
 			ev.Running = true
 		} else {
 			ev.Dur = r.EndTs.Sub(r.StartTs)
 		}
+		ev.Tap, ev.TapReason = r.Tap, r.TapReason
 		out = append(out, ev)
 		for _, spanID := range r.SpanIDs {
 			st, ok := statusBySpan[spanID]
@@ -220,7 +224,7 @@ func settleEvents(spans []recording.SpanRow) []Event {
 	agentByUnit := map[string][]agentSample{}
 	workloadByUnit := map[string][]agentSample{} // reuse shape: value is workload status
 	for _, sp := range spans {
-		if sp.Unit == "" {
+		if sp.Unit == "" || sp.Service == recording.ServiceOps {
 			continue
 		}
 		method := sp.Attrs["method"]
@@ -320,25 +324,31 @@ func hideRedundantMarkers(events []Event) {
 }
 
 // HookRun is one execution of a hook on a unit: the run-hook..continue bracket
-// the uniter writes in its SetState blobs (docs/explanation/rpcs-to-hooks.md).
+// the uniter writes in its SetState blobs (docs/explanation/rpcs-to-hooks.md),
+// or, without RPC capture, the hook processes the tap recorded in the charm.
 // RepSpan is the span a consumer drills into — the CommitHookChanges when the
-// hook committed, else the run-hook marker itself. RemoteApp/StorageID come from
-// the run-hook marker and reconstruct the charm-visible hook name.
+// hook committed, else the run-hook marker itself, else the last ops root.
+// RemoteApp/StorageID come from the run-hook marker (or the hook's
+// environment) and reconstruct the charm-visible hook name.
 type HookRun struct {
 	Unit       string
 	App        string
 	Kind       string // bare kind from the marker, e.g. "relation-changed"
+	Name       string // charm-visible name, when the tap recorded the hook
 	RemoteApp  string // relation hooks: the remote application
 	StorageID  string // storage hooks: e.g. "data/0"
 	StartTs    time.Time
 	EndTs      time.Time
 	RepSpan    string
 	SpanIDs    []string  // every span folded into this run (for status attribution, M10)
+	OpsSpans   []string  // root span of each process that ran this hook, retries included, in order
 	RPCErr     bool      // an RPC inside the bracket returned an error (M10)
 	Retries    int       // times `opstep: pending` reappeared after already being seen once: the uniter's retry loop (M10)
 	Superseded bool      // a *different* hook opened before this one's `continue`: interrupted or lost-continue (M10)
 	Fail       FailState // how the run went wrong, if at all (M10)
 	Open       bool      // start marker seen, end not yet (live tail / truncated recording)
+	Tap        string    // recording.TapMissing or TapTruncated, from the first of OpsSpans that says so
+	TapReason  string    // why the tap missed or cut the hook, when known
 
 	seenPending bool // opstep:pending already seen once for this bracket — a second one is a real retry, not the normal queued→pending step
 	doneSeen    bool // opstep:done already seen for this bracket — distinguishes FailInterrupted (abandoned mid-run) from FailLostContinue (finished, but its own continue marker is missing) when Superseded
@@ -389,10 +399,16 @@ func (r *HookRun) classify() {
 // opstep, not a new hook. When no run-hook marker is present (the recorder
 // attached mid-hook, or synthetic test data) it falls back to a maximal run of
 // consecutive spans sharing the same labelled Hook (docs/explanation/rpcs-to-hooks.md).
+// The tap's ops spans then join those runs, or make runs of their own (joinOps).
 func BuildHookRuns(spans []recording.SpanRow) []HookRun {
 	byUnit := map[string][]recording.SpanRow{}
 	var order []string
+	var ops []recording.SpanRow
 	for _, sp := range spans {
+		if sp.Service == recording.ServiceOps {
+			ops = append(ops, sp)
+			continue
+		}
 		if sp.Unit == "" {
 			continue
 		}
@@ -500,7 +516,7 @@ func BuildHookRuns(spans []recording.SpanRow) []HookRun {
 		}
 		closeRun()
 	}
-	return runs
+	return joinOps(runs, ops)
 }
 
 // snapBody mirrors the JSON shape written by index.ExtractSnapshots. Kept
@@ -540,6 +556,9 @@ func StatusMapFromSnapshots(unit, app map[string]index.SnapshotRow) map[string]H
 // against the unit's relations (resolver); synthetic runs whose kind already
 // carries the endpoint pass through unchanged.
 func hookDisplayName(r HookRun, resolver map[string]map[string]string) string {
+	if r.Name != "" {
+		return r.Name // the tap saw the hook's own name
+	}
 	switch {
 	case isRelationHook(r.Kind):
 		if ep := resolver[r.App][r.RemoteApp]; ep != "" {
@@ -637,7 +656,7 @@ func parseRelationKey(key, localApp string) (localEp, remoteApp string, ok bool)
 // here — they surface inside that hook's inspector instead of doubling as their
 // own row (docs/explanation/rpcs-to-hooks.md).
 func rawTransition(sp recording.SpanRow) (Event, bool) {
-	if sp.Hook != "" {
+	if sp.Hook != "" || sp.Service == recording.ServiceOps {
 		return Event{}, false
 	}
 	facade := sp.Attrs["facade"]

@@ -4,10 +4,10 @@ Use this guide to record the API traffic and logs of a running Juju controller, 
 
 ## Prerequisites
 
-- `juju-lens` and `juju-lens-probe` installed. See [install](../../README.md#install).
+- `juju-lens` installed. See [install](../../README.md#install). It carries the probe it runs.
 - Linux 5.8 or newer, and root or `CAP_BPF`, on the host where the agents run.
 - A Juju client that can reach the controller, using the usual credentials in `~/.local/share/juju` or `$JUJU_DATA`.
-- To record a machine controller remotely: `juju-lens-probe` installed on the controller machine, in the `$PATH` of root. `juju-lens` doesn't copy it there.
+- To record a machine controller remotely: a Juju client that can `juju ssh` into the controller machine, with passwordless `sudo` there. `juju-lens` uploads the probe to the machine.
 
 ## Record on the same host
 
@@ -29,7 +29,7 @@ juju-lens record my-capture \
     --ssh-target controller/0
 ```
 
-`juju-lens` runs `juju-lens-probe` on that machine through `juju ssh` and `sudo`, and streams the captured data back. Setting `--ssh-target` selects SSH attach; you can also select it explicitly with `--attach ssh`.
+`juju-lens` uploads its probe to that machine over `juju ssh`, runs it there with `sudo`, and streams the captured data back. The probe deletes itself as it starts. Without `--ssh-target`, the probe runs on the host you're on.
 
 ## Choose what to record
 
@@ -49,6 +49,12 @@ sudo juju-lens record my-capture --pid 12345 --pid 12346
 
 ```bash
 sudo juju-lens record my-capture --debug-log=false --k8s-log=false --machine-log=false
+```
+
+To record only the logs and the status snapshot, without the probe and without root, pass `--attach none`:
+
+```bash
+juju-lens record my-capture --model cos --attach none
 ```
 
 ## Stop the recording

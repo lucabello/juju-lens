@@ -2,8 +2,10 @@ package probe
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/lucabello/juju-lens/internal/wire"
@@ -41,6 +43,10 @@ func Ingest(
 	// as noise so we can drop their responses too (a response carries no facade,
 	// only a request-id, so it can only be classified by its request).
 	suppressed := map[connKey]map[uint64]bool{}
+	// connUnit is the unit each connection of a process with no unit of its
+	// own speaks for: on a machine, one jujud runs every unit's agent, each
+	// with its own API connection.
+	connUnit := map[connKey]string{}
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -97,6 +103,17 @@ func Ingest(
 		}
 		ts := time.Unix(0, f.TsUnixNano).UTC()
 		for _, e := range envelopes {
+			unit, app := f.Unit, f.App
+			if unit == "" {
+				if _, ok := connUnit[key]; !ok && e.IsRequest() {
+					if u := unitOfRequest(e); u != "" {
+						connUnit[key] = u
+					}
+				}
+				if unit = connUnit[key]; unit != "" {
+					app = unit[:strings.LastIndexByte(unit, '/')]
+				}
+			}
 			if filtered(key, e, suppressed) {
 				continue
 			}
@@ -108,8 +125,8 @@ func Ingest(
 				Controller: ctrlName,
 				Model:      modelName,
 				ModelUUID:  modelUUID,
-				App:        f.App,
-				Unit:       f.Unit,
+				App:        app,
+				Unit:       unit,
 				Msg:        e,
 			}
 			if err := sink(cm); err != nil {
@@ -144,6 +161,48 @@ func filtered(key connKey, e wire.Envelope, suppressed map[connKey]map[uint64]bo
 		return true
 	}
 	return false
+}
+
+// unitOfRequest returns the unit a unit agent's request is made by, from the
+// tag its Uniter and LeadershipService calls name it with ("unit-tag", or
+// "tag" in an entity), or "". Only those keys: other unit tags in Uniter
+// params ("remote-unit", "unit") name other units.
+func unitOfRequest(e wire.Envelope) string {
+	if e.Type != "Uniter" && e.Type != "LeadershipService" {
+		return ""
+	}
+	var params any
+	if json.Unmarshal(e.Params, &params) != nil {
+		return ""
+	}
+	return findUnitTag(params)
+}
+
+func findUnitTag(v any) string {
+	switch v := v.(type) {
+	case map[string]any:
+		for _, k := range []string{"unit-tag", "tag"} {
+			if s, ok := v[k].(string); ok {
+				if rest, ok := strings.CutPrefix(s, "unit-"); ok {
+					if i := strings.LastIndexByte(rest, '-'); i > 0 {
+						return rest[:i] + "/" + rest[i+1:]
+					}
+				}
+			}
+		}
+		for _, c := range v {
+			if u := findUnitTag(c); u != "" {
+				return u
+			}
+		}
+	case []any:
+		for _, c := range v {
+			if u := findUnitTag(c); u != "" {
+				return u
+			}
+		}
+	}
+	return ""
 }
 
 // coreMethods is the allowlist of high-value RPCs the recording keeps: the ones

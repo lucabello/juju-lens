@@ -52,24 +52,15 @@ func (m *model) renderOverlay() {
 	}
 	var body strings.Builder
 	fmt.Fprintf(&body, "%s\n", strings.Join(head, " · "))
-	m.renderFailure(&body, ev, sp, ok)
-	m.renderStatusChanges(&body, ev)
-	if ok && sp.StatusCode == "ERROR" {
-		line := "ERROR"
-		if sp.StatusMsg != "" {
-			line += ": " + sp.StatusMsg
-		}
-		fmt.Fprintf(&body, "%s\n", styleErr.Render(line))
-	}
-	if ev.detail != "" {
-		fmt.Fprintf(&body, "%s\n", styleWarn.Render(ev.detail))
-	}
-
-	if ok && ev.hasDatabag {
-		m.renderDatabags(&body, sp)
-	}
-	if isConfigChanged(ev) {
-		m.renderConfig(&body, ev)
+	switch m.inspMode {
+	case inspFlame:
+		m.renderFlameView(&body, ev)
+	case inspMemory:
+		m.renderMemoryView(&body, ev)
+	case inspTrace:
+		m.renderTraceView(&body, ev)
+	default:
+		m.renderDetail(&body, ev, sp, ok)
 	}
 
 	var b strings.Builder
@@ -78,6 +69,52 @@ func (m *model) renderOverlay() {
 	b.WriteString(body.String())
 
 	m.overlay.SetContent(ansi.Hardwrap(b.String(), max(1, m.width-4), false))
+	if m.inspMode == inspFlame || m.inspMode == inspTrace {
+		// Keep the selected row in view as it moves.
+		selRow := m.flame.selRow
+		if m.inspMode == inspTrace {
+			selRow = m.trace.selRow
+		}
+		line := 3 + selRow
+		switch {
+		case line < m.overlay.YOffset:
+			m.overlay.SetYOffset(line)
+		case m.overlay.Height > 0 && line >= m.overlay.YOffset+m.overlay.Height:
+			m.overlay.SetYOffset(line - m.overlay.Height + 1)
+		}
+	}
+}
+
+// renderDetail is the inspector's view of what an event changed (`i`): how it
+// failed, what it set, and the databags or config it changed. A hook recorded
+// from inside the unit opens on its trace instead.
+func (m *model) renderDetail(body *strings.Builder, ev event, sp recording.SpanRow, ok bool) {
+	start := body.Len()
+	defer func() {
+		if body.Len() == start {
+			fmt.Fprintf(body, "\n%s\n", styleDim.Render("Nothing was recorded about what this hook set or changed."))
+		}
+	}()
+	m.renderFailure(body, ev, sp, ok)
+	renderTap(body, ev)
+	m.renderStatusChanges(body, ev)
+	if ok && sp.StatusCode == "ERROR" {
+		line := "ERROR"
+		if sp.StatusMsg != "" {
+			line += ": " + sp.StatusMsg
+		}
+		fmt.Fprintf(body, "%s\n", styleErr.Render(line))
+	}
+	if ev.detail != "" {
+		fmt.Fprintf(body, "%s\n", styleWarn.Render(ev.detail))
+	}
+
+	if ok && ev.hasDatabag {
+		m.renderDatabags(body, sp)
+	}
+	if isConfigChanged(ev) {
+		m.renderConfig(body, ev)
+	}
 }
 
 // renderFailure explains, in the inspector, how a hook run went wrong (M10).
@@ -105,6 +142,25 @@ func (m *model) renderFailure(b *strings.Builder, ev event, sp recording.SpanRow
 	}
 }
 
+// renderTap says, in the inspector, that the tap didn't record the hook in
+// full, and why when that is known, so a hook with no events or observers
+// doesn't read as one that had none.
+func renderTap(b *strings.Builder, ev event) {
+	var line string
+	switch ev.tap {
+	case recording.TapMissing:
+		line = "not instrumented — the hook ran, but the tap recorded nothing of it: no events, observers or calls"
+	case recording.TapTruncated:
+		line = "truncated — the tap's records of this hook stop before its process exited"
+	default:
+		return
+	}
+	if ev.tapReason != "" {
+		line += "; " + ev.tapReason
+	}
+	fmt.Fprintf(b, "%s\n", styleWarn.Render(line))
+}
+
 // renderStatusChanges lists the workload/application statuses the charm set from
 // inside this hook (M10). Every status a charm reports is set while a hook runs,
 // so this is the hook that drove the charm into its current state.
@@ -128,14 +184,34 @@ func (m *model) renderStatusChanges(b *strings.Builder, ev event) {
 
 // overlayHelp is the keybinding line at the top of the inspector. The diff /
 // copy hints only appear when the event actually carries a databag or config to
-// act on.
+// act on, and the trace, profile and memory hints when it has a charm-side
+// tree. The trace, profile and memory views list their own keys.
 func (m *model) overlayHelp() string {
+	switch m.inspMode {
+	case inspFlame:
+		return m.profileHelp()
+	case inspMemory:
+		help := "esc back · ↑/↓ scroll · t trace · p profile"
+		if hasChanges(m.currentEvent()) {
+			help += " · d changes"
+		}
+		return help
+	case inspTrace:
+		return m.traceHelp()
+	}
 	help := "esc close · ↑/↓ scroll"
+	if len(m.currentEvent().opsSpans) > 0 {
+		help = "esc back to the trace · ↑/↓ scroll · t trace · p profile · m memory"
+	}
 	if m.copyCur != "" || m.copyPrev != "" {
 		help += " · d diff · y copy after · Y copy before"
 	}
 	return help
 }
+
+// hasChanges reports whether an event changed a relation databag or the charm
+// config, which `d` shows in detail.
+func hasChanges(ev event) bool { return ev.hasDatabag || isConfigChanged(ev) }
 
 // isConfigChanged reports whether an event is a unit's config-changed hook, for
 // which the inspector shows the charm-config diff. See narrative.IsConfigChanged.
@@ -144,13 +220,13 @@ func isConfigChanged(ev event) bool {
 }
 
 // inspectable reports whether an event has anything worth drilling into: a
-// databag change, a config change, a failure, or a status the hook drove the
-// charm into (M10). Enter is a no-op on anything else. See
-// narrative.Inspectable.
+// databag change, a config change, a failure, a status the hook drove the
+// charm into (M10), a charm-side tree, or a hook the tap missed or cut
+// short. Enter is a no-op on anything else. See narrative.Inspectable.
 func inspectable(ev event) bool {
 	return narrative.Inspectable(narrative.Event{
 		Kind: ev.kind, Summary: ev.summary, HasDatabag: ev.hasDatabag,
-		Fail: ev.fail, Statuses: ev.statuses,
+		Fail: ev.fail, Statuses: ev.statuses, OpsSpans: ev.opsSpans, Tap: ev.tap,
 	})
 }
 
@@ -229,13 +305,15 @@ func (m *model) renderDatabags(b *strings.Builder, sp recording.SpanRow) {
 // renderConfig shows the charm-config for a config-changed hook: the config read
 // during the hook, pretty-printed, with `d` overlaying a git-style diff against
 // the value in effect before the hook — i.e. what the config change actually
-// did. Copyable with `y`/`Y`. Nothing is shown when no config was captured.
+// did. Copyable with `y`/`Y`. Nothing is shown when no config was read during
+// the hook: without host capture (`--attach unit` or `none`) the only config
+// is the one captured when the recording started, from before the change.
 func (m *model) renderConfig(b *strings.Builder, ev event) {
 	if m.db == nil {
 		return
 	}
 	scope := "config:" + ev.app
-	curBody, _ := m.db.LatestSnapshotBefore(m.activeModel.ID, scope, ev.ts.Add(ev.dur))
+	curBody, _ := m.db.LatestSnapshotBetween(m.activeModel.ID, scope, ev.ts, ev.ts.Add(ev.dur))
 	if curBody == "" {
 		return
 	}

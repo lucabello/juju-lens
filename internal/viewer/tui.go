@@ -88,6 +88,7 @@ type keymap struct {
 	Tab, ShiftTab                         key.Binding
 	Inspect, Free, NextUnit, PrevUnit     key.Binding
 	Diff, CopyCur, CopyPrev               key.Binding
+	Flame, Memory, Trace                  key.Binding
 	Verbose, ModelPick, Quit              key.Binding
 	Search, ToggleScope, ResetFilters     key.Binding
 }
@@ -109,9 +110,12 @@ func defaultKeymap() keymap {
 		Free:         key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow/free")),
 		NextUnit:     key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "next (unit)")),
 		PrevUnit:     key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "prev (unit)")),
-		Diff:         key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "diff")),
+		Diff:         key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "changes")),
 		CopyCur:      key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy after")),
 		CopyPrev:     key.NewBinding(key.WithKeys("Y"), key.WithHelp("Y", "copy before")),
+		Flame:        key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "profile")),
+		Memory:       key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "memory")),
+		Trace:        key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "trace")),
 		Verbose:      key.NewBinding(key.WithKeys("."), key.WithHelp(".", "verbose")),
 		ModelPick:    key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "model")),
 		Quit:         key.NewBinding(key.WithKeys("q", "esc", "ctrl+c"), key.WithHelp("q", "quit")),
@@ -133,7 +137,7 @@ func (k keymap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
 		{k.ScrollLeft, k.ScrollRight, k.Wrap, k.Tab, k.ShiftTab, k.Free},
-		{k.Inspect, k.NextUnit, k.PrevUnit, k.Verbose, k.ModelPick, k.Quit},
+		{k.Inspect, k.Diff, k.NextUnit, k.PrevUnit, k.Verbose, k.ModelPick, k.Quit},
 		{k.Search, k.ToggleScope, k.ResetFilters},
 	}
 }
@@ -162,6 +166,7 @@ type model struct {
 	cursor       int
 	verbose      bool            // `.`: reveal the raw RPC transitions behind the hooks
 	databagSpans map[string]bool // span ids that changed a databag (M7 marker)
+	ops          *narrative.OpsIndex
 
 	// Logs (bottom) — the merged stream.
 	rawLogs        []index.LogRow // every log row for the model, unfiltered — fetched once per setActiveModel, not per keystroke (M14)
@@ -200,9 +205,14 @@ type model struct {
 	// Inspector overlay.
 	overlayOn bool
 	overlay   viewport.Model
-	diffMode  bool   // `d`: overlay a git-style diff on the pretty-printed value
-	copyCur   string // current databag/config JSON for `y`
-	copyPrev  string // previous databag/config JSON for `Y`
+	diffMode  bool       // `d`: overlay a git-style diff on the pretty-printed value
+	copyCur   string     // current databag/config JSON for `y`
+	copyPrev  string     // previous databag/config JSON for `Y`
+	inspMode  inspMode   // what the inspector shows: the event's detail, its profile, or memory
+	profCache profCache  // the profiles of the hook processes the inspector shows
+	trace     traceState // `t` in the inspector
+	flame     flameState // `p` in the inspector
+	mem       memState   // `m` in the inspector
 
 	follow bool
 	atTail bool
@@ -287,6 +297,13 @@ func (m *model) setActiveModel(mm index.Model) {
 	appStatusBySpan, _ := m.db.StatusBySpan(mm.ID, string(index.KindAppStatus))
 	statusBySpan := statusMapFromSnapshots(unitStatusBySpan, appStatusBySpan)
 	m.allEvents = buildEventsWithStatus(spans, m.databagSpans, statusBySpan)
+	m.profCache = profCache{} // a hook's profile is indexed once it ends
+	m.ops = narrative.NewOpsIndex(spans)
+	for i := range m.allEvents {
+		if ev := &m.allEvents[i]; len(ev.opsSpans) > 0 {
+			ev.opsNames = strings.ToLower(strings.Join(m.ops.Names(ev.opsSpans), "\n"))
+		}
+	}
 	m.events = nil // force applyFilters to select the first visible event
 	m.appTree = buildAppTree(spans)
 	m.relationBroken = relationBrokenTimes(spans)
@@ -308,7 +325,8 @@ func (m *model) scopeMatches(app, unit string) bool {
 }
 
 // matchesEventQuery reports whether ev's searchable text contains query
-// (case-insensitive substring). An empty query always matches.
+// (case-insensitive substring). A hook also matches on the events and
+// observers the charm ran in it. An empty query always matches.
 func matchesEventQuery(ev event, query string) bool {
 	if query == "" {
 		return true
@@ -317,7 +335,8 @@ func matchesEventQuery(ev event, query string) bool {
 	return strings.Contains(strings.ToLower(ev.summary), q) ||
 		strings.Contains(strings.ToLower(ev.detail), q) ||
 		strings.Contains(strings.ToLower(ev.unit), q) ||
-		strings.Contains(strings.ToLower(ev.app), q)
+		strings.Contains(strings.ToLower(ev.app), q) ||
+		strings.Contains(ev.opsNames, q)
 }
 
 // applyFilters recomputes the visible event slice from allEvents, honouring
@@ -620,24 +639,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// The inspector overlay captures keys while open.
 	if m.overlayOn {
-		switch {
-		case key.Matches(msg, m.keys.Quit), key.Matches(msg, m.keys.Inspect):
-			m.overlayOn = false
-		case key.Matches(msg, m.keys.Diff):
-			m.diffMode = !m.diffMode
-			m.renderOverlay()
-		case key.Matches(msg, m.keys.CopyCur):
-			return m, copyCmd(m.copyCur)
-		case key.Matches(msg, m.keys.CopyPrev):
-			return m, copyCmd(m.copyPrev)
-		default:
-			var cmd tea.Cmd
-			m.overlay, cmd = m.overlay.Update(msg)
-			return m, cmd
-		}
-		return m, nil
+		return m.handleOverlayKey(msg)
 	}
 
 	switch {
@@ -671,6 +674,20 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// a config change — are inspectable. Only reachable from the Events pane.
 		if m.focus == paneEvents && inspectable(m.currentEvent()) {
 			m.overlayOn = true
+			m.inspMode = inspDetail
+			if len(m.currentEvent().opsSpans) > 0 {
+				m.inspMode = inspTrace // a hook recorded from inside the unit opens on its trace
+			}
+			m.renderOverlay()
+			m.overlay.GotoTop()
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.Diff):
+		// The databag or config changes of the selected event, as a diff.
+		if m.focus == paneEvents && hasChanges(m.currentEvent()) {
+			m.overlayOn = true
+			m.inspMode = inspDetail
+			m.diffMode = true
 			m.renderOverlay()
 			m.overlay.GotoTop()
 		}
@@ -980,18 +997,4 @@ func clamp(v, lo, hi int) int {
 		return hi
 	}
 	return v
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

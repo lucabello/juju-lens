@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/lucabello/juju-lens/internal/index"
+	"github.com/lucabello/juju-lens/internal/narrative"
 	"github.com/lucabello/juju-lens/internal/recording"
 
 	"github.com/spf13/cobra"
@@ -122,12 +123,63 @@ func rebuildIndex(db *index.DB, dir string, renames map[string]string, verbose b
 			return fmt.Errorf("insert span %s: %w", spans[i].SpanID, err)
 		}
 	}
+	// The hook processes the tap recorded in the charms (--attach unit): one
+	// span tree each, next to the RPC spans, and their stack samples.
+	ops, profiles, err := recording.LoadOps(dir)
+	if err != nil {
+		return err
+	}
+	for i := range ops {
+		ops[i].Model = renameModel(renames, ops[i].Model)
+	}
+	for _, p := range profiles {
+		p.Model = renameModel(renames, p.Model)
+		if err := db.InsertProfile(p); err != nil {
+			return fmt.Errorf("insert profile of %s: %w", p.RootSpanID, err)
+		}
+	}
+	// Hooks the units ran that the tap recorded nothing of, from the status
+	// log captured at stop and the RPC run-hook markers: a root each. The
+	// ones the probe's /proc poll found have a root already, which gets the
+	// reason.
+	untapped, err := untappedRoots(dir, spans, ops)
+	if err != nil {
+		return err
+	}
+	for i := range ops {
+		if err := db.InsertSpan(ops[i]); err != nil {
+			return fmt.Errorf("insert ops span %s: %w", ops[i].SpanID, err)
+		}
+	}
+	for i := range untapped {
+		if err := db.InsertSpan(untapped[i]); err != nil {
+			return fmt.Errorf("insert untapped hook %s: %w", untapped[i].SpanID, err)
+		}
+	}
+	// What the unit probes measured besides each execution: cgroup and
+	// disk counters over time, and workload Pebble changes.
+	res, err := recording.LoadUnitResources(dir)
+	if err != nil {
+		return err
+	}
+	for i := range res.Samples {
+		res.Samples[i].Model = renameModel(renames, res.Samples[i].Model)
+	}
+	for i := range res.Disks {
+		res.Disks[i].Model = renameModel(renames, res.Disks[i].Model)
+	}
+	for i := range res.Changes {
+		res.Changes[i].Model = renameModel(renames, res.Changes[i].Model)
+	}
+	if err := db.InsertUnitResources(res); err != nil {
+		return err
+	}
 	// Ground-truth status bootstrap (M8): seed baseline app/unit status from the
 	// `juju status` captured at recording start, stamped just before the first
 	// captured RPC so every later delta sorts after it (and dedups against it).
 	// These MUST be inserted before the RPC-derived snapshots below so the
 	// content-hash dedup baseline is the bootstrap value, not a later delta.
-	boots := index.LoadBootstrapSnapshots(dir, bootstrapTs(dir, spans))
+	boots := index.LoadBootstrapSnapshots(dir, bootstrapTs(dir, spans, ops))
 	for _, s := range boots {
 		if err := db.InsertBootstrapSnapshot(renameModel(renames, s.Model), s.Ts, string(s.Kind), s.Scope, string(s.Body)); err != nil {
 			return fmt.Errorf("insert bootstrap snapshot %s: %w", s.Scope, err)
@@ -151,10 +203,49 @@ func rebuildIndex(db *index.DB, dir string, renames map[string]string, verbose b
 		}
 	}
 	if verbose {
-		fmt.Fprintf(os.Stderr, "juju-lens: indexed %d spans, %d snapshots (%d bootstrap), %d log records\n",
-			len(spans), len(snaps), len(boots), len(logs))
+		fmt.Fprintf(os.Stderr, "juju-lens: indexed %d spans (%d from the charms, %d hooks the tap missed), %d profiles, %d snapshots (%d bootstrap), %d log records\n",
+			len(spans)+len(ops)+len(untapped), len(ops), len(untapped), len(profiles), len(snaps), len(boots), len(logs))
 	}
 	return nil
+}
+
+// untappedRoots returns a root span for each hook or action that the unit
+// agent's status log or an RPC run-hook bracket saw on a unit the unit
+// probes covered, but that the tap recorded nothing of. spans and ops are
+// the recording's RPC and tap spans. The roots in ops that the probe's
+// /proc poll found are such hooks too: they get their tap_reason here.
+func untappedRoots(dir string, spans, ops []recording.SpanRow) ([]recording.SpanRow, error) {
+	var since time.Time
+	if man, err := recording.Load(dir); err == nil {
+		since = man.Started
+	}
+	cov, err := recording.LoadTapCoverage(dir, since)
+	if err != nil || len(cov.Units()) == 0 {
+		return nil, err
+	}
+	for _, r := range ops {
+		if r.Attrs["seen_by"] == recording.SeenByProc && cov.Covers(r.Model, r.Unit) {
+			if reason := cov.UntappedReason(recording.HookSighting{
+				Model: r.Model, Unit: r.Unit, Exec: r.Attrs["exec"],
+				Name: strings.TrimSuffix(r.Hook, " action"), Start: r.Start,
+			}); reason != "" {
+				r.Attrs["tap_reason"] = reason
+			}
+		}
+	}
+	statusLog, err := recording.LoadStatusLog(dir, since)
+	if err != nil {
+		return nil, err
+	}
+	all := make([]recording.SpanRow, 0, len(spans)+len(ops))
+	all = append(append(all, spans...), ops...)
+	var out []recording.SpanRow
+	for _, s := range narrative.UntappedSightings(all, statusLog) {
+		if cov.Covers(s.Model, s.Unit) {
+			out = append(out, recording.UntappedRoot(s, cov.UntappedReason(s)))
+		}
+	}
+	return out, nil
 }
 
 // renameModel maps a model name through the rename table, returning it
@@ -167,18 +258,21 @@ func renameModel(renames map[string]string, model string) string {
 }
 
 // bootstrapTs is the instant to stamp ground-truth status snapshots at: just
-// before the earliest captured RPC, so they precede (and form the dedup
-// baseline for) every RPC-derived snapshot. Falls back to the manifest's start
-// time, then to now, when there are no spans. The 1ms backdate keeps the
-// bootstrap strictly before the first span so point-in-time queries never
-// return a bootstrap row tied with a real delta.
-func bootstrapTs(dir string, spans []recording.SpanRow) time.Time {
+// before the earliest captured RPC or charm-side span, so they precede (and
+// form the dedup baseline for) every later snapshot. Falls back to the
+// manifest's start time, then to now, when there are no spans. The 1ms
+// backdate keeps the bootstrap strictly before the first span so
+// point-in-time queries never return a bootstrap row tied with a real delta.
+// Both span lists are sorted by start.
+func bootstrapTs(dir string, spans, ops []recording.SpanRow) time.Time {
 	t := time.Now().UTC()
 	if man, err := recording.Load(dir); err == nil && !man.Started.IsZero() {
 		t = man.Started
 	}
-	if len(spans) > 0 && spans[0].Start.Before(t) {
-		t = spans[0].Start
+	for _, s := range [][]recording.SpanRow{spans, ops} {
+		if len(s) > 0 && s[0].Start.Before(t) {
+			t = s[0].Start
+		}
 	}
 	return t.Add(-time.Millisecond)
 }

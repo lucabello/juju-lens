@@ -340,7 +340,10 @@ func writeAgentsMD(dir string, want map[Part]bool) error {
 	}
 	if want[PartDetails] {
 		fmt.Fprintf(b, "- details/<span_id>.json — full detail for one event: statuses set, "+
-			"databag/config diffs, failure explanation. span_id comes from any line above.\n")
+			"databag/config diffs, failure explanation, and under `ops` (recordings with "+
+			"--attach unit) one span tree per process that ran the hook: charm init, deferred "+
+			"events, each event and observer with its duration and error, hook tool and Pebble "+
+			"calls. span_id comes from any line above.\n")
 	}
 	if want[PartReport] {
 		fmt.Fprintf(b, "- report.md — the same data as one narrated document, for reading top "+

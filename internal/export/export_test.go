@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/lucabello/juju-lens/internal/index"
+	"github.com/lucabello/juju-lens/internal/narrative"
 	"github.com/lucabello/juju-lens/internal/recording"
 )
 
@@ -246,5 +247,36 @@ func TestWriteMarkdownNoANSI(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("Markdown output missing %q\n---\n%s", want, out)
 		}
+	}
+}
+
+// A config-changed hook shows the config read during it, diffed against the
+// one before. Without host capture no config is read during the hook, and
+// the config captured when the recording started predates the change: it
+// mustn't be shown as the hook's config.
+func TestConfigDetailOnlyFromTheHook(t *testing.T) {
+	db, err := index.Open(t.TempDir() + "/index.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	modelID, err := db.UpsertModel("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertBootstrapSnapshot("default", base, string(index.KindConfig), "config:otelcol", `{"interval":"1m"}`); err != nil {
+		t.Fatal(err)
+	}
+	ev := narrative.Event{App: "otelcol", Unit: "otelcol/0", TS: base.Add(time.Minute), Dur: 3 * time.Second}
+	if cd := buildConfigDetail(db, modelID, ev); cd != nil {
+		t.Fatalf("config from before the hook shown as its config: %+v", cd)
+	}
+
+	if err := db.InsertSnapshot("default", ev.TS.Add(time.Second), string(index.KindConfig), "config:otelcol", `{"interval":"10s"}`, "rpc1"); err != nil {
+		t.Fatal(err)
+	}
+	cd := buildConfigDetail(db, modelID, ev)
+	if cd == nil || len(cd.Diff) == 0 {
+		t.Fatalf("want the config read during the hook with a diff, got %+v", cd)
 	}
 }

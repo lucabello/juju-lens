@@ -22,8 +22,9 @@ import (
 
 // The detach tests run the real daemon: `record --detach` re-executes
 // os.Executable(), which under `go test` is this test binary. TestMain routes
-// such re-executions back into the CLI, or into a fake probe, based on
-// testModeEnv, so no eBPF, root or Juju is needed.
+// such re-executions back into the CLI, and the probe they run, `juju-lens
+// probe`, into a fake probe, based on testModeEnv and fakeProbeEnv, so no
+// eBPF, root or Juju is needed.
 const (
 	testModeEnv  = "JUJU_LENS_TEST_MODE"
 	fakeProbeEnv = "JUJU_LENS_FAKE_PROBE"
@@ -32,14 +33,15 @@ const (
 func TestMain(m *testing.M) {
 	switch os.Getenv(testModeEnv) {
 	case "cli":
+		if len(os.Args) > 1 && os.Args[1] == "probe" && os.Getenv(fakeProbeEnv) != "" {
+			runFakeProbe()
+			os.Exit(0)
+		}
 		os.Args = append([]string{"juju-lens"}, os.Args[1:]...)
 		if err := Execute(BuildInfo{Version: "test"}); err != nil {
 			fmt.Fprintln(os.Stderr, "juju-lens:", err)
 			os.Exit(1)
 		}
-		os.Exit(0)
-	case "probe":
-		runFakeProbe()
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
@@ -98,27 +100,18 @@ func wsText(payload string, mask bool) []byte {
 	return b
 }
 
-// detachEnv sets up a fake probe and a failing `juju` on PATH (so scope
-// resolution falls back to unfiltered capture without touching a real
-// controller), and returns the --probe-path to use.
-func detachEnv(t *testing.T, probeMode string) string {
+// detachEnv makes the probe a recorder runs a fake of the given mode, and puts
+// a failing `juju` on PATH (so scope resolution falls back to unfiltered
+// capture without touching a real controller).
+func detachEnv(t *testing.T, probeMode string) {
 	t.Helper()
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
 	bin := t.TempDir()
-	probePath := filepath.Join(bin, "juju-lens-probe")
-	script := fmt.Sprintf("#!/bin/sh\nexec env %s=probe %s=%s %q\n", testModeEnv, fakeProbeEnv, probeMode, self)
-	if err := os.WriteFile(probePath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(filepath.Join(bin, "juju"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 	t.Setenv(testModeEnv, "cli")
-	return probePath
+	t.Setenv(fakeProbeEnv, probeMode)
 }
 
 // runCLI runs a juju-lens command in-process and returns its stdout.
@@ -168,9 +161,9 @@ func waitGone(t *testing.T, pid int, timeout time.Duration) {
 // startDetached runs a successful `record --detach` and registers cleanup.
 func startDetached(t *testing.T, extra ...string) (string, int) {
 	t.Helper()
-	probePath := detachEnv(t, "attach")
+	detachEnv(t, "attach")
 	dir := filepath.Join(t.TempDir(), "rec")
-	args := append([]string{"record", "--detach", "--attach=local", "--probe-path", probePath, "-o", dir}, extra...)
+	args := append([]string{"record", "--detach", "--attach=host", "-o", dir}, extra...)
 	out, err := runCLI(t, append(args, "ci-run")...)
 	if err != nil {
 		t.Fatalf("record --detach: %v", err)
@@ -260,9 +253,9 @@ func TestDetachMaxDuration(t *testing.T) {
 
 // TestDetachMaxSize covers the --max-size cap on a detached recorder.
 func TestDetachMaxSize(t *testing.T) {
-	probePath := detachEnv(t, "rpc")
+	detachEnv(t, "rpc")
 	dir := filepath.Join(t.TempDir(), "rec")
-	out, err := runCLI(t, "record", "--detach", "--attach=local", "--probe-path", probePath, "-o", dir, "--max-size=2000", "ci-run")
+	out, err := runCLI(t, "record", "--detach", "--attach=host", "-o", dir, "--max-size=2000", "ci-run")
 	if err != nil {
 		t.Fatalf("record --detach: %v", err)
 	}
@@ -293,13 +286,13 @@ func assertNothingLeft(t *testing.T, dir string) {
 
 // TestDetachAttachFailure covers AC3: a probe that can't attach.
 func TestDetachAttachFailure(t *testing.T) {
-	probePath := detachEnv(t, "fail")
+	detachEnv(t, "fail")
 	dir := filepath.Join(t.TempDir(), "rec")
-	_, err := runCLI(t, "record", "--detach", "--attach=local", "--probe-path", probePath, "-o", dir, "ci-run")
+	_, err := runCLI(t, "record", "--detach", "--attach=host", "-o", dir, "ci-run")
 	if err == nil {
 		t.Fatal("want an error when the probe fails to attach")
 	}
-	for _, want := range []string{"exited before the probe attached", "operation not permitted", "recorder.log"} {
+	for _, want := range []string{"exited before it was capturing", "operation not permitted", "recorder.log"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error missing %q:\n%v", want, err)
 		}
@@ -307,25 +300,13 @@ func TestDetachAttachFailure(t *testing.T) {
 	assertNothingLeft(t, dir)
 }
 
-// TestDetachBadProbePath covers AC3 for a recorder that fails before
-// starting the probe at all.
-func TestDetachBadProbePath(t *testing.T) {
-	detachEnv(t, "attach")
-	dir := filepath.Join(t.TempDir(), "rec")
-	_, err := runCLI(t, "record", "--detach", "--attach=local", "--probe-path", "/nonexistent/probe", "-o", dir, "ci-run")
-	if err == nil || !strings.Contains(err.Error(), "/nonexistent/probe") {
-		t.Fatalf("want an error naming the bad --probe-path, got %v", err)
-	}
-	assertNothingLeft(t, dir)
-}
-
 // TestDetachTimeout covers AC4 and the zero-targets rule: a probe that runs
 // but attaches to nothing is a failure, and the daemon is killed.
 func TestDetachTimeout(t *testing.T) {
-	probePath := detachEnv(t, "none")
+	detachEnv(t, "none")
 	dir := filepath.Join(t.TempDir(), "rec")
 	start := time.Now()
-	_, err := runCLI(t, "record", "--detach", "--detach-timeout=1s", "--attach=local", "--probe-path", probePath, "-o", dir, "ci-run")
+	_, err := runCLI(t, "record", "--detach", "--detach-timeout=1s", "--attach=host", "-o", dir, "ci-run")
 	if err == nil || !strings.Contains(err.Error(), "--detach-timeout 1s") || !strings.Contains(err.Error(), "attached to no agent process") {
 		t.Fatalf("want a no-targets timeout error, got %v", err)
 	}
@@ -341,9 +322,9 @@ func TestDetachTimeout(t *testing.T) {
 // TestDetachTimeoutOldProbe covers AC10: a probe that never sends an
 // attach-status frame gets an upgrade hint, not the no-targets message.
 func TestDetachTimeoutOldProbe(t *testing.T) {
-	probePath := detachEnv(t, "old")
+	detachEnv(t, "old")
 	dir := filepath.Join(t.TempDir(), "rec")
-	_, err := runCLI(t, "record", "--detach", "--detach-timeout=1s", "--attach=local", "--probe-path", probePath, "-o", dir, "ci-run")
+	_, err := runCLI(t, "record", "--detach", "--detach-timeout=1s", "--attach=host", "-o", dir, "ci-run")
 	if err == nil {
 		t.Fatal("want a timeout error")
 	}
@@ -361,8 +342,8 @@ func TestDetachTimeoutOldProbe(t *testing.T) {
 // TestDetachRefusesLiveRecorder covers AC8: the dir is already owned.
 func TestDetachRefusesLiveRecorder(t *testing.T) {
 	dir, pid := startDetached(t)
-	probePath := detachEnv(t, "attach")
-	_, err := runCLI(t, "record", "--detach", "--attach=local", "--probe-path", probePath, "-o", dir, "again")
+	detachEnv(t, "attach")
+	_, err := runCLI(t, "record", "--detach", "--attach=host", "-o", dir, "again")
 	if err == nil || !strings.Contains(err.Error(), "already writing") {
 		t.Fatalf("want refusal, got %v", err)
 	}
@@ -395,6 +376,65 @@ func TestDetachedArgs(t *testing.T) {
 	for _, bad := range []string{"--detach ", "--detach=", "--detach-timeout", "rel"} {
 		if strings.Contains(got+" ", bad) {
 			t.Fatalf("args %q should not contain %q", got, bad)
+		}
+	}
+}
+
+// TestDetachAttachNone checks that --attach none, which starts no probe, is
+// ready as soon as the recorder runs and records no RPC source.
+func TestDetachAttachNone(t *testing.T) {
+	detachEnv(t, "attach")
+	bin := strings.SplitN(os.Getenv("PATH"), ":", 2)[0] // detachEnv's fake bin dir
+	fakeJuju := `#!/bin/sh
+case "$1" in
+controllers) echo '{"current-controller":"lab","controllers":{"lab":{"uuid":"c-uuid"}}}' ;;
+models) echo '{"models":[]}' ;;
+*) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "juju"), []byte(fakeJuju), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "rec")
+	out, err := runCLI(t, "record", "--detach", "--detach-timeout=10s", "--attach=none", "-o", dir, "logs-only")
+	if err != nil {
+		t.Fatalf("record --detach --attach=none: %v", err)
+	}
+	_, pid := parseDetachOutput(t, out)
+	t.Cleanup(func() {
+		if recording.PidAlive(pid) {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			waitGone(t, pid, 5*time.Second)
+		}
+	})
+	if err := runStop(dir, stopFlags{timeout: 10 * time.Second}); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	man, err := recording.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if man.AttachMode != "none" || len(man.AttachTargets) != 0 {
+		t.Fatalf("attach_mode=%q targets=%v, want none and no targets", man.AttachMode, man.AttachTargets)
+	}
+	for _, s := range man.Sources {
+		if s.Name == "rpc" {
+			t.Fatalf("--attach none recorded an rpc source: %+v", man.Sources)
+		}
+	}
+	if man.EndReason != recording.EndReasonSignal {
+		t.Fatalf("end_reason = %q, want %q", man.EndReason, recording.EndReasonSignal)
+	}
+}
+
+// TestAttachWithoutHostNeedsJuju checks that --attach none and unit fail when
+// the juju client can't be queried, instead of recording nothing at all.
+func TestAttachWithoutHostNeedsJuju(t *testing.T) {
+	detachEnv(t, "attach")
+	for _, attach := range []string{"none", "unit"} {
+		_, err := runCLI(t, "record", "--attach="+attach, "-o", filepath.Join(t.TempDir(), "rec"), "x")
+		if err == nil || !strings.Contains(err.Error(), "juju client") {
+			t.Fatalf("--attach %s: want a juju client error, got %v", attach, err)
 		}
 	}
 }

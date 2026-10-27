@@ -33,7 +33,7 @@ const (
 )
 
 // KnownScenarios lists every scenario the tool currently supports.
-func KnownScenarios() []Scenario { return []Scenario{ScenarioTrivial} }
+func KnownScenarios() []Scenario { return []Scenario{ScenarioTrivial, ScenarioOps} }
 
 // Options tune how a scenario is emitted. Any zero value falls back to a
 // sensible default that keeps recordings deterministic across runs.
@@ -66,6 +66,8 @@ func Generate(sc Scenario, opts Options) ([]wire.CapturedMessage, error) {
 	switch sc {
 	case ScenarioTrivial:
 		return generateTrivial(opts.filled()), nil
+	case ScenarioOps:
+		return nil, nil // the charm side only: see UnitRecords
 	default:
 		return nil, fmt.Errorf("synth: unknown scenario %q", sc)
 	}
@@ -82,6 +84,9 @@ func Generate(sc Scenario, opts Options) ([]wire.CapturedMessage, error) {
 // traefik — which has no RPCs in the scenario at all — is known *only* from the
 // bootstrap, proving the seed is what keeps it off "unknown".
 func BootstrapStatus(sc Scenario, opts Options) ([]byte, error) {
+	if sc == ScenarioOps {
+		return opsBootstrap(opts.filled())
+	}
 	if sc != ScenarioTrivial {
 		return nil, fmt.Errorf("synth: no bootstrap for scenario %q", sc)
 	}

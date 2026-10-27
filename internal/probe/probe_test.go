@@ -3,7 +3,9 @@ package probe
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/lucabello/juju-lens/internal/wire"
@@ -119,6 +121,39 @@ func TestIngestEndToEnd(t *testing.T) {
 	}
 	if got[0].Unit != "grafana/0" || !got[0].Msg.IsRequest() || got[1].Msg.RequestID != 1 {
 		t.Fatalf("captured messages wrong: %+v", got)
+	}
+}
+
+// TestIngestMachineUnitsPerConnection: a machine's jujud runs every unit's
+// agent, so its frames carry no unit; each connection is the unit its own
+// Uniter and LeadershipService calls name, never a unit merely mentioned.
+func TestIngestMachineUnitsPerConnection(t *testing.T) {
+	var stream bytes.Buffer
+	write := func(conn uint64, dir string, data []byte) {
+		if err := WriteFrame(&stream, Frame{PID: 946, Dir: dir, Conn: conn, Data: data}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []uint64{1, 2} {
+		write(c, "write", []byte(wsGET))
+		write(c, "read", []byte(ws101))
+	}
+	write(1, "write", ws(t, `{"request-id":1,"type":"Uniter","request":"ReadRemoteSettings","params":{"a":[{"remote-unit":"unit-o-0"}]}}`, true))
+	write(1, "write", ws(t, `{"request-id":2,"type":"Uniter","request":"SetAgentStatus","params":{"entities":[{"tag":"unit-my-app-0"}]}}`, true))
+	write(2, "write", ws(t, `{"request-id":7,"type":"LeadershipService","request":"ClaimLeadership","params":{"params":[{"unit-tag":"unit-nrpe-3"}]}}`, true))
+	write(1, "read", ws(t, `{"request-id":2,"response":{}}`, false))
+
+	var got []string
+	err := Ingest(context.Background(), &stream, nil, func(cm wire.CapturedMessage) error {
+		got = append(got, fmt.Sprintf("%d:%d %s %s", cm.Conn, cm.Msg.RequestID, cm.App, cm.Unit))
+		return nil
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	want := []string{"1:1  ", "1:2 my-app my-app/0", "2:7 nrpe nrpe/3", "1:2 my-app my-app/0"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

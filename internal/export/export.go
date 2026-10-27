@@ -82,24 +82,68 @@ type ConfigDetail struct {
 
 // EventDetail is one narrative.Event enriched with everything the TUI's
 // inspector overlay would show for it: why it failed (if it did), the
-// statuses it set, and the databag/config it changed.
+// statuses it set, the databag/config it changed, and what the charm did
+// in each process that ran the hook.
 type EventDetail struct {
-	TS              time.Time       `json:"ts"`
-	Kind            string          `json:"kind"`
-	Unit            string          `json:"unit,omitempty"`
-	App             string          `json:"app,omitempty"`
-	Summary         string          `json:"summary"`
-	Detail          string          `json:"detail,omitempty"`
-	Fail            string          `json:"fail"` // narrative.FailState.String(); "none" when clean
-	FailExplanation string          `json:"fail_explanation,omitempty"`
-	Statuses        []StatusDetail  `json:"statuses,omitempty"`
-	DurationMS      int64           `json:"duration_ms,omitempty"`
-	Running         bool            `json:"running,omitempty"`
-	Databags        []DatabagDetail `json:"databags,omitempty"`
-	Config          *ConfigDetail   `json:"config,omitempty"`
-	SpanID          string          `json:"span_id,omitempty"`
-	Context         bool            `json:"context,omitempty"` // included only as a neighbour of a failure under --errors-only, not itself a failure
+	TS              time.Time            `json:"ts"`
+	Kind            string               `json:"kind"`
+	Unit            string               `json:"unit,omitempty"`
+	App             string               `json:"app,omitempty"`
+	Summary         string               `json:"summary"`
+	Detail          string               `json:"detail,omitempty"`
+	Fail            string               `json:"fail"` // narrative.FailState.String(); "none" when clean
+	FailExplanation string               `json:"fail_explanation,omitempty"`
+	Statuses        []StatusDetail       `json:"statuses,omitempty"`
+	DurationMS      int64                `json:"duration_ms,omitempty"`
+	Running         bool                 `json:"running,omitempty"`
+	Tap             string               `json:"tap,omitempty"`        // "missing" or "truncated": the tap didn't record the hook in full
+	TapReason       string               `json:"tap_reason,omitempty"` // why, when known
+	Databags        []DatabagDetail      `json:"databags,omitempty"`
+	Config          *ConfigDetail        `json:"config,omitempty"`
+	Ops             []*narrative.OpsNode `json:"ops,omitempty"`               // one span tree per process (attempt) that ran the hook, every span included
+	Costs           []SpanCost           `json:"costs,omitempty"`             // what charm init and each observer cost, in the order they ran
+	TopStacks       []StackDetail        `json:"top_stacks,omitempty"`        // the stacks the hook's processes spent the most wall time in
+	TopMemStacks    []StackDetail        `json:"top_memory_stacks,omitempty"` // the stacks that saw the most memory growth
+	SpanID          string               `json:"span_id,omitempty"`
+	Context         bool                 `json:"context,omitempty"` // included only as a neighbour of a failure under --errors-only, not itself a failure
 }
+
+// SpanCost is what charm init or one observer cost: its wall time, and the
+// CPU and memory narrative.AttachCosts measured.
+type SpanCost struct {
+	Kind       string  `json:"kind"` // recording.OpsInit or OpsObserver
+	Name       string  `json:"name"`
+	SpanID     string  `json:"span_id"`
+	Attempt    int     `json:"attempt,omitempty"` // which process of the hook, from 1, when it ran more than once
+	DurationMS float64 `json:"duration_ms"`
+	narrative.OpsCost
+}
+
+// StackDetail is one call stack the hook's Python was sampled in, with what
+// its samples add up to.
+type StackDetail struct {
+	SpanID         string   `json:"span_id"`
+	Span           string   `json:"span"` // the init, event or observer span it ran in
+	Samples        int      `json:"samples"`
+	WallMS         float64  `json:"wall_ms"`
+	CPUMS          float64  `json:"cpu_ms"`
+	MemGrowthBytes int64    `json:"mem_growth_bytes"`
+	Share          float64  `json:"share"`  // of the hook's total of the metric the list is ordered by
+	Frames         []string `json:"frames"` // "function (file:line)", innermost first
+	// digest is what the Markdown shows of Frames: the innermost few, then
+	// the charm's own frames among the rest, with gaps marked.
+	digest []string
+}
+
+// Stack digests show this many innermost frames, then up to this many of
+// the charm's own.
+const (
+	digestInner = 3
+	digestCharm = 5
+)
+
+// topStacks is how many stacks the export lists per hook and metric.
+const topStacks = 5
 
 // LogDetail is one merged log line.
 type LogDetail struct {
@@ -177,6 +221,7 @@ func Build(dir string, opts Options) (*Result, error) {
 	appStatusBySpan, _ := db.StatusBySpan(mm.ID, string(index.KindAppStatus))
 	statusBySpan := narrative.StatusMapFromSnapshots(unitStatusBySpan, appStatusBySpan)
 	events := narrative.BuildEventsWithStatus(spans, databagSpans, statusBySpan)
+	ops := narrative.NewOpsIndex(spans)
 
 	units := unitSet(opts.Units)
 	scoped := filterEvents(events, units, opts.Since, opts.Until)
@@ -193,7 +238,7 @@ func Build(dir string, opts Options) (*Result, error) {
 	summary := Summary{UnitsInScope: opts.Units}
 	for _, ev := range final {
 		sp := spanByID[ev.SpanID]
-		detail := buildEventDetail(db, mm.ID, ev, sp, contextOnly[ev.SpanID])
+		detail := buildEventDetail(db, mm.ID, ev, sp, ops, contextOnly[ev.SpanID])
 		items = append(items, Item{TS: ev.TS, Kind: "event", Event: &detail})
 		summary.TotalEvents++
 		switch ev.Fail {
@@ -420,15 +465,17 @@ func filterLogs(logs []index.LogRow, units map[string]bool, lo, hi time.Time) []
 }
 
 // buildEventDetail enriches ev with the same data the TUI's inspector
-// overlay gathers for it: the failure explanation, statuses set, and the
-// databag/config it changed.
-func buildEventDetail(db *index.DB, modelID int64, ev narrative.Event, sp recording.SpanRow, contextOnly bool) EventDetail {
+// overlay gathers for it: the failure explanation, statuses set, the
+// databag/config it changed, and the charm-side span trees.
+func buildEventDetail(db *index.DB, modelID int64, ev narrative.Event, sp recording.SpanRow, ops *narrative.OpsIndex, contextOnly bool) EventDetail {
 	d := EventDetail{
 		TS: ev.TS, Kind: eventKindLabel(ev.Kind), Unit: ev.Unit, App: ev.App,
 		Summary: ev.Summary, Detail: ev.Detail, Fail: ev.Fail.String(),
 		DurationMS: ev.Dur.Milliseconds(), Running: ev.Running,
-		SpanID: ev.SpanID, Context: contextOnly,
+		Tap: ev.Tap, TapReason: ev.TapReason,
+		Ops: ops.Trees(ev.OpsSpans), SpanID: ev.SpanID, Context: contextOnly,
 	}
+	addCosts(db, &d, ops)
 	if ev.Fail != narrative.FailNone {
 		d.FailExplanation = failExplanation(ev, sp)
 	}
@@ -446,6 +493,87 @@ func buildEventDetail(db *index.DB, modelID int64, ev narrative.Event, sp record
 		d.Config = buildConfigDetail(db, modelID, ev)
 	}
 	return d
+}
+
+// addCosts attaches what each span of d's trees cost, lists init's and the
+// observers', and the hook's heaviest stacks.
+func addCosts(db *index.DB, d *EventDetail, ops *narrative.OpsIndex) {
+	if len(d.Ops) == 0 {
+		return
+	}
+	profs, _ := db.Profiles(narrative.ProcessRoots(d.Ops))
+	narrative.AttachCosts(d.Ops, profs)
+	var walk func(n *narrative.OpsNode, attempt int)
+	walk = func(n *narrative.OpsNode, attempt int) {
+		if n.Cost != nil && (n.Kind == recording.OpsInit || n.Kind == recording.OpsObserver) {
+			d.Costs = append(d.Costs, SpanCost{
+				Kind: n.Kind, Name: n.Name, SpanID: n.SpanID, Attempt: attempt,
+				DurationMS: n.DurationMS, OpsCost: *n.Cost,
+			})
+		}
+		for _, c := range n.Children {
+			walk(c, attempt)
+		}
+	}
+	for i, t := range d.Ops {
+		attempt := 0
+		if len(d.Ops) > 1 {
+			attempt = i + 1
+		}
+		walk(t, attempt)
+	}
+	p := narrative.NewProfile(profs, nil)
+	d.TopStacks = stackDetails(p, narrative.MetricWall, ops)
+	d.TopMemStacks = stackDetails(p, narrative.MetricMem, ops)
+}
+
+func stackDetails(p *narrative.Profile, m narrative.Metric, ops *narrative.OpsIndex) []StackDetail {
+	total := p.Total().Get(m)
+	var out []StackDetail
+	for _, s := range p.TopStacks(m, topStacks) {
+		sd := StackDetail{
+			SpanID: s.SpanID, Span: ops.SpanLabel(s.SpanID), Samples: s.Samples,
+			WallMS: nsToMS(s.WallNs), CPUMS: nsToMS(s.CPUNs), MemGrowthBytes: s.MemBytes,
+		}
+		switch m {
+		case narrative.MetricMem:
+			sd.Share = float64(s.MemBytes) / total
+		default:
+			sd.Share = float64(s.WallNs) / total
+		}
+		skipped, charm := 0, 0
+		for i, f := range s.Frames {
+			fn, loc := p.FrameLabel(f)
+			label := fn + " (" + loc + ")"
+			sd.Frames = append(sd.Frames, label)
+			if i < digestInner || p.IsCharmFrame(f) && !narrative.IsWrapperFrame(p.Frames[f]) && charm < digestCharm {
+				if skipped > 0 {
+					sd.digest = append(sd.digest, fmt.Sprintf("… %d %s", skipped, plural(skipped, "frame", "frames")))
+				}
+				skipped = 0
+				sd.digest = append(sd.digest, label)
+				if i >= digestInner {
+					charm++
+				}
+				continue
+			}
+			skipped++
+		}
+		if skipped > 0 {
+			sd.digest = append(sd.digest, fmt.Sprintf("… %d outer %s", skipped, plural(skipped, "frame", "frames")))
+		}
+		out = append(out, sd)
+	}
+	return out
+}
+
+func nsToMS(ns int64) float64 { return float64(ns/1000) / 1000 }
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 func eventKindLabel(k narrative.EventKind) string {
@@ -547,10 +675,11 @@ func buildDatabagDetail(db *index.DB, modelID int64, sp recording.SpanRow) []Dat
 	return out
 }
 
-// buildConfigDetail mirrors the TUI inspector's renderConfig.
+// buildConfigDetail mirrors the TUI inspector's renderConfig: nil unless the
+// config was read during the hook.
 func buildConfigDetail(db *index.DB, modelID int64, ev narrative.Event) *ConfigDetail {
 	scope := "config:" + ev.App
-	curBody, _ := db.LatestSnapshotBefore(modelID, scope, ev.TS.Add(ev.Dur))
+	curBody, _ := db.LatestSnapshotBetween(modelID, scope, ev.TS, ev.TS.Add(ev.Dur))
 	if curBody == "" {
 		return nil
 	}

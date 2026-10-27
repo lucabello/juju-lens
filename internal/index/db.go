@@ -29,7 +29,18 @@ import (
 // so a hook that rewrote a databag without changing it emits no snapshot) and
 // origin ('rpc' | 'bootstrap', so ground-truth status seeded from `juju status`
 // at recording start is distinguishable from RPC-derived deltas).
-const SchemaVersion = 4
+//
+// v5: spans also hold the tap's span trees (service 'ops', one tree per hook
+// process, linked by parent_span_id); the columns are unchanged.
+//
+// v6: resource_samples, disk_samples and pebble_changes hold the unit
+// probe's periodic counters and workload Pebble changes. What each
+// execution cost is in res_* attributes of its ops root span.
+// v7: profiles, profile_frames, profile_stacks and profile_samples hold the
+// tap's stack samples, each stack linked to the ops span it ran in.
+// v8: resource_samples gains the memory.stat breakdown and the
+// memory.events counters, and holds the workloads' burst samples.
+const SchemaVersion = 8
 
 // The full schema. Statements are executed in order.
 var schema = []string{
@@ -114,6 +125,113 @@ var schema = []string{
 	`CREATE INDEX IF NOT EXISTS log_by_ts       ON log_records(model_id, ts)`,
 	`CREATE INDEX IF NOT EXISTS log_by_unit_ts  ON log_records(model_id, unit, ts)`,
 	`CREATE INDEX IF NOT EXISTS log_by_span     ON log_records(span_id)`,
+
+	// The unit probe's resource counters (raw/unit/, resources records),
+	// every 5 seconds per cgroup, and every 100 ms per workload container
+	// while a hook runs and lingers. Counters are cumulative.
+	`CREATE TABLE IF NOT EXISTS resource_samples (
+	    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+	    model_id       INTEGER REFERENCES models(id),
+	    host           TEXT NOT NULL,    -- raw/unit/<model>/<host>: pod or machine
+	    unit           TEXT,             -- the host's unit, when it has only one
+	    container      TEXT NOT NULL,    -- 'charm', 'agent', a workload container, or 'juju-lens-probe'
+	    ts             INTEGER NOT NULL, -- unix nano
+	    cpu_usec       INTEGER NOT NULL,
+	    cpu_user_usec  INTEGER NOT NULL,
+	    cpu_sys_usec   INTEGER NOT NULL,
+	    throttled_usec INTEGER NOT NULL,
+	    mem_bytes      INTEGER NOT NULL, -- current
+	    mem_peak_bytes INTEGER,          -- memory.peak, NULL where the kernel has none
+	    mem_max_bytes  INTEGER,          -- limit; NULL when unlimited
+	    io_read_bytes  INTEGER NOT NULL,
+	    io_write_bytes INTEGER NOT NULL,
+	    cpu_stall_usec INTEGER NOT NULL, -- PSI "some" totals
+	    mem_stall_usec INTEGER NOT NULL,
+	    io_stall_usec  INTEGER NOT NULL,
+	    mem_anon_bytes   INTEGER,        -- memory.stat; these eight are NULL where unread (before v8)
+	    mem_file_bytes   INTEGER,        -- page cache, shmem included
+	    mem_kernel_bytes INTEGER,
+	    mem_shmem_bytes  INTEGER,
+	    mem_high_events  INTEGER,        -- memory.events, cumulative
+	    mem_max_events   INTEGER,
+	    mem_oom_events   INTEGER,
+	    mem_oom_kill_events INTEGER,
+	    error          TEXT
+	)`,
+	`CREATE INDEX IF NOT EXISTS res_by_host_ts ON resource_samples(model_id, host, container, ts)`,
+	`CREATE TABLE IF NOT EXISTS disk_samples (
+	    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	    model_id    INTEGER REFERENCES models(id),
+	    host        TEXT NOT NULL,
+	    unit        TEXT,
+	    ts          INTEGER NOT NULL,
+	    path        TEXT NOT NULL,
+	    size_bytes  INTEGER NOT NULL,
+	    used_bytes  INTEGER NOT NULL,
+	    avail_bytes INTEGER NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS disk_by_host_ts ON disk_samples(model_id, host, ts)`,
+	`CREATE TABLE IF NOT EXISTS pebble_changes (
+	    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+	    model_id  INTEGER REFERENCES models(id),
+	    host      TEXT NOT NULL,
+	    unit      TEXT,
+	    container TEXT NOT NULL,
+	    change_id TEXT NOT NULL,
+	    kind      TEXT NOT NULL,
+	    summary   TEXT NOT NULL,
+	    status    TEXT NOT NULL,
+	    err       TEXT,
+	    ts_spawn  INTEGER NOT NULL,
+	    ts_ready  INTEGER,               -- NULL until the change is ready
+	    UNIQUE(model_id, host, container, change_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS pebble_by_host_ts ON pebble_changes(model_id, host, ts_spawn)`,
+	// Stack samples the tap took in a hook process (record --attach unit,
+	// v7): one profiles row per process, keyed by its ops root span. A stack
+	// is one call stack within one span (event, observer, charm init, or the
+	// process itself); samples are the timeline, in time order.
+	`CREATE TABLE IF NOT EXISTS profiles (
+	    root_span_id   TEXT PRIMARY KEY,
+	    model_id       INTEGER REFERENCES models(id),
+	    unit           TEXT,
+	    ts_start       INTEGER NOT NULL,   -- unix nano: sampling started
+	    interval_ns    INTEGER NOT NULL,   -- 0 when the process never wrote stacks_end
+	    samples        INTEGER NOT NULL,
+	    dropped        INTEGER NOT NULL,   -- samples with no stack (the stack table was full)
+	    rss_start      INTEGER NOT NULL,   -- bytes
+	    rss_peak       INTEGER NOT NULL,   -- bytes
+	    sampler_cpu_ns INTEGER NOT NULL,
+	    complete       INTEGER NOT NULL    -- 1: the process wrote stacks_end as it exited
+	)`,
+	`CREATE TABLE IF NOT EXISTS profile_frames (
+	    root_span_id TEXT NOT NULL,
+	    frame_id     INTEGER NOT NULL,
+	    file         TEXT NOT NULL,
+	    func         TEXT NOT NULL,
+	    line         INTEGER NOT NULL,   -- the function's first line
+	    PRIMARY KEY (root_span_id, frame_id)
+	) WITHOUT ROWID`,
+	`CREATE TABLE IF NOT EXISTS profile_stacks (
+	    root_span_id TEXT NOT NULL,
+	    stack_id     INTEGER NOT NULL,
+	    span_id      TEXT NOT NULL,      -- the ops span the samples ran in
+	    frames_json  TEXT NOT NULL,      -- frame_ids, innermost first
+	    samples      INTEGER NOT NULL,
+	    wall_ns      INTEGER NOT NULL,
+	    cpu_ns       INTEGER NOT NULL,
+	    mem_bytes    INTEGER NOT NULL,   -- resident memory growth seen with this stack
+	    PRIMARY KEY (root_span_id, stack_id)
+	) WITHOUT ROWID`,
+	`CREATE INDEX IF NOT EXISTS profile_stacks_by_span ON profile_stacks(span_id)`,
+	`CREATE TABLE IF NOT EXISTS profile_samples (
+	    root_span_id TEXT NOT NULL,
+	    seq          INTEGER NOT NULL,
+	    ts           INTEGER NOT NULL,   -- unix nano
+	    stack_id     INTEGER,            -- NULL when dropped
+	    rss_bytes    INTEGER NOT NULL,
+	    PRIMARY KEY (root_span_id, seq)
+	) WITHOUT ROWID`,
 }
 
 // DB is a thin wrapper around *sql.DB carrying convenience methods for the
@@ -611,15 +729,15 @@ func (d *DB) Spans(modelID int64) ([]recording.SpanRow, error) {
 	return out, rows.Err()
 }
 
-// LatestSnapshotBefore returns the newest snapshot body for scope at or
-// before ts, or "" when none exists.
-func (d *DB) LatestSnapshotBefore(modelID int64, scope string, ts time.Time) (string, error) {
+// LatestSnapshotBetween returns the newest snapshot body for scope taken
+// within [from, to], or "" when none exists.
+func (d *DB) LatestSnapshotBetween(modelID int64, scope string, from, to time.Time) (string, error) {
 	var body string
 	err := d.sql.QueryRow(
 		`SELECT body_json FROM snapshots
-		  WHERE model_id = ? AND scope = ? AND ts <= ?
+		  WHERE model_id = ? AND scope = ? AND ts >= ? AND ts <= ?
 		  ORDER BY ts DESC LIMIT 1`,
-		modelID, scope, ts.UnixNano()).Scan(&body)
+		modelID, scope, from.UnixNano(), to.UnixNano()).Scan(&body)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -712,13 +830,14 @@ func (d *DB) SpanCount() (int64, error) {
 	return n, err
 }
 
-// Reset deletes all indexed data (spans, snapshots, logs, models) while leaving
-// the schema and file in place. It lets a rebuild happen on the same inode, so
-// a `view --follow` process with the DB open sees the refresh instead of being
-// stranded on an unlinked file. Use os.Remove + Open instead when the schema
-// itself may have changed.
+// Reset deletes all indexed data (spans, profiles, snapshots, logs,
+// resources, models) while leaving the schema and file in place. It lets a
+// rebuild happen on the same inode, so a `view --follow` process with the
+// DB open sees the refresh instead of being stranded on an unlinked file.
+// Use os.Remove + Open instead when the schema itself may have changed.
 func (d *DB) Reset() error {
-	for _, t := range []string{"log_records", "snapshots", "spans", "models"} {
+	for _, t := range []string{"profile_samples", "profile_stacks", "profile_frames", "profiles",
+		"log_records", "snapshots", "spans", "resource_samples", "disk_samples", "pebble_changes", "models"} {
 		if _, err := d.sql.Exec("DELETE FROM " + t); err != nil {
 			return fmt.Errorf("resetting %s: %w", t, err)
 		}

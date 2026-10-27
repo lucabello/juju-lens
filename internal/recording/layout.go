@@ -83,6 +83,17 @@ func (l Layout) SnapDir(model, host string) string {
 	return filepath.Join(l.RawDir(), "snap", sanitizeSegment(model), sanitizeSegment(host))
 }
 
+// UnitFileFor names the per-hour file for one unit probe session host:
+// raw/unit/<model>/<host>/unit-<hour>.jsonl, one probe record per line. The
+// host is the pod name of a Kubernetes unit ("grafana-0") or
+// "machine-<id>".
+func (l Layout) UnitFileFor(model, host string) func(hour string) string {
+	dir := filepath.Join(l.RawDir(), "unit", sanitizeSegment(model), sanitizeSegment(host))
+	return func(hour string) string {
+		return filepath.Join(dir, fmt.Sprintf("unit-%s.jsonl", hour))
+	}
+}
+
 // StatusDir returns raw/status/<model>/, holding the ground-truth `juju status`
 // snapshot captured once at recording start (M8).
 func (l Layout) StatusDir(model string) string {
@@ -114,6 +125,15 @@ func (l Layout) StatusDatabagsFile(model string) string {
 // config-changed event has a "before" to diff against from t0.
 func (l Layout) StatusConfigFile(model string) string {
 	return filepath.Join(l.StatusDir(model), "config.json")
+}
+
+// StatusLogFile names a model's unit agent status log: raw/status/<model>/
+// status-log.json. It holds a JSON object mapping each unit the unit probes
+// covered to its verbatim `juju show-status-log --type juju-unit
+// --format=json` output, captured as the recording stops; the indexer
+// cross-checks the hooks it lists against what the tap recorded.
+func (l Layout) StatusLogFile(model string) string {
+	return filepath.Join(l.StatusDir(model), "status-log.json")
 }
 
 // DerivedDir returns the derived/ directory where cached artifacts live.

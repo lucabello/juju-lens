@@ -22,13 +22,13 @@ dir=/home/runner/work/my-charm/recording
 pid=12345
 ```
 
-If the recorder fails to start, the command exits non-zero and prints the cause along with the last lines of the recorder's log, so the step fails before any test runs. If the probe hasn't attached to an agent within 30 seconds, the command stops the recorder and fails. Use `--detach-timeout` to change the wait, for example on a slow `--attach ssh` connection:
+If the recorder fails to start, the command exits non-zero and prints the cause along with the last lines of the recorder's log, so the step fails before any test runs. If the probe hasn't attached to an agent within 30 seconds, the command stops the recorder and fails. Use `--detach-timeout` to change the wait, for example when the probe runs over a slow `juju ssh` connection:
 
 ```bash
 juju-lens record --detach ci-run --ssh-target controller/0 --detach-timeout 2m -o ./recording
 ```
 
-If the error says the probe may be too old to support `--detach`, the probe never reported its attach status. To use `record --detach` in ssh mode, upgrade `juju-lens-probe` on the controller machines. Older probes cause `--detach` to fail after `--detach-timeout`. Plain `record` is unaffected.
+If the error says the probe may be too old to support `--detach`, the probe never reported its attach status. To use `record --detach` with `--ssh-target`, upgrade `juju-lens-probe` on the controller machines. Older probes cause `--detach` to fail after `--detach-timeout`. Plain `record` is unaffected.
 
 In all these cases no recorder is left running and no `recorder.pid` is left behind.
 

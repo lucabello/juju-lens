@@ -82,15 +82,16 @@ type Manifest struct {
 	// Sources records every ingester that ran. The list is append-only.
 	Sources []SourceStatus `json:"sources,omitempty"`
 
-	// AttachMode is how the recorder reached the target processes' TLS
-	// boundary: "ssh" (machine controllers), "kubectl-debug" or "daemonset"
-	// (k8s), or "local" when the probe ran on this host. The viewer surfaces
-	// it so an operator can tell how a recording was produced. The recorder
-	// never mutates the controller, so there is nothing to restore.
+	// AttachMode is the normalised `record --attach` value: which capture
+	// sides ran, such as "host" (eBPF on the agents' TLS boundary), "unit"
+	// (a probe inside every unit), "host,unit", or "none" (logs and status
+	// only). Older recordings hold "local" or "ssh", which were both host
+	// capture.
 	AttachMode string `json:"attach_mode,omitempty"`
 
-	// AttachTargets lists the hosts/nodes the probe was attached on, for
-	// operator visibility. Empty for synthetic recordings.
+	// AttachTargets lists where the host probe ran: "localhost", or the
+	// --ssh-target machine. Empty without host capture and for synthetic
+	// recordings.
 	AttachTargets []string `json:"attach_targets,omitempty"`
 }
 

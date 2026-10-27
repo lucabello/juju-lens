@@ -24,10 +24,11 @@ func IsConfigChanged(ev Event) bool {
 }
 
 // Inspectable reports whether an event has anything worth drilling into: a
-// databag change, a config change, a failure, or a status the hook drove the
-// charm into (M10).
+// databag change, a config change, a failure, a status the hook drove the
+// charm into (M10), the tree of what the charm did (ops spans), or a hook
+// the tap missed or cut short.
 func Inspectable(ev Event) bool {
-	return ev.HasDatabag || IsConfigChanged(ev) || ev.Fail != FailNone || len(ev.Statuses) > 0
+	return ev.HasDatabag || IsConfigChanged(ev) || ev.Fail != FailNone || len(ev.Statuses) > 0 || len(ev.OpsSpans) > 0 || ev.Tap != ""
 }
 
 // DatabagEntry is one row under a relation: the "app"/"unit (name)" label and

@@ -11,6 +11,7 @@
 - [Record a Juju controller](how-to/record-a-controller.md)
 - [Record a controller in CI](how-to/record-in-ci.md)
 - [Watch a live model](how-to/watch-a-live-model.md)
+- [Trace a charm's memory spike to its code](how-to/trace-a-memory-spike.md), from inside the units with only `juju ssh`
 - [Stop a running recording](how-to/stop-a-recording.md)
 - [Rebuild a recording's index](how-to/rebuild-the-index.md)
 - [Export a recording for an AI agent](how-to/export-for-an-agent.md)
@@ -25,10 +26,11 @@
 
 ## Explanation
 
-These pages follow captured traffic from the agent to the Events pane. Each builds on the one before, so read them in order:
+These pages follow captured data from the units to the Events pane. Each builds on the one before, so read them in order:
 
-1. [How capture works](explanation/how-capture-works.md): reading Juju API traffic from inside the agents with eBPF.
+1. [How capture works](explanation/how-capture-works.md): reading Juju API traffic from inside the agents with eBPF (`--attach host`).
 2. [From wire to viewer](explanation/from-wire-to-viewer.md): the probe, the recorder, the index, and what can be lost along the way.
-3. [From RPCs to hooks](explanation/rpcs-to-hooks.md): how RPCs become hooks, state changes, and what the viewer shows.
+3. [How unit capture works](explanation/how-unit-capture-works.md): recording the charm's side from inside each unit (`--attach unit`): the module loaded into the charm's Python, what it records, what each hook costs, stack sampling, overhead, and what's left behind.
+4. [From RPCs to hooks](explanation/rpcs-to-hooks.md): how RPCs and the charm's records become hooks, state changes, and what the viewer shows.
 
-[Why the wire](explanation/why-the-wire.md) is an aside on why `juju-lens` doesn't use the charm process or the Juju API instead.
+[Why the wire](explanation/why-the-wire.md) is an aside on why host capture reads the agents' traffic rather than the charm process or the Juju API, and which side of a hook each attach mode sees.

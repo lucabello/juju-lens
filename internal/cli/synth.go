@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,7 +30,10 @@ Juju controller would emit for a given scenario. The recording is
 byte-for-byte reproducible when --start is fixed.
 
 Available scenarios:
-  trivial   two applications (grafana, prometheus) forming one relation.`,
+  trivial   two applications (grafana, prometheus) forming one relation.
+  ops       the charm side only, as --attach unit records it: two units of
+            an otelcol charm with deferred events, a subprocess, a hook that
+            fails twice before it succeeds, and one that is killed.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSynth(cmd.Context(), synth.Scenario(args[0]), *f)
@@ -96,6 +100,33 @@ func runSynth(ctx context.Context, sc synth.Scenario, f synthFlags) error {
 	for _, w := range writers {
 		if err := w.Close(); err != nil {
 			return err
+		}
+	}
+
+	// Unit probe sessions (`record --attach unit`): one rotating writer per
+	// host, bucketed by the record's own hour.
+	if recs, uerr := synth.UnitRecords(sc, opts); uerr == nil {
+		var recTs time.Time
+		uw := map[string]*recording.RotatingWriter{}
+		for _, ur := range recs {
+			recTs = ur.Rec.TS
+			w := uw[ur.Host]
+			if w == nil {
+				w = recording.NewRotatingWriter(layout.UnitFileFor(f.model, ur.Host), func() time.Time { return recTs })
+				uw[ur.Host] = w
+			}
+			line, err := json.Marshal(ur.Rec)
+			if err != nil {
+				return fmt.Errorf("marshalling synth unit record: %w", err)
+			}
+			if _, err := w.WriteLine(line); err != nil {
+				return fmt.Errorf("writing synth unit record: %w", err)
+			}
+		}
+		for _, w := range uw {
+			if err := w.Close(); err != nil {
+				return err
+			}
 		}
 	}
 

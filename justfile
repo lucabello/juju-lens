@@ -35,21 +35,38 @@ lint:
     @command -v staticcheck >/dev/null && staticcheck {{PKG}} || echo "staticcheck not installed, skipping"
     @command -v govulncheck >/dev/null && govulncheck {{PKG}} || echo "govulncheck not installed, skipping"
 
-# Run tests
+# Run tests, with the probes embedded, as in releases
 [group("dev")]
-test:
-    go test -race -count=1 {{PKG}}
+test: probes
+    go test -race -count=1 -tags embedprobe {{PKG}}
+
+# Check the unit tap against every ops release in its matrix (needs uv and network)
+[group("dev")]
+ops-matrix *ARGS:
+    python3 internal/unit/pytap/opsmatrix/matrix.py {{ARGS}}
 
 # ============================================================================
 # Build & Demo
 # ============================================================================
 
-# Build the binaries into ./bin/ (juju-lens and the eBPF probe)
+# Build the probes juju-lens carries inside itself, into internal/probebin/ for
+# go:embed: a static (CGO_ENABLED=0) build for each architecture, as --attach
+# unit uploads them to units whose images may have an older glibc than this
+# host, whatever architecture that host is.
 [group("build")]
-build:
+probes:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for arch in amd64 arm64; do
+        GOOS=linux GOARCH="${arch}" CGO_ENABLED=0 \
+            go build -trimpath -ldflags "{{LDFLAGS}} -s -w" -o "internal/probebin/linux_${arch}" ./cmd/juju-lens-probe
+    done
+
+# Build ./bin/juju-lens, with the probes inside it
+[group("build")]
+build: probes
     mkdir -p bin
-    go build -ldflags "{{LDFLAGS}}" -o bin/{{BIN}} ./cmd/juju-lens
-    go build -ldflags "{{LDFLAGS}}" -o bin/{{BIN}}-probe ./cmd/juju-lens-probe
+    go build -tags embedprobe -ldflags "{{LDFLAGS}}" -o bin/{{BIN}} ./cmd/juju-lens
 
 # Cut a release: validate, run checks, then tag and push (CI builds and publishes)
 [group("build")]
@@ -83,27 +100,26 @@ release VERSION:
     git push origin "${version}"
     echo "pushed ${version}; the release workflow will build and publish it"
 
-# Cross-compile release archives (linux/amd64, linux/arm64) into ./dist/
+# Cross-compile release archives (linux/amd64, linux/arm64) into ./dist/. Each
+# holds the one juju-lens binary, with both probes embedded.
 [group("build")]
-dist:
+dist: probes
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p dist
     VERSION="$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')"
-    # Only linux: juju-lens-probe is eBPF/Linux-only, and darwin builds
-    # would just ship a functionless stub. `go build`/`just build` still
-    # work fine on other platforms for local development.
+    # Only linux: the probe is eBPF/Linux-only, and darwin builds would just
+    # ship a functionless stub. `go build`/`just build` still work fine on
+    # other platforms for local development.
     for target in linux/amd64 linux/arm64; do
         os="${target%/*}" arch="${target#*/}"
         workdir="$(mktemp -d)"
         trap 'rm -rf "${workdir}"' EXIT
         GOOS="${os}" GOARCH="${arch}" CGO_ENABLED=0 \
-            go build -trimpath -ldflags "{{LDFLAGS}} -s -w" -o "${workdir}/{{BIN}}" ./cmd/juju-lens
-        GOOS="${os}" GOARCH="${arch}" CGO_ENABLED=0 \
-            go build -trimpath -ldflags "{{LDFLAGS}} -s -w" -o "${workdir}/{{BIN}}-probe" ./cmd/juju-lens-probe
+            go build -tags embedprobe -trimpath -ldflags "{{LDFLAGS}} -s -w" -o "${workdir}/{{BIN}}" ./cmd/juju-lens
         archive="dist/{{BIN}}-${VERSION}-${os}-${arch}.tar.gz"
         echo "building ${archive}"
-        tar czf "${archive}" -C "${workdir}" {{BIN}} {{BIN}}-probe
+        tar czf "${archive}" -C "${workdir}" {{BIN}}
         rm -rf "${workdir}"
         trap - EXIT
     done
@@ -112,7 +128,7 @@ dist:
 # Remove build artifacts
 [group("build")]
 clean:
-    rm -rf bin dist
+    rm -rf bin dist internal/probebin/linux_*
 
 # End-to-end smoke test: synth a recording and open it in the viewer
 [group("run")]
