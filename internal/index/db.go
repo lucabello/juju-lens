@@ -241,7 +241,8 @@ type DB struct {
 }
 
 // Open opens an existing index or creates a new one at path. It sets pragmas
-// and runs the schema.
+// and runs the schema. The journal is WAL, or a rollback journal on a
+// filesystem that cannot do WAL.
 func Open(path string) (*DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -250,10 +251,27 @@ func Open(path string) (*DB, error) {
 	// SQLite drivers do not always honour a single connection cleanly for
 	// WAL databases; keep it small but non-zero.
 	db.SetMaxOpenConns(4)
-	for _, stmt := range schema {
+	for i, stmt := range schema {
 		if _, err := db.Exec(stmt); err != nil {
+			if i != 0 {
+				_ = db.Close()
+				return nil, fmt.Errorf("schema stmt %q: %w", firstLine(stmt), err)
+			}
+			// WAL keeps its index in a shared memory map of index.db-shm, which
+			// some filesystems (9p, virtiofs, FUSE and network mounts) cannot
+			// provide: SQLite then fails with a disk I/O error. A rollback
+			// journal needs no map. Readers wait for a writer instead of
+			// running beside it, so wait for the lock on every connection.
 			_ = db.Close()
-			return nil, fmt.Errorf("schema stmt %q: %w", firstLine(stmt), err)
+			db, err = sql.Open("sqlite", path+"?_pragma=busy_timeout(10000)")
+			if err != nil {
+				return nil, fmt.Errorf("open sqlite %q: %w", path, err)
+			}
+			db.SetMaxOpenConns(4)
+			if _, err := db.Exec(`PRAGMA journal_mode = DELETE`); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("schema stmt %q: %w", firstLine(stmt), err)
+			}
 		}
 	}
 	d := &DB{sql: db}
