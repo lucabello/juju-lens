@@ -37,6 +37,7 @@ type unitIngester struct {
 	layout     recording.Layout
 	controller string
 	discover   bool
+	scope      unitScope     // record --app / --unit; empty = everything
 	lifetime   time.Duration // passed to the probe as a safety net; 0 = none
 	profile    bool          // the tap samples stacks (record --profile)
 	linger     time.Duration // workload burst sampling after a hook's last Pebble change (record --linger)
@@ -106,10 +107,10 @@ const (
 
 // newUnitIngester prepares unit probes for the given models (short-name ->
 // "caas" | "iaas"). With discover, models created later are picked up too.
-func newUnitIngester(layout recording.Layout, controller string, discover bool, models map[string]string,
+func newUnitIngester(layout recording.Layout, controller string, discover bool, scope unitScope, models map[string]string,
 	lifetime time.Duration, profile bool, linger time.Duration, podLogs bool, onAllLive func(int)) *unitIngester {
 	ui := &unitIngester{
-		layout: layout, controller: controller, discover: discover,
+		layout: layout, controller: controller, discover: discover, scope: scope,
 		lifetime: lifetime, profile: profile, linger: linger, podLogs: podLogs, onAllLive: onAllLive,
 		logFiles: map[string]*recording.RotatingWriter{},
 		runID:    newRunID(),
@@ -177,7 +178,7 @@ func (ui *unitIngester) reconcile() {
 	var targets []unitTarget
 	complete := true
 	for model, typ := range models {
-		ts, err := unitTargets(ui.controller, model, typ)
+		ts, err := unitTargets(ui.controller, model, typ, ui.scope)
 		if err != nil {
 			complete = false // model gone / juju hiccup: retry next tick
 			continue
@@ -193,6 +194,9 @@ func (ui *unitIngester) reconcile() {
 		if !ui.listed {
 			ui.listed = true
 			ui.initial = current
+			if ui.scope.active() && len(targets) == 0 {
+				fmt.Fprintf(os.Stderr, "juju-lens: no unit matches %s; check the names against `juju status`\n", ui.scope)
+			}
 		}
 		for k := range ui.initial {
 			if !current[k] {
@@ -213,9 +217,18 @@ func (ui *unitIngester) reconcile() {
 // unitTargets lists where probes run for a model: its units on Kubernetes,
 // its machines otherwise. A machine agent runs every unit on its machine, so
 // one probe per machine covers them all, subordinates included.
-func unitTargets(controller, model, modelType string) ([]unitTarget, error) {
+func unitTargets(controller, model, modelType string, scope unitScope) ([]unitTarget, error) {
 	if modelType == "iaas" {
-		ids, err := runJujuMachines(controller, model)
+		var ids []string
+		var err error
+		if scope.active() {
+			var out []byte
+			if out, err = runJuju("status", "-m", modelArg(controller, model), "--format", "json"); err == nil {
+				ids, err = parseStatusMachines(out, scope)
+			}
+		} else {
+			ids, err = runJujuMachines(controller, model)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -235,6 +248,9 @@ func unitTargets(controller, model, modelType string) ([]unitTarget, error) {
 	}
 	ts := make([]unitTarget, 0, len(units))
 	for _, u := range units {
+		if !scope.has(u) {
+			continue
+		}
 		ts = append(ts, unitTarget{model: model, ssh: u, host: strings.ReplaceAll(u, "/", "-")})
 	}
 	return ts, nil

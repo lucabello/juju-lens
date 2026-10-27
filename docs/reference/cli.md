@@ -16,6 +16,8 @@ Records a controller and its models into a new recording directory. `<name>` lab
 | `--attach` | `host` | What to capture, as a comma-separated set of `host` and `unit`, or `none`. See [attach modes](#attach-modes). |
 | `--controller` | current controller | Record every model on this controller. |
 | `--model` | all models | Record only this model, written as `model`, `owner/model` or `controller:model`. A model that another user or service account owns, such as one on a JAAS controller, is written `controller:owner/model`, for example `jaas:ci@serviceaccount/dev`; `juju models` lists the names. A short name that two owners share is ambiguous and needs the owner. |
+| `--app` | all | With `--model`, record only the units of this application, such as `grafana`. Repeat it or separate names with commas to choose several. Combines with `--unit`. |
+| `--unit` | all | With `--model`, record only this unit, such as `grafana/0`. Repeatable. With `--attach unit`, only these units get a probe on Kubernetes, and only the machines that host them on a machine model, where the probe still covers every unit on the machine. `juju debug-log` is limited to them too. `--attach host` still records every agent's traffic, and the status snapshot covers the whole model. |
 | `--ssh-target` | none | With `--attach host`, run the probe on this machine over `juju ssh`, such as `controller/0`. The target is resolved in the current Juju model (`juju switch`), not in `--model`. Without it, the probe runs on this host. |
 | `--pid` | all agent processes | Record only these agent process IDs. Repeatable. |
 | `--debug-log` | `true` | Stream `juju debug-log` for the recorded models. |
@@ -76,6 +78,7 @@ Records a model or controller and opens the viewer on the recording. Quitting th
 | Flag | Default | Meaning |
 |---|---|---|
 | `--model` | none | Watch only this model. Same as the `[model]` argument. |
+| `--app`, `--unit` | all | Watch only these applications or units of the model. Same as for [`record`](#record). |
 | `--controller` | none | Watch every model on this controller. |
 | `--output`, `-o` | `./recordings/<ts>--watch-<scope>` | Recording directory. |
 | `--attach` | `host` | What to capture. Same values as for [`record`](#attach-modes). |

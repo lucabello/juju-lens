@@ -14,7 +14,7 @@ import (
 // logs` lines do, in the shape ParseK8sLogLine reads, attributed to the unit.
 func TestWritePodLog(t *testing.T) {
 	layout := recording.NewLayout(t.TempDir())
-	ui := newUnitIngester(layout, "k8s", false, map[string]string{"lens": "caas"}, 0, true, 0, true, nil)
+	ui := newUnitIngester(layout, "k8s", false, unitScope{}, map[string]string{"lens": "caas"}, 0, true, 0, true, nil)
 	st := &unitStream{name: "unit lens/otelcol-0"}
 	ts := time.Date(2026, 10, 26, 19, 46, 59, 52_000_000, time.UTC)
 	ui.writePodLog(st, []byte(`{"kind":"pebble_log","ts":"2026-10-26T19:47:00Z","pebble_log":{"container":"otelcol","time":"`+

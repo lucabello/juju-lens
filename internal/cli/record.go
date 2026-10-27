@@ -39,6 +39,8 @@ type recordFlags struct {
 	maxSize     int64
 	profile     bool
 	linger      time.Duration
+	apps        []string
+	units       []string
 
 	detach        bool
 	detachTimeout time.Duration
@@ -78,6 +80,12 @@ name and is stored in manifest.json.
 'host,unit' runs both in one recording. The probe is part of juju-lens: it
 carries a static build for linux/amd64 and linux/arm64, and uploads the one
 that matches each machine's architecture.
+
+--app and --unit, with --model, narrow the recording to some of its
+applications or units: only they get a unit probe (on a machine model, the
+machines that host them, where the probe still covers every unit), and
+debug-log is limited to them. The status snapshot and --attach host still
+cover the whole model.
 
 record never changes the controller: host attach only adds read-only uprobes.
 Unit attach writes into each unit for as long as it runs:
@@ -122,6 +130,9 @@ connection with --attach unit, which needs no cluster access; else with
 			if f.linger < 0 {
 				return errors.New("--linger can't be negative")
 			}
+			if _, err := f.scope(sides); err != nil {
+				return err
+			}
 			if f.detach {
 				return runDetached(cmd, args[0], *f)
 			}
@@ -139,6 +150,8 @@ connection with --attach unit, which needs no cluster access; else with
 	cmd.Flags().BoolVar(&f.machineLog, "machine-log", true, "also stream machine journald for IAAS models ('juju ssh … journalctl')")
 	cmd.Flags().DurationVar(&f.maxDuration, "max-duration", 0, "stop recording after this duration (0 = no limit)")
 	cmd.Flags().Int64Var(&f.maxSize, "max-size", 0, "stop recording after this many bytes of raw/ (0 = no limit)")
+	cmd.Flags().StringSliceVar(&f.apps, "app", nil, "with --model, record only this application's units, such as \"grafana\"; repeatable (see above)")
+	cmd.Flags().StringSliceVar(&f.units, "unit", nil, "with --model, record only this unit, such as \"grafana/0\"; repeatable (see above)")
 	cmd.Flags().BoolVar(&f.profile, "profile", true, "with --attach unit, sample the charms' Python stacks")
 	cmd.Flags().DurationVar(&f.linger, "linger", unit.DefaultLinger, "with --attach unit, keep sampling workloads 10 times a second this long after a hook's last Pebble change is ready")
 	cmd.Flags().BoolVar(&f.detach, "detach", false, "run the recorder in the background; return once it is capturing, printing the recording dir and pid")
@@ -146,6 +159,21 @@ connection with --attach unit, which needs no cluster access; else with
 	cmd.Flags().BoolVar(&f.detachedChild, detachedChildFlag, false, "internal: set on the daemon started by --detach")
 	_ = cmd.Flags().MarkHidden(detachedChildFlag)
 	return cmd
+}
+
+// scope checks --app and --unit, which name things inside one model.
+func (f recordFlags) scope(sides attachSides) (unitScope, error) {
+	s, err := newUnitScope(f.apps, f.units)
+	if err != nil {
+		return s, err
+	}
+	if s.active() && f.model == "" {
+		return s, errors.New("--app and --unit need --model: an application name means nothing across models")
+	}
+	if s.active() && sides.host {
+		fmt.Fprintln(os.Stderr, "juju-lens: --app and --unit narrow the unit probes and debug-log; --attach host still records every agent's traffic")
+	}
+	return s, nil
 }
 
 func runRecord(ctx context.Context, name string, f recordFlags, sides attachSides) error {
@@ -157,6 +185,10 @@ func runRecord(ctx context.Context, name string, f recordFlags, sides attachSide
 	}
 	if f.output == "" {
 		f.output = filepath.Join("recordings", recording.SuggestedDirName(name, time.Now()))
+	}
+	scope, err := f.scope(sides)
+	if err != nil {
+		return err
 	}
 	layout := recording.NewLayout(f.output)
 	if err := layout.Init(); err != nil {
@@ -210,7 +242,6 @@ func runRecord(ctx context.Context, name string, f recordFlags, sides attachSide
 	}
 
 	var probeCmd *exec.Cmd
-	var err error
 	if sides.host {
 		var target string
 		probeCmd, target, err = buildProbeCommand(f, filter)
@@ -286,6 +317,7 @@ func runRecord(ctx context.Context, name string, f recordFlags, sides attachSide
 		}
 		if f.debugLog && len(models) > 0 {
 			logIng = newLogIngester(layout, topo.controllerName, discover)
+			logIng.include = scope.debugLogInclude()
 			man.AddSource(recording.SourceStatus{Name: "debug-log", Kind: "juju-debug-log", Started: time.Now().UTC()})
 			logIng.start(ctx, &logWG, models)
 		}
@@ -319,7 +351,7 @@ func runRecord(ctx context.Context, name string, f recordFlags, sides attachSide
 					ready.partReady("unit", fmt.Sprintf("unit probes running on %d target(s)", n))
 				}
 			}
-			unitIng = newUnitIngester(layout, topo.controllerName, discover, byType, f.maxDuration, f.profile, f.linger, f.k8sLog, onAllLive)
+			unitIng = newUnitIngester(layout, topo.controllerName, discover, scope, byType, f.maxDuration, f.profile, f.linger, f.k8sLog, onAllLive)
 			unitIng.start(ctx, &logWG)
 		}
 	}

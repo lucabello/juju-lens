@@ -26,7 +26,8 @@ import (
 type logIngester struct {
 	layout     recording.Layout
 	controller string
-	discover   bool // controller scope: keep rediscovering models
+	discover   bool     // controller scope: keep rediscovering models
+	include    []string // extra `juju debug-log` arguments: record --app / --unit
 
 	ctx context.Context
 	wg  *sync.WaitGroup
@@ -124,6 +125,7 @@ func (li *logIngester) launch(st *logStream) error {
 	// --tail follows new lines from now; --date --ms --utc give the
 	// deterministic timestamp ParseDebugLogLine expects.
 	args := []string{"debug-log", "-m", modelArg(li.controller, st.model), "--tail", "--date", "--ms", "--utc"}
+	args = append(args, li.include...)
 	name, full := jujuCommand(args)
 	cmd := exec.CommandContext(li.ctx, name, full...)
 	cmd.WaitDelay = 3 * time.Second

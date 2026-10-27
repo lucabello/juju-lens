@@ -48,7 +48,11 @@ Examples:
 			if len(args) == 1 {
 				f.model = args[0]
 			}
-			if _, err := parseAttach(f.attach); err != nil {
+			sides, err := parseAttach(f.attach)
+			if err != nil {
+				return err
+			}
+			if _, err := f.scope(sides); err != nil {
 				return err
 			}
 			return runWatch(cmd.Context(), *f)
@@ -60,6 +64,8 @@ Examples:
 	cmd.Flags().StringVar(&f.attach, "attach", "host", "what to capture, comma-separated: "+attachValues+" (see 'juju-lens record --help')")
 	cmd.Flags().StringVar(&f.sshTarget, "ssh-target", "", "with --attach host, run the probe on this machine over 'juju ssh' (e.g. 'controller/0')")
 	cmd.Flags().BoolVar(&f.debugLog, "debug-log", true, "also stream 'juju debug-log' for the scoped models")
+	cmd.Flags().StringSliceVar(&f.apps, "app", nil, "with a model, record only this application's units; repeatable")
+	cmd.Flags().StringSliceVar(&f.units, "unit", nil, "with a model, record only this unit, such as \"grafana/0\"; repeatable")
 	return cmd
 }
 
@@ -96,6 +102,12 @@ func runWatch(ctx context.Context, f recordFlags) error {
 	}
 	if !f.debugLog {
 		recArgs = append(recArgs, "--debug-log=false")
+	}
+	for _, a := range f.apps {
+		recArgs = append(recArgs, "--app", a)
+	}
+	for _, u := range f.units {
+		recArgs = append(recArgs, "--unit", u)
 	}
 
 	// The recorder's progress goes to record.log so it doesn't corrupt the TUI.
