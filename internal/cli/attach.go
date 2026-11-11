@@ -18,11 +18,12 @@ type attachSides struct {
 	unit bool
 }
 
-// parseAttach reads a comma-separated --attach value. Empty means `host`.
-// Order and repeats don't matter; `none` can't be combined with a side.
+// parseAttach reads a comma-separated --attach value. Empty means `unit`,
+// the default. Order and repeats don't matter; `none` can't be combined with
+// a side.
 func parseAttach(s string) (attachSides, error) {
 	if strings.TrimSpace(s) == "" {
-		return attachSides{host: true}, nil
+		return attachSides{unit: true}, nil
 	}
 	var a attachSides
 	none := false

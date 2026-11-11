@@ -2,7 +2,7 @@
 
 `juju-lens` records what a Juju controller and its models do, and lets you browse the recording offline. It shows the hooks each unit ran, the status and relation data they changed, and the logs written at the time, all on one timeline.
 
-It can capture two sides of a model. From the host, it reads Juju API traffic inside the Juju agents with read-only eBPF probes, so it works with any charm and doesn't change anything on the controller. From inside each unit, over `juju ssh`, it records what a charm built on [ops](https://github.com/canonical/operator) does in each hook: its events, observers, hook tool and Pebble calls, what the hook cost in CPU and memory, and where its Python spent that time. It supports Juju 3.6 and 4.x, on machine and Kubernetes controllers.
+It can capture two sides of a model. By default it records from inside each unit, over `juju ssh`: what a charm built on [ops](https://github.com/canonical/operator) does in each hook, with its events, observers, hook tool and Pebble calls, what the hook cost in CPU and memory, and where its Python spent that time. That needs nothing but `juju ssh`, so it works on a remote cluster and without root. From the host, `--attach host` instead reads Juju API traffic inside the Juju agents with read-only eBPF probes, so it also sees relation data and works with any charm. It supports Juju 3.6 and 4.x, on machine and Kubernetes controllers.
 
 ## Install
 
@@ -14,7 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/lucabello/juju-lens/main/install.sh
 
 The script installs to `/usr/local/bin`, or `~/.local/bin` if that isn't writable. Set `JUJU_LENS_VERSION` to install a specific release, or `JUJU_LENS_INSTALL_DIR` to choose the directory. Releases are published for Linux on `amd64` and `arm64`.
 
-`juju-lens` carries the probe inside itself: a static build for `amd64` and one for `arm64`. When it records with `--attach unit`, it uploads the one that matches each unit, so the units' architecture doesn't have to be yours, and nothing else needs installing.
+`juju-lens` carries the probe inside itself: a static build for `amd64` and one for `arm64`. When it records inside units, it uploads the one that matches each unit, so the units' architecture doesn't have to be yours, and nothing else needs installing.
 
 To build from source, you need Go 1.25 or newer and [`just`](https://github.com/casey/just):
 
@@ -22,25 +22,36 @@ To build from source, you need Go 1.25 or newer and [`just`](https://github.com/
 just build   # builds ./bin/juju-lens, with both probes embedded
 ```
 
-`go install github.com/lucabello/juju-lens/cmd/juju-lens@latest` builds `juju-lens` without the embedded probes, because they are built first. That build can view and export recordings, record with `--attach none`, and record the host it runs on with `--attach host`; it can't upload a probe, so `--attach unit` and `--ssh-target` need a release or `just build`.
+`go install github.com/lucabello/juju-lens/cmd/juju-lens@latest` builds `juju-lens` without the embedded probes, because they are built first. That build can view and export recordings, record with `--attach none`, and record the host it runs on with `--attach host`; it can't upload a probe, so the default `--attach unit` and `--ssh-target` need a release or `just build`.
 
 What recording needs depends on what you capture, chosen with `record --attach`:
 
 | `--attach` | Captures | Needs |
 |---|---|---|
-| `host` (default) | The agents' Juju API calls. | Linux 5.8 or newer, and root or `CAP_BPF`, on the host where the Juju agents run. |
-| `unit` | Inside each charm: events, observers, hook tool and Pebble calls, each hook's CPU and memory, and Python stack samples. Writes a module into each charm's venv while it runs, and removes it afterwards. | A Juju client that can `juju ssh` into the units; on machine models, passwordless `sudo` on the machines. Nothing installed on the units beforehand: `juju-lens` uploads its probe, for the units' architecture (`amd64` or `arm64`). Workload-container logs on Kubernetes come through Pebble, so no `kubectl` is needed. |
+| `unit` (default) | Inside each charm: events, observers, hook tool and Pebble calls, each hook's CPU and memory, and Python stack samples. Writes a module into each charm's venv while it runs, and removes it afterwards. Doesn't record relation data. | A Juju client that can `juju ssh` into the units; on machine models, passwordless `sudo` on the machines. Nothing installed on the units beforehand: `juju-lens` uploads its probe, for the units' architecture (`amd64` or `arm64`). Workload-container logs on Kubernetes come through Pebble, so no `kubectl` is needed. |
+| `host` | The agents' Juju API calls: relation data, agent status and the `run-hook` markers, for any charm. | Linux 5.8 or newer, and root or `CAP_BPF`, on the host where the Juju agents run. |
 | `host,unit` | Both, joined hook by hook. | Both of the above. |
 | `none` | Logs and the model status only. | The Juju client. |
+
+## What recording costs
+
+Recording inside the units is cheap next to what it records, but not free. Measured on a Kubernetes model of six charms, the COS Lite bundle:
+
+- **The charms** run as before: deploy time and the time to apply a configuration change showed no difference beyond run-to-run variation. The probe uses about 14 MB of memory and a fraction of a CPU core in each unit, and sampling a hook's Python stack adds about 2% of its CPU.
+- **The controller** used about 15% more CPU during the deploy, because the recorder holds a `juju ssh` session to each unit.
+- **The machine running `juju-lens`** runs a `juju` client of about 110 MB for each unit's session: the recording of six units used close to 800 MB.
+- **The disk**: the recording was 63 to 69 MB for a 12-minute deploy of six charms. A settled model of six units took 4 MB over 7 minutes with `update-status` at its default of every 5 minutes, and 18 MB with it every minute: the probes' resource samples are most of it when little else runs. A recording compresses to about a sixth, and `--profile=false` makes it about a quarter smaller.
+
+[How to make a recording cheaper](docs/how-to/make-a-recording-cheaper.md) lists what to turn off, and [how unit capture works](docs/explanation/how-unit-capture-works.md#what-it-costs) has the figures and what they were measured on.
 
 Viewing a recording works anywhere `juju-lens` builds.
 
 ## Use
 
-Record the current controller until you press `Ctrl-C`:
+Record a model until you press `Ctrl-C`. Every unit of the model gets a probe:
 
 ```bash
-sudo juju-lens record my-capture
+juju-lens record my-capture --model <model>
 ```
 
 Then open the recording:
@@ -49,22 +60,22 @@ Then open the recording:
 juju-lens view ./recordings/<timestamp>--my-capture
 ```
 
-To record and view at the same time, use `sudo juju-lens watch <model>`.
+To record and view at the same time, use `juju-lens watch <model>`.
 
-To see inside the charms instead, with nothing but `juju ssh` (and `sudo` on machine models), record a model with `--attach unit`. Every unit of the model gets a probe:
+To see Juju's side as well, with the relation data and the agents' status, add `host`. The host probe needs root, so run it with `sudo`:
 
 ```bash
-juju-lens record my-capture --model <model> --attach unit
+sudo juju-lens record my-capture --model <model> --attach host,unit
 ```
 
-[How to trace a charm's memory spike to its code](docs/how-to/trace-a-memory-spike.md) shows what to do with such a recording, and [how unit capture works](docs/explanation/how-unit-capture-works.md) describes what it changes on the units.
+[How to trace a charm's memory spike to its code](docs/how-to/trace-a-memory-spike.md) shows what to do with a recording of the units, and [how unit capture works](docs/explanation/how-unit-capture-works.md) describes what it changes on them.
 
-[Your first recording](docs/tutorials/first-recording.md) walks through a full example. The [documentation](docs/README.md) covers the rest, including how capture works.
+[Your first recording](docs/tutorials/first-recording.md) walks through a full example with `--attach host`. The [documentation](docs/README.md) covers the rest, including how capture works.
 
 ## Limitations
 
-- With `--attach host`, Kubernetes controllers can only be recorded from the host they run on, such as a local MicroK8s, and machine controllers remotely over `juju ssh`, to which `juju-lens` uploads the probe, with `sudo` on the controller machine. To record the charms of a model on a remote Kubernetes cluster, use `--attach unit`, which needs only `juju ssh` but doesn't capture Juju API traffic.
-- `--attach unit` records events, observers and stacks only for charms built on ops; other charms, and `juju exec`, get each execution's duration and cost only. It doesn't see Juju's side, such as the agent's `run-hook` markers, its status, and relation data the charm doesn't read; add `host` for that. On Kubernetes, the first hooks after a refresh run before the module is back in the new pod.
+- The default `--attach unit` records events, observers and stacks only for charms built on ops; other charms, and `juju exec`, get each execution's duration and cost only. It doesn't see Juju's side, such as the agent's `run-hook` markers, its status, and relation data: databag values are never recorded in a unit record. Add `host` for those. On Kubernetes, the first hooks after a refresh run before the module is back in the new pod.
+- With `--attach host`, Kubernetes controllers can only be recorded from the host they run on, such as a local MicroK8s, and machine controllers remotely over `juju ssh`, to which `juju-lens` uploads the probe, with `sudo` on the controller machine. To record the charms of a model on a remote Kubernetes cluster, use `--attach unit`.
 
 ## Develop
 

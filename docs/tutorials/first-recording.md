@@ -35,10 +35,10 @@ juju controllers
 The current controller is marked with `*`. In the directory where you built `juju-lens`, start a recording called `int-test`:
 
 ```bash
-sudo ./bin/juju-lens record int-test
+sudo ./bin/juju-lens record int-test --attach host
 ```
 
-Without `--controller` or `--model`, `juju-lens` records every model on the current controller, including models created after it starts. The tests will create one. Leave this command running.
+Without `--controller` or `--model`, `juju-lens` records every model on the current controller, including models created after it starts. The tests will create one. `--attach host` reads the Juju agents' API traffic, which is what shows the relation data in the steps below; it's why this command needs `sudo`. Leave this command running.
 
 ## Run the tests
 

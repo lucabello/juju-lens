@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,16 +34,19 @@ func newWatchCmd() *cobra.Command {
 		Use:   "watch [model]",
 		Short: "Record a live model/controller and follow it in the viewer",
 		Long: `watch records a live model (or whole controller) and immediately opens
-the viewer following the capture, so you can watch hooks, status and relation
-databags update in real time. Quitting the viewer (q) stops the recording; the
-recording directory is kept so you can 'juju-lens view' it again later.
+the viewer following the capture, so you can watch hooks and status update in
+real time, and relation databags too with --attach host. Quitting the viewer
+(q) stops the recording; the recording directory is kept so you can
+'juju-lens view' it again later.
 
---attach and --ssh-target choose what is captured, as for 'juju-lens record'.
+--attach and --ssh-target choose what is captured, as for 'juju-lens record':
+unit (the default) records inside each unit over 'juju ssh', host reads the
+agents' Juju API traffic and needs root.
 
 Examples:
-  sudo juju-lens watch cos-lite                 # follow one model on the current controller
-  sudo juju-lens watch --controller kub         # follow every model on a controller
-  juju-lens watch cos-lite --attach none        # logs and status only, no root needed`,
+  juju-lens watch cos-lite                      # follow one model, inside its units
+  sudo juju-lens watch cos-lite --attach host   # follow its Juju API traffic instead
+  juju-lens watch cos-lite --attach none        # logs and status only`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
@@ -51,6 +55,9 @@ Examples:
 			sides, err := parseAttach(f.attach)
 			if err != nil {
 				return err
+			}
+			if f.sshTarget != "" && !sides.host {
+				return errors.New("--ssh-target needs --attach host (or host,unit)")
 			}
 			if _, err := f.scope(sides); err != nil {
 				return err
@@ -61,7 +68,7 @@ Examples:
 	cmd.Flags().StringVar(&f.model, "model", "", "scope to a single model (also accepted as a positional arg)")
 	cmd.Flags().StringVar(&f.controller, "controller", "", "scope to a controller (all its models)")
 	cmd.Flags().StringVarP(&f.output, "output", "o", "", "recording directory (default: ./recordings/<ts>--watch-<scope>)")
-	cmd.Flags().StringVar(&f.attach, "attach", "host", "what to capture, comma-separated: "+attachValues+" (see 'juju-lens record --help')")
+	cmd.Flags().StringVar(&f.attach, "attach", "unit", "what to capture, comma-separated: "+attachValues+" (see 'juju-lens record --help')")
 	cmd.Flags().StringVar(&f.sshTarget, "ssh-target", "", "with --attach host, run the probe on this machine over 'juju ssh' (e.g. 'controller/0')")
 	cmd.Flags().BoolVar(&f.logs, "logs", true, "record logs at all; --logs=false turns off every log source")
 	cmd.Flags().BoolVar(&f.debugLog, "debug-log", true, "also stream 'juju debug-log' for the scoped models")
