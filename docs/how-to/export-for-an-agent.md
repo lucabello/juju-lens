@@ -19,9 +19,9 @@ The files are written to `derived/export/` in the recording directory. Use `--ou
 | File | Contents |
 |---|---|
 | `AGENTS.md` | Instructions for the agent, describing the other files. |
-| `SUMMARY.md` | Time range, units, and how many hooks ended each way. |
-| `timeline.jsonl` | Events and log lines in time order, one JSON object per line. |
-| `events.jsonl` | Events only. |
+| `SUMMARY.md` | Time range, units, and how many hooks ended each way. For a recording of units with profiling, also the five hooks that took the most CPU and the five that took the most memory, each with the charm code involved and its span ID. |
+| `timeline.jsonl` | Events and log lines in time order, one JSON object per line. Its event lines carry the same cost fields as `events.jsonl`. |
+| `events.jsonl` | Events only. For a hook that was profiled, the line also has `cpu_ms`, `mem_growth_bytes`, `rss_peak_bytes`, `top_frame` and `top_memory_frame`: what the charm's init and observers cost in the hook, and the charm code where the most time and memory went. `grep cpu_ms events.jsonl` finds the hooks that have them. |
 | `details/<span_id>.json` | One file per event: the statuses it set, relation data and configuration changes, and failure details. For hooks recorded with `--attach unit`, `ops` holds one span tree per process that ran the hook: charm init, deferred events, each event and observer with its duration and error, and every hook tool and Pebble call. When the hook was profiled, charm init and the observers that took long enough also list `functions`: the functions of the charm's own code that ran, as a call tree with how long each took. When the hook was profiled, `costs` lists the wall time, CPU, and memory of charm init and each observer, and `top_stacks` and `top_memory_stacks` list the stacks with the most wall time and memory growth. |
 | `report.md` | Everything above as a single document for people to read, with the charm-side trees folded to their notable calls. |
 

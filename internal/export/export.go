@@ -133,6 +133,9 @@ type StackDetail struct {
 	// digest is what the Markdown shows of Frames: the innermost few, then
 	// the charm's own frames among the rest, with gaps marked.
 	digest []string
+	// charmFrame is the innermost frame of the charm's own code, which says
+	// more about what the charm was doing than a socket read at the top.
+	charmFrame string
 }
 
 // Stack digests show this many innermost frames, then up to this many of
@@ -546,6 +549,9 @@ func stackDetails(p *narrative.Profile, m narrative.Metric, ops *narrative.OpsIn
 			fn, loc := p.FrameLabel(f)
 			label := fn + " (" + loc + ")"
 			sd.Frames = append(sd.Frames, label)
+			if sd.charmFrame == "" && p.IsCharmFrame(f) && !narrative.IsWrapperFrame(p.Frames[f]) {
+				sd.charmFrame = label
+			}
 			if i < digestInner || p.IsCharmFrame(f) && !narrative.IsWrapperFrame(p.Frames[f]) && charm < digestCharm {
 				if skipped > 0 {
 					sd.digest = append(sd.digest, fmt.Sprintf("… %d %s", skipped, plural(skipped, "frame", "frames")))

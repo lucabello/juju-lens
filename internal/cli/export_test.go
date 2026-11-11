@@ -264,3 +264,95 @@ func TestExportIncludesCostsAndTopStacks(t *testing.T) {
 		}
 	}
 }
+
+// An agent that greps the folder export, rather than opening every details
+// file, has to be able to find the hooks that cost something: the event lines
+// carry the cost, SUMMARY.md ranks the hooks, and AGENTS.md says so.
+func TestExportFolderSurfacesCostsToAgents(t *testing.T) {
+	dir := t.TempDir()
+	if err := runSynth(context.Background(), synth.ScenarioOps, synthFlags{output: dir, model: "default"}); err != nil {
+		t.Fatalf("runSynth: %v", err)
+	}
+	res, err := export.Build(dir, export.Options{Model: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	if err := export.WriteFolder(out, res, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	costed := 0
+	lines, err := os.ReadFile(filepath.Join(out, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(strings.TrimSpace(string(lines)), "\n") {
+		var rec export.LineRecord
+		if err := json.Unmarshal([]byte(l), &rec); err != nil {
+			t.Fatal(err)
+		}
+		detail, err := os.ReadFile(filepath.Join(out, "details", rec.SpanID+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ev export.EventDetail
+		if err := json.Unmarshal(detail, &ev); err != nil {
+			t.Fatal(err)
+		}
+		var want float64
+		for _, c := range ev.Costs {
+			want += c.CPUMS
+		}
+		if rec.CPUMS != want {
+			t.Errorf("%s %s: line cpu_ms %v, details add up to %v", rec.Unit, rec.Summary, rec.CPUMS, want)
+		}
+		if want > 0 {
+			costed++
+			if rec.TopFrame == "" {
+				t.Errorf("%s %s: profiled hook has no top_frame", rec.Unit, rec.Summary)
+			}
+		} else {
+			if rec.TopFrame != "" || rec.MemGrowthBytes != 0 {
+				t.Errorf("%s %s: unprofiled hook carries cost fields: %+v", rec.Unit, rec.Summary, rec)
+			}
+		}
+	}
+	if costed == 0 {
+		t.Fatal("no event line carries cpu_ms; the synthetic ops recording profiles its hooks")
+	}
+
+	summary, _ := os.ReadFile(filepath.Join(out, "SUMMARY.md"))
+	for _, want := range []string{"## Costliest hooks", "[span ", " in "} {
+		if !strings.Contains(string(summary), want) {
+			t.Errorf("SUMMARY.md lacks %q:\n%s", want, summary)
+		}
+	}
+	agents, _ := os.ReadFile(filepath.Join(out, "AGENTS.md"))
+	for _, want := range []string{"cpu_ms", "top_stacks", "costs"} {
+		if !strings.Contains(string(agents), want) {
+			t.Errorf("AGENTS.md doesn't mention %q:\n%s", want, agents)
+		}
+	}
+}
+
+// A recording without profiles gets no cost sections and no cost fields.
+func TestExportFolderOmitsCostsWithoutProfiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := runSynth(context.Background(), synth.ScenarioTrivial, synthFlags{output: dir, model: "default"}); err != nil {
+		t.Fatalf("runSynth: %v", err)
+	}
+	res, err := export.Build(dir, export.Options{Model: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	if err := export.WriteFolder(out, res, nil); err != nil {
+		t.Fatal(err)
+	}
+	summary, _ := os.ReadFile(filepath.Join(out, "SUMMARY.md"))
+	events, _ := os.ReadFile(filepath.Join(out, "events.jsonl"))
+	if strings.Contains(string(summary), "Costliest") || strings.Contains(string(events), "cpu_ms") {
+		t.Errorf("cost output for a recording with no profiles:\n%s", summary)
+	}
+}
