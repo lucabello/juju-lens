@@ -2,6 +2,7 @@ package export
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/lucabello/juju-lens/internal/index"
 	"github.com/lucabello/juju-lens/internal/narrative"
@@ -235,4 +236,36 @@ func pluralWord(n int, one, many string) string {
 		return one
 	}
 	return many
+}
+
+// Logs returns every log record of the model, in time order.
+func (s *Source) Logs() ([]index.LogRow, error) { return s.db.Logs(s.Model.ID, 0) }
+
+// EventLogs returns the log lines correlated with ev: those that carry its
+// span id (Matched "span"), and those from the same unit within window of
+// the hook (Matched "window"), in time order, at most limit.
+func (s *Source) EventLogs(ev narrative.Event, window time.Duration, limit int) ([]index.LogRow, error) {
+	return s.db.LogsForSpan(s.Model.ID, ev.SpanID, ev.Unit, ev.TS, ev.TS.Add(ev.Dur), window, limit)
+}
+
+// State returns the value each scope of a kind of snapshot held at time at:
+// "app-status", "unit-status", "agent-status", "databag", "config" or
+// "leadership".
+func (s *Source) State(kind string, at time.Time) ([]index.SnapshotRow, error) {
+	return s.db.LatestPerScopeAsOf(s.Model.ID, kind, at)
+}
+
+// RecordingEnd is the time the recording ended, or the end of its last event
+// when the manifest doesn't say.
+func (s *Source) RecordingEnd() time.Time {
+	if !s.Recording.Ended.IsZero() {
+		return s.Recording.Ended
+	}
+	var end time.Time
+	for _, ev := range s.events {
+		if t := ev.TS.Add(ev.Dur); t.After(end) {
+			end = t
+		}
+	}
+	return end
 }

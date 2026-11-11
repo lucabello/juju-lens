@@ -33,11 +33,13 @@ much it left out, and ends with the command to go on with.
   juju-lens inspect profile <recording> [view]    where the charm's time and memory went
   juju-lens inspect memory <recording> <span-id>  memory around a hook, and the code that took it
   juju-lens inspect trace <recording> <span-id>   what a hook did along time: events, observers, calls, functions
+  juju-lens inspect logs <recording>              log lines, by unit, level, text, time or event
+  juju-lens inspect state <recording>             status, config, leadership and databags at a time
 
 A recording without an index.db, or with one from an older juju-lens, is
 indexed first.`,
 	}
-	cmd.AddCommand(newInspectEventsCmd(), newInspectEventCmd(), newInspectProfileCmd(), newInspectMemoryCmd(), newInspectTraceCmd())
+	cmd.AddCommand(newInspectEventsCmd(), newInspectEventCmd(), newInspectProfileCmd(), newInspectMemoryCmd(), newInspectTraceCmd(), newInspectLogsCmd(), newInspectStateCmd())
 	return cmd
 }
 
@@ -403,6 +405,165 @@ Short rows are left out unless --all.`,
 	cmd.Flags().DurationVar(&minDur, "min-duration", 0, "leave out rows shorter than this, such as 50ms")
 	cmd.Flags().IntVar(&limit, "limit", 80, "show at most this many rows (0 = 80)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	return cmd
+}
+
+// ----- inspect logs
+
+func newInspectLogsCmd() *cobra.Command {
+	var (
+		model  string
+		units  []string
+		levels []string
+		grep   []string
+		source string
+		since  string
+		until  string
+		around string
+		window time.Duration
+		span   string
+		width  int
+		limit  int
+		skip   int
+		asJSON bool
+	)
+	cmd := &cobra.Command{
+		Use:   "logs <recording>",
+		Short: "Log lines, by unit, level, text, time or event",
+		Long: `logs lists the log lines of a recording: 'juju debug-log', the workload
+containers' logs and the machines' journals, in time order. Filter by --unit,
+--level, --grep (text, ignoring case) and --source, and by time with --since and
+--until, or --around a time with --window. --span an event id lists the lines
+the index tied to that event by its span id, marked *, and the same unit's lines
+within --window of the hook (2s by default).`,
+		Example: `  juju-lens inspect logs ./rec --unit otelcol/0 --level error,warning
+  juju-lens inspect logs ./rec --span 7bfdb120d1995d97 --window 5s`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			q := inspect.LogsQuery{Page: inspect.Page{Limit: limit, Skip: skip}, Units: units, Levels: levels, Grep: grep,
+				Source: source, Span: span, Window: window, Width: width}
+			var err error
+			parse := func(flag, v string) (t time.Time) {
+				if v == "" || err != nil {
+					return
+				}
+				if t, err = time.Parse(time.RFC3339, v); err != nil {
+					err = fmt.Errorf("--%s: %w", flag, err)
+				}
+				return
+			}
+			q.Since, q.Until = parse("since", since), parse("until", until)
+			if around != "" {
+				at := parse("around", around)
+				w := window
+				if w == 0 {
+					w = 5 * time.Second
+				}
+				if span == "" {
+					q.Since, q.Until = at.Add(-w), at.Add(w)
+				}
+			}
+			if err != nil {
+				return err
+			}
+			src, err := openInspect(args[0], model, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			defer src.Close()
+			list, err := inspect.ListLogs(src, q)
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return list.WriteJSON(cmd.OutOrStdout())
+			}
+			list.WriteText(cmd.OutOrStdout(), args[0], q.Page)
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&model, "model", "", "the model to read (required if the recording has more than one)")
+	f.StringArrayVar(&units, "unit", nil, "only this unit, application, or entity such as machine-0 (repeatable)")
+	f.StringSliceVar(&levels, "level", nil, "only these levels, such as error,warning (DEBUG, INFO, WARNING, ERROR, ...)")
+	f.StringArrayVar(&grep, "grep", nil, "only lines containing this text, ignoring case (repeatable)")
+	f.StringVar(&source, "source", "", "only this source: debug-log, k8s or journal")
+	f.StringVar(&since, "since", "", "RFC3339 lower time bound")
+	f.StringVar(&until, "until", "", "RFC3339 upper time bound")
+	f.StringVar(&around, "around", "", "RFC3339 time: the lines within --window of it (5s by default)")
+	f.DurationVar(&window, "window", 0, "with --around, how far either side; with --span, how far around the hook (2s by default)")
+	f.StringVar(&span, "span", "", "the lines about this event, by span id")
+	f.IntVar(&width, "width", 0, "cut each line's text at this many characters (240 by default)")
+	f.IntVar(&limit, "limit", 40, "show at most this many lines (0 = all)")
+	f.IntVar(&skip, "skip", 0, "leave out this many lines first")
+	f.BoolVar(&asJSON, "json", false, "print JSON")
+	return cmd
+}
+
+// ----- inspect state
+
+func newInspectStateCmd() *cobra.Command {
+	var (
+		model  string
+		kind   string
+		at     string
+		span   string
+		match  []string
+		width  int
+		limit  int
+		skip   int
+		asJSON bool
+	)
+	cmd := &cobra.Command{
+		Use:   "state <recording>",
+		Short: "Status, config, leadership and relation data at a time",
+		Long: `state prints what Juju held at a time: the status of each application and
+unit, charm config, which unit leads, and relation databags. --at is a time
+(RFC3339; the end of the recording by default); --span an event gives the state
+when that hook had ended. --kind is ` + joinValues(inspect.StateKinds) + `, --match keeps scopes that contain
+some text, such as an application name.
+
+The status and config come from 'juju status' at the start and from the
+hooks' own calls; relation data values come only from a recording made with
+--attach host.`,
+		Example: `  juju-lens inspect state ./rec --kind status --match otelcol
+  juju-lens inspect state ./rec --kind config --span 7bfdb120d1995d97`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			q := inspect.StateQuery{Page: inspect.Page{Limit: limit, Skip: skip}, Kind: kind, Span: span, Match: match, Width: width}
+			if at != "" {
+				t, err := time.Parse(time.RFC3339, at)
+				if err != nil {
+					return fmt.Errorf("--at: %w", err)
+				}
+				q.At = t
+			}
+			src, err := openInspect(args[0], model, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			defer src.Close()
+			l, err := inspect.ReadState(src, q)
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return l.WriteJSON(cmd.OutOrStdout())
+			}
+			l.WriteText(cmd.OutOrStdout(), args[0], q.Page)
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&model, "model", "", "the model to read (required if the recording has more than one)")
+	f.StringVar(&kind, "kind", "", "only this kind: "+joinValues(inspect.StateKinds))
+	f.StringVar(&at, "at", "", "RFC3339 time (default: the end of the recording)")
+	f.StringVar(&span, "span", "", "the state when this event's hook had ended, by span id; replaces --at")
+	f.StringArrayVar(&match, "match", nil, "only scopes containing this text, ignoring case (repeatable)")
+	f.IntVar(&width, "width", 0, "cut each value at this many characters (200 by default)")
+	f.IntVar(&limit, "limit", 40, "show at most this many values (0 = all)")
+	f.IntVar(&skip, "skip", 0, "leave out this many values first")
+	f.BoolVar(&asJSON, "json", false, "print JSON")
 	return cmd
 }
 

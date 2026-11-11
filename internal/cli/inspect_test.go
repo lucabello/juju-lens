@@ -413,3 +413,129 @@ func TestInspectTrace(t *testing.T) {
 		t.Errorf("--attempt 2 of a one-process hook: %v", err)
 	}
 }
+
+func TestInspectLogsFiltersAndCorrelates(t *testing.T) {
+	dir := t.TempDir()
+	if err := runSynth(context.Background(), synth.ScenarioTrivial, synthFlags{output: dir, model: "default"}); err != nil {
+		t.Fatal(err)
+	}
+	logs := func(args ...string) inspect.LogList {
+		t.Helper()
+		out, _, err := runInspect(t, append([]string{"logs", dir, "--json"}, args...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var l inspect.LogList
+		if err := json.Unmarshal([]byte(out), &l); err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+
+	all := logs()
+	if all.Total != 13 {
+		t.Fatalf("total %d, want the synthetic recording's 13 lines", all.Total)
+	}
+	for i := 1; i < len(all.Logs); i++ {
+		if all.Logs[i].TS.Before(all.Logs[i-1].TS) {
+			t.Fatalf("line %d is before line %d", i, i-1)
+		}
+	}
+	if g := logs("--unit", "grafana"); g.Total == 0 || g.Total >= all.Total {
+		t.Errorf("--unit grafana: %d of %d lines", g.Total, all.Total)
+	} else {
+		for _, r := range g.Logs {
+			if !strings.HasPrefix(r.Unit, "grafana/") {
+				t.Errorf("--unit grafana returned a line of %q", r.Unit)
+			}
+		}
+	}
+	if d := logs("--level", "debug"); d.Total == 0 || d.Logs[0].Level != "DEBUG" {
+		t.Errorf("--level debug: %+v", d.Logs)
+	}
+	if r := logs("--grep", "RECONCILING"); r.Total == 0 || !strings.Contains(r.Logs[0].Body, "Reconciling") {
+		t.Errorf("--grep ignoring case: %+v", r.Logs)
+	}
+	if p := logs("--limit", "2", "--skip", "1"); len(p.Logs) != 2 || p.Skip != 1 || p.Logs[0].TS != all.Logs[1].TS {
+		t.Errorf("--limit 2 --skip 1: %+v", p)
+	}
+
+	// The lines about an event are those near its hook, from its unit.
+	var ev inspect.EventList
+	out, _, _ := runInspect(t, "events", dir, "--json", "--unit", "grafana/0", "--name", "install")
+	if err := json.Unmarshal([]byte(out), &ev); err != nil || len(ev.Events) == 0 {
+		t.Fatalf("events: %v", err)
+	}
+	about := logs("--span", ev.Events[0].SpanID)
+	if about.Total == 0 || about.Event != "grafana/0 install" {
+		t.Fatalf("--span: %+v", about)
+	}
+	for _, r := range about.Logs {
+		if r.Unit != "grafana/0" || r.Matched == "" {
+			t.Errorf("--span returned %+v", r)
+		}
+	}
+	for _, bad := range [][]string{{"--source", "syslog"}, {"--since", "yesterday"}, {"--span", "nope"}} {
+		if _, _, err := runInspect(t, append([]string{"logs", dir}, bad...)...); err == nil {
+			t.Errorf("inspect logs %v: want an error", bad)
+		}
+	}
+}
+
+func TestInspectStateAsOf(t *testing.T) {
+	dir := t.TempDir()
+	if err := runSynth(context.Background(), synth.ScenarioTrivial, synthFlags{output: dir, model: "default"}); err != nil {
+		t.Fatal(err)
+	}
+	state := func(args ...string) inspect.StateList {
+		t.Helper()
+		out, _, err := runInspect(t, append([]string{"state", dir, "--json"}, args...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var l inspect.StateList
+		if err := json.Unmarshal([]byte(out), &l); err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	value := func(l inspect.StateList, scope string) string {
+		for _, r := range l.State {
+			if r.Scope == scope {
+				var v struct{ Value string }
+				_ = json.Unmarshal(r.Value, &v)
+				return v.Value
+			}
+		}
+		return ""
+	}
+	early := state("--kind", "status", "--at", "2026-07-03T14:30:12Z")
+	late := state("--kind", "status")
+	if e, l := value(early, "app-status:grafana"), value(late, "app-status:grafana"); e != "maintenance" || l != "active" {
+		t.Errorf("grafana was %q early and %q at the end, want maintenance then active", e, l)
+	}
+	if l := state("--kind", "status", "--match", "prometheus"); l.Total == 0 {
+		t.Error("--match prometheus found nothing")
+	} else {
+		for _, r := range l.State {
+			if !strings.Contains(r.Scope, "prometheus") {
+				t.Errorf("--match prometheus returned %s", r.Scope)
+			}
+		}
+	}
+	if l := state("--kind", "databag"); l.Total == 0 {
+		t.Error("the host-side recording has databags")
+	}
+	if _, _, err := runInspect(t, "state", dir, "--kind", "secrets"); err == nil {
+		t.Error("an unknown kind should fail")
+	}
+}
+
+// A unit-only recording has no relation data, and the output says why.
+func TestInspectStateWithoutDatabags(t *testing.T) {
+	dir := opsRecording(t)
+	out, _, err := runInspect(t, "state", dir, "--kind", "databag")
+	if err != nil || !strings.Contains(out, "--attach host") {
+		t.Errorf("want a note pointing at --attach host, got %v\n%s", err, out)
+	}
+}
