@@ -1,6 +1,6 @@
 # juju-lens
 
-`juju-lens` records what a Juju controller and its models do, and lets you browse the recording offline. It shows the hooks each unit ran, the status and relation data they changed, and the logs written at the time, all on one timeline.
+`juju-lens` records what a Juju controller and its models do, and lets you browse the recording offline. It shows the hooks each unit ran, the status they changed (and, with `--attach host`, the relation data), and the logs written at the time, all on one timeline.
 
 It can capture two sides of a model. By default it records from inside each unit, over `juju ssh`: what a charm built on [ops](https://github.com/canonical/operator) does in each hook, with its events, observers, hook tool and Pebble calls, what the hook cost in CPU and memory, and where its Python spent that time. That needs nothing but `juju ssh`, so it works on a remote cluster and without root. From the host, `--attach host` instead reads Juju API traffic inside the Juju agents with read-only eBPF probes, so it also sees relation data and works with any charm. It supports Juju 3.6 and 4.x, on machine and Kubernetes controllers.
 
@@ -33,19 +33,6 @@ What recording needs depends on what you capture, chosen with `record --attach`:
 | `host,unit` | Both, joined hook by hook. | Both of the above. |
 | `none` | Logs and the model status only. | The Juju client. |
 
-## What recording costs
-
-Recording inside the units is cheap next to what it records, but not free. Measured on a Kubernetes model of six charms, the COS Lite bundle:
-
-- **The charms** run as before: deploy time and the time to apply a configuration change showed no difference beyond run-to-run variation. The probe uses about 14 MB of memory and a fraction of a CPU core in each unit, and sampling a hook's Python stack adds about 2% of its CPU.
-- **The controller** used about 15% more CPU during the deploy, because the recorder holds a `juju ssh` session to each unit.
-- **The machine running `juju-lens`** runs a `juju` client of about 110 MB for each unit's session: the recording of six units used close to 800 MB.
-- **The disk**: the recording was 63 to 69 MB for a 12-minute deploy of six charms. A settled model of six units took 4 MB over 7 minutes with `update-status` at its default of every 5 minutes, and 18 MB with it every minute: the probes' resource samples are most of it when little else runs. A recording compresses to about a sixth, and `--profile=false` makes it about a quarter smaller.
-
-[How to make a recording cheaper](docs/how-to/make-a-recording-cheaper.md) lists what to turn off, and [how unit capture works](docs/explanation/how-unit-capture-works.md#what-it-costs) has the figures and what they were measured on.
-
-Viewing a recording works anywhere `juju-lens` builds.
-
 ## Use
 
 Record a model until you press `Ctrl-C`. Every unit of the model gets a probe:
@@ -71,6 +58,10 @@ sudo juju-lens record my-capture --model <model> --attach host,unit
 [How to trace a charm's memory spike to its code](docs/how-to/trace-a-memory-spike.md) shows what to do with a recording of the units, and [how unit capture works](docs/explanation/how-unit-capture-works.md) describes what it changes on them.
 
 [Your first recording](docs/tutorials/first-recording.md) walks through a full example with `--attach host`. The [documentation](docs/README.md) covers the rest, including how capture works.
+
+## What recording costs
+
+On a Kubernetes model of six charms, recording from inside the units added about 9 to 15 MB of memory per unit, a `juju ssh` session per unit, and about 15% more controller CPU while the model deployed; deploy times and configuration changes showed no difference beyond run-to-run variation. A recording of a 12-minute deploy took 66 to 72 MB on disk. See [what it costs](docs/explanation/how-unit-capture-works.md#what-it-costs) for the figures and what they were measured on, and [how to make a recording cheaper](docs/how-to/make-a-recording-cheaper.md).
 
 ## Limitations
 

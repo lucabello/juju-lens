@@ -85,12 +85,12 @@ name and is stored in manifest.json.
 carries a static build for linux/amd64 and linux/arm64, and uploads the one
 that matches each machine's architecture.
 
-What unit capture costs, measured on a Kubernetes cos-lite deployment: a few
-percent of the charms' CPU, about 15 MB of memory per unit, one 'juju ssh'
-session per unit (a juju client of about 110 MB each on the machine running
-juju-lens), and a recording two to three times the size of a host-only one.
---profile=false removes about a third of that. See docs/explanation/
-how-unit-capture-works.md.
+What unit capture costs, measured on a Kubernetes cos-lite deployment: about
+9% more CPU in the model's pods, 9 to 15 MB of memory per unit, one 'juju
+ssh' session per unit (a juju client of about 110 MB each on the machine
+running juju-lens), and about 15% more controller CPU while deploying.
+--profile=false makes the recording of a settled model about a quarter
+smaller. See docs/explanation/how-unit-capture-works.md.
 
 With no --model, every model of the controller is in scope, and every unit
 of every model gets a probe. --app and --unit, with --model, narrow the

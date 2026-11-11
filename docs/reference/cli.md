@@ -18,16 +18,16 @@ Records a controller and its models into a new recording directory. `<name>` lab
 | `--model` | all models | Record only this model, written as `model`, `owner/model` or `controller:model`. A model that another user or service account owns, such as one on a JAAS controller, is written `controller:owner/model`, for example `jaas:ci@serviceaccount/dev`; `juju models` lists the names. A short name that two owners share is ambiguous and needs the owner. |
 | `--app` | all | With `--model`, record only the units of this application, such as `grafana`. Repeat it or separate names with commas to choose several. Combines with `--unit`. |
 | `--unit` | all | With `--model`, record only this unit, such as `grafana/0`. Repeatable. With `--attach unit`, only these units get a probe on Kubernetes, and only the machines that host them on a machine model, where the probe still covers every unit on the machine. `juju debug-log` is limited to them too. `--attach host` still records every agent's traffic, and the status snapshot covers the whole model. |
-| `--ssh-target` | none | With `--attach host`, run the probe on this machine over `juju ssh`, such as `controller/0`. The target is resolved in the current Juju model (`juju switch`), not in `--model`. Without it, the probe runs on this host. An error with any `--attach` that doesn't include `host`. |
-| `--pid` | all agent processes | Record only these agent process IDs. Repeatable. An error with any `--attach` that doesn't include `host`. |
+| `--ssh-target` | none | With `--attach host`, run the probe on this machine over `juju ssh`, such as `controller/0`. The target is resolved in the current Juju model (`juju switch`), not in `--model`. Without it, the probe runs on this host. Setting it is an error unless `--attach` includes `host`. |
+| `--pid` | all agent processes | Record only these agent process IDs. Repeatable. Setting it is an error unless `--attach` includes `host`. |
 | `--logs` | `true` | Set to `false` to record no logs: it turns off `--debug-log`, `--k8s-log` and `--machine-log`, and wins over them. |
 | `--debug-log` | `true` | Stream `juju debug-log` for the recorded models. |
 | `--k8s-log` | `true` | Record workload-container logs for Kubernetes models. With `--attach unit` they are read through each unit probe's Pebble connection, which needs no `kubectl` or cluster access; otherwise they are streamed with `kubectl logs`, which needs `kubectl` pointing at the cluster of the model, and the recorder says so if it can't list the pods. |
 | `--machine-log` | `true` | Stream the systemd journal for machine models. |
 | `--max-duration` | no limit | Stop recording after this duration, such as `30m` or `2h`. |
 | `--max-size` | no limit | Stop recording after this many bytes of `raw/`, counting every source: RPCs, unit probe records, logs and status snapshots. `index.db` isn't counted, and is built from `raw/`, so a recording ends up about as large again. |
-| `--profile` | `true` | With `--attach unit`, sample each hook's Python stacks every 10 milliseconds, tagged with the event or observer running. `--profile=false` turns sampling off; the rest of the unit capture stays. Each hook reads the setting as it starts. Requires `--attach unit`. |
-| `--linger` | `30s` | With `--attach unit`, keep reading the workload containers' cgroups about 10 times a second for this long after the last Pebble change a hook caused is ready, so a workload that restarts and grows afterwards is seen in detail. `0` stops when the hook ends. Requires `--attach unit`. |
+| `--profile` | `true` | With `--attach unit`, sample each hook's Python stacks every 10 milliseconds, tagged with the event or observer running. `--profile=false` turns sampling off; the rest of the unit capture stays. Each hook reads the setting as it starts. Requires `unit` in `--attach`. |
+| `--linger` | `30s` | With `--attach unit`, keep reading the workload containers' cgroups about 10 times a second for this long after the last Pebble change a hook caused is ready, so a workload that restarts and grows afterwards is seen in detail. `0` stops when the hook ends. Requires `unit` in `--attach`. |
 | `--detach` | `false` | Run the recorder in the background. Return once it's capturing: with `--attach host`, once the probe has attached to at least one agent process; with `--attach unit`, once every unit in scope has a running probe. |
 | `--detach-timeout` | `30s` | With `--detach`, fail if the recorder isn't capturing within this time. Requires `--detach`. |
 
@@ -41,7 +41,7 @@ Records a controller and its models into a new recording directory. `<name>` lab
 | `host` | Every Juju API RPC of the agents, read at their TLS boundary with eBPF, plus logs and the status snapshot. The probe runs on this host, as `juju-lens probe`, or on `--ssh-target`, to which `juju-lens` uploads it through `juju ssh` and runs it with `sudo`. | Root or `CAP_BPF` on the host where the agents run. |
 | `none` | Logs and the status snapshot only. No probe runs. | The `juju` client. |
 
-`local` and `ssh`, the values of earlier releases, are both `--attach host` now: with `--ssh-target` set, the probe runs over `juju ssh`, otherwise locally. Before the default changed to `unit`, `record` and `watch` used `host`; scripts that need the Juju API traffic now pass `--attach host`.
+`local` and `ssh`, the values of earlier releases, are both `--attach host` now: with `--ssh-target` set, the probe runs over `juju ssh`, otherwise locally. Earlier releases defaulted to `host`; a script that needs the Juju API traffic passes `--attach host`.
 
 [How unit capture works](../explanation/how-unit-capture-works.md) explains the design of `--attach unit` and what it costs. [How to make a recording cheaper](../how-to/make-a-recording-cheaper.md) lists the switches that lower it.
 

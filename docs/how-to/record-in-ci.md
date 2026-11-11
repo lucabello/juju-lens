@@ -1,4 +1,4 @@
-# How to record a controller in CI
+# How to record a model in CI
 
 Use this guide to record a Juju model in the background while a CI job or script runs tests against it. `juju-lens record --detach` starts the recorder, waits until it's capturing, and then returns, so the job fails at the start if the recording can't begin.
 
@@ -58,13 +58,13 @@ Run the tests as usual. You don't need to wait or poll.
 After the tests, stop the recorder in a step that also runs when the tests fail:
 
 ```bash
-juju-lens stop --timeout 120s --force ./recording
+juju-lens stop --timeout 120s ./recording
 ```
 
-`stop` waits for the recorder to write the manifest, remove the probes from the units and build the index. On a model with many units, give it more than the default 30 seconds. For details, see [how to stop a running recording](stop-a-recording.md). To make sure the recorder stops even if the job is cancelled before this step, also pass `--max-duration` when you start it. When the recorder ran as root, as it does with `--attach host`, stop it with `sudo` too.
+`stop` waits for the recorder to write the manifest, remove the probes from the units and build the index. On a model with many units, give it more than the default 30 seconds. `--force` kills a recorder that is still running when the timeout ends, which skips the probes' clean-up and leaves the index to rebuild with [`juju-lens index`](rebuild-the-index.md). For details, see [how to stop a running recording](stop-a-recording.md). To make sure the recorder stops even if the job is cancelled before this step, also pass `--max-duration` when you start it. When the recorder ran as root, as it does with `--attach host`, stop it with `sudo` too.
 
 ## Upload the recording
 
-Upload the whole recording directory as a job artifact. It includes `recorder.log`, which you need to debug a recording that ended unexpectedly. A recording takes about as much disk again for its index as for its raw data, and compresses to about a sixth; see [what a recording costs](../explanation/how-unit-capture-works.md#what-it-costs).
+Upload the whole recording directory as a job artifact. It includes `recorder.log`, which you need to debug a recording that ended unexpectedly. A recording compresses to about a sixth, and leaving `index.db` out and rebuilding it saves more; see [how to make a recording cheaper](make-a-recording-cheaper.md#upload-the-raw-data-rebuild-the-index) and [what a recording costs](../explanation/how-unit-capture-works.md#what-it-costs).
 
 For every flag, see the [command line reference](../reference/cli.md#record).

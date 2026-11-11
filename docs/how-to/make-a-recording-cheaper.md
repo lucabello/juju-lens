@@ -1,14 +1,10 @@
 # How to make a recording cheaper
 
-Use this guide to lower what a unit recording costs: the memory and processes on the machine that runs `juju-lens`, the load on the controller, and the size of the recording on disk. The defaults suit a model you're investigating on a workstation. Change them for a long recording, a CI job whose artifacts are kept, or a model with many units. For what each cost is and how it was measured, see [what it costs](../explanation/how-unit-capture-works.md#what-it-costs).
-
-## Prerequisites
-
-- A recording you take with the default `--attach unit`, or with `host,unit`.
+Use this guide to lower what a recording made with the default `--attach unit`, or with `host,unit`, costs: the memory and processes on the machine that runs `juju-lens`, the load on the controller, and the size of the recording on disk. The defaults suit a model you're investigating on a workstation. Change them for a long recording, a CI job whose artifacts are kept, or a model with many units. For what each cost is and how it was measured, see [what it costs](../explanation/how-unit-capture-works.md#what-it-costs).
 
 ## Record only what you need
 
-Every unit in scope holds a `juju ssh` session, which is a `juju` process of about 110 MB on the machine running `juju-lens`, and a connection through the controller. Without `--model`, every unit of every model on the controller is in scope. Pass `--model`, and `--app` or `--unit` for the part you're debugging:
+Every unit in scope on Kubernetes, and every machine on a machine model, holds a `juju ssh` session: a connection through the controller and, on the machine running `juju-lens`, a `juju` process, which took about 110 MiB on Kubernetes. Without `--model`, every unit of every model on the controller is in scope. Pass `--model`, and `--app` or `--unit` for the part you're debugging:
 
 ```bash
 juju-lens record my-capture --model cos --app otelcol
@@ -18,13 +14,13 @@ On a machine model, a probe covers every unit on its machine, so scoping to one 
 
 ## Turn off stack sampling
 
-Stack samples are about a third of the raw data of a busy recording and almost half of its index. `--profile=false` leaves them out, and keeps the events, observers, hook tool and Pebble calls, and each hook's CPU and memory:
+Stack samples were a third of the raw data of a busy recording and almost half of its index. `--profile=false` leaves them out, and keeps the events, observers, hook tool and Pebble calls, and each hook's CPU and memory:
 
 ```bash
 juju-lens record my-capture --model cos --profile=false
 ```
 
-A recording of a settled model with the samples off was a quarter smaller on disk. Without them the viewer's flame graphs and the export's `top_stacks` are empty: use this when you want to know which hook did something, not which code. Each hook reads the setting as it starts, so it takes effect from the next hook.
+A recording of a settled model with the samples off was a quarter smaller on disk. Without them the viewer's profile and the export's `top_stacks` are empty: use this when you want to know which hook did something, not which code.
 
 ## Stop earlier
 
@@ -38,19 +34,20 @@ juju-lens record my-capture --model cos --max-duration 30m --max-size 500000000
 
 ## Record fewer logs
 
-`--logs=false` turns off `juju debug-log`, workload logs and machine logs. In a recording of a busy Kubernetes model, logs were a small part of what the probes wrote, but in a host recording they were a third of the raw data, and some log sources each run a `juju` or `kubectl` process. See the [command line reference](../reference/cli.md#record) for each switch.
+`--logs=false` turns off `juju debug-log`, workload logs and machine logs. In the recording of a six-unit deploy, logs were under 1% of the raw data, but in a host recording of a CI run they were a third. `--debug-log=false` also ends one `juju` process of about 110 MiB, and `--machine-log` runs `juju ssh … journalctl` for each machine. See the [command line reference](../reference/cli.md#record) for each switch.
 
 ## Upload the raw data, rebuild the index
 
-The index is as large as the raw data, and compresses worse. In a settled model, `raw/` compressed to 1.1 MB and `index.db` to 1.7 MB. To keep an artifact small, leave `index.db` out and rebuild it where you read the recording:
+The index is up to as large as the raw data, and compresses worse: equal in the deploys, 60% to 75% in a settled model, where `raw/` compressed to 1.1 MB and `index.db` to 1.7 MB. Leaving `index.db` out of that recording's artifact would have taken it from 2.8 MB to 1.1 MB. Leave it out and rebuild it where you read the recording:
 
 ```bash
 tar -czf recording.tar.gz --exclude=index.db -C ./recording .
 ```
 
-Then, after unpacking it:
+Then unpack it and rebuild the index:
 
 ```bash
+mkdir recording && tar -xzf recording.tar.gz -C recording
 juju-lens index ./recording
 ```
 
