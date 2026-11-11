@@ -468,7 +468,7 @@ func runRecord(ctx context.Context, name string, f recordFlags, sides attachSide
 				case <-ctx.Done():
 					return
 				case <-t.C:
-					if w.total() >= f.maxSize {
+					if layout.RawSize() >= f.maxSize {
 						fmt.Fprintf(os.Stderr, "juju-lens: hit --max-size %d bytes, stopping\n", f.maxSize)
 						endReason = recording.EndReasonMaxSize
 						cancel()
@@ -682,8 +682,8 @@ func probeArgs(f recordFlags, filter probeFilter) []string {
 }
 
 // rpcWriters owns one RotatingWriter per model and delivers captured messages
-// to the right one. It is safe for the single ingest goroutine plus the
-// max-size ticker (which only reads totals).
+// to the right one. It is safe for the single ingest goroutine and the
+// goroutine that reads its message count.
 type rpcWriters struct {
 	layout recording.Layout
 	mu     sync.Mutex
@@ -713,16 +713,6 @@ func (w *rpcWriters) sink(cm wire.CapturedMessage) error {
 	}
 	w.n++
 	return nil
-}
-
-func (w *rpcWriters) total() int64 {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	var t int64
-	for _, rw := range w.ws {
-		t += rw.Total()
-	}
-	return t
 }
 
 func (w *rpcWriters) count() int64 {

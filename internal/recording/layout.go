@@ -3,6 +3,7 @@ package recording
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -25,6 +26,23 @@ func (l Layout) Manifest() string { return filepath.Join(l.Root, ManifestFilenam
 
 // RawDir returns the path to the raw/ directory.
 func (l Layout) RawDir() string { return filepath.Join(l.Root, "raw") }
+
+// RawSize returns the bytes the files under raw/ take now: every source the
+// recorder writes, whatever wrote it. It is what --max-size caps. Files that
+// vanish while it walks, and directories it can't read, count as zero.
+func (l Layout) RawSize() int64 {
+	var total int64
+	_ = filepath.WalkDir(l.RawDir(), func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if info, err := d.Info(); err == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
 
 // RPCDir returns raw/rpc/<model>/, holding captured Juju API RPC envelopes
 // (one CapturedMessage per line) for a single model.
