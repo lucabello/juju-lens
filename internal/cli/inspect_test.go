@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/index"
 	"github.com/lucabello/juju-lens/internal/inspect"
 	"github.com/lucabello/juju-lens/internal/recording"
@@ -635,5 +636,68 @@ func TestInspectRefusesFlagsThatWouldBeIgnored(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(out), &tr); err != nil || len(tr.Rows) != tr.Total {
 		t.Errorf("--limit 0: %d rows of %d (%v)", len(tr.Rows), tr.Total, err)
+	}
+}
+
+// costs adds up what the details files of the events say, grouped as asked.
+func TestInspectCostsSumTheHooks(t *testing.T) {
+	dir := opsRecording(t)
+	res, err := export.Build(dir, export.Options{Model: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want, wantMem float64
+	obs := map[string]float64{}
+	for _, it := range res.Items {
+		if it.Kind != "event" {
+			continue
+		}
+		for _, c := range it.Event.Costs {
+			want += c.CPUMS
+			wantMem += float64(c.StackMemGrowthBytes)
+			obs[c.Name] += c.CPUMS
+		}
+	}
+	costs := func(args ...string) inspect.CostList {
+		t.Helper()
+		out, _, err := runInspect(t, append([]string{"costs", dir, "--json", "--limit", "0"}, args...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var l inspect.CostList
+		if err := json.Unmarshal([]byte(out), &l); err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	sum := func(l inspect.CostList) (cpu, mem float64) {
+		for _, r := range l.Costs {
+			cpu += r.CPUMS
+			mem += float64(r.MemTaken)
+		}
+		return
+	}
+	for _, by := range []string{"observer", "event", "unit", "app"} {
+		l := costs("--by", by)
+		if cpu, mem := sum(l); abs(cpu-want) > 0.01 || abs(mem-wantMem) > 1 {
+			t.Errorf("--by %s adds up to %.1f ms and %.0f bytes, the details files to %.1f and %.0f", by, cpu, mem, want, wantMem)
+		}
+	}
+	l := costs("--by", "observer")
+	for _, r := range l.Costs {
+		if r.Kind != "init" && abs(r.CPUMS-obs[r.Name]) > 0.01 {
+			t.Errorf("observer %s: %.1f ms, details say %.1f", r.Name, r.CPUMS, obs[r.Name])
+		}
+	}
+	for i := 1; i < len(l.Costs); i++ {
+		if l.Costs[i].CPUMS > l.Costs[i-1].CPUMS {
+			t.Errorf("row %d has more CPU than row %d", i, i-1)
+		}
+	}
+	if a := costs("--by", "app"); len(a.Costs) != 1 || a.Costs[0].Name != "otelcol" {
+		t.Errorf("--by app: %+v", a.Costs)
+	}
+	if _, _, err := runInspect(t, "costs", dir, "--by", "span"); err == nil {
+		t.Error("an unknown --by should fail")
 	}
 }

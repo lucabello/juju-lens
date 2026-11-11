@@ -150,6 +150,7 @@ Writes a recording's hooks, state changes, and logs as a folder of plain-text fi
 ```text
 juju-lens inspect events <recording> [flags]
 juju-lens inspect event <recording> <span-id> [flags]
+juju-lens inspect costs <recording> [flags]
 juju-lens inspect profile <recording> [top|peek|tree|stacks] [function] [flags]
 juju-lens inspect memory <recording> <span-id> [flags]
 juju-lens inspect trace <recording> <span-id> [flags]
@@ -194,6 +195,20 @@ Prints one event as the [`report.md` of the export](../how-to/export-for-an-agen
 | `--model` | the only model | The model to read. Required when the recording has more than one. |
 | `--section` | all | Only these parts: `statuses`, `ops`, `stacks`, `costs`, `databags` or `config`. Comma-separated, or repeat the flag. The heading and the failure explanation are always printed. |
 | `--json` | `false` | Print the event's details, as in `details/<span_id>.json` of the export, without the parts `--section` leaves out. |
+
+### `inspect costs`
+
+Adds up what charm init and the observers cost over the hooks the scope flags pick, and groups it. The CPU and memory are those of each span's stack samples, with what the span called; time importing Python modules before ops starts is not in them.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--by` | `observer` | Group by `observer` (charm init is one group), `event` (the event name), `unit` or `app`. |
+| `--sort` | `cpu` | `cpu`, `mem` (memory taken) or `duration`, largest first. |
+| `--limit` | `20` | Show at most this many groups. `0` shows all. |
+| `--skip` | `0` | Leave out this many groups first. |
+| `--json` | `false` | Print `recording`, `model`, `by`, `sort`, `hooks` (profiled hooks in scope), `total`, `skip` and `costs`. A group has `name`, `hooks`, `calls`, `wall_ms`, `cpu_ms`, `mem_taken_bytes` and, when set, `kind` (`init` or `observer`), `rss_peak_bytes`, `unprofiled_calls` and `costliest_span_id`, the span with the most of what `--sort` ranks, which `profile --span` takes. |
+
+The shared scope flags and `--model` apply.
 
 ### `inspect profile`
 

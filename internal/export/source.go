@@ -273,3 +273,14 @@ func (s *Source) RecordingEnd() time.Time {
 // Summarize is the export's Result for opts: its summary counts, and every
 // event in scope with its detail. It is what WriteSummary renders.
 func (s *Source) Summarize(opts Options) (*Result, error) { return s.build(opts) }
+
+// SpanCosts is what charm init and each observer of the hook ev cost, in the
+// order they ran, without the rest of its detail.
+func (s *Source) SpanCosts(ev narrative.Event) []SpanCost {
+	if len(ev.OpsSpans) == 0 {
+		return nil
+	}
+	d := EventDetail{Ops: s.ops.Trees(ev.OpsSpans)}
+	addCosts(s.db, &d, s.ops)
+	return d.Costs
+}

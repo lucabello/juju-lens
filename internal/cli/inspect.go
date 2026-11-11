@@ -31,6 +31,7 @@ much it left out, and ends with the command to go on with.
   juju-lens inspect summary <recording>           the shape of a recording: outcomes, units, slowest and costliest hooks
   juju-lens inspect events <recording>            list and rank events
   juju-lens inspect event <recording> <span-id>   one event in full
+  juju-lens inspect costs <recording>             what each observer, event, unit or app cost, summed over hooks
   juju-lens inspect profile <recording> [view]    where the charm's time and memory went
   juju-lens inspect diff <recording> [<recording>]  which functions cost more or less between two hooks or recordings
   juju-lens inspect memory <recording> <span-id>  memory around a hook, and the code that took it
@@ -41,7 +42,7 @@ much it left out, and ends with the command to go on with.
 A recording without an index.db, or with one from an older juju-lens, is
 indexed first.`,
 	}
-	cmd.AddCommand(newInspectEventsCmd(), newInspectEventCmd(), newInspectProfileCmd(), newInspectMemoryCmd(), newInspectTraceCmd(), newInspectLogsCmd(), newInspectStateCmd(), newInspectSummaryCmd(), newInspectDiffCmd())
+	cmd.AddCommand(newInspectEventsCmd(), newInspectEventCmd(), newInspectProfileCmd(), newInspectMemoryCmd(), newInspectTraceCmd(), newInspectLogsCmd(), newInspectStateCmd(), newInspectSummaryCmd(), newInspectDiffCmd(), newInspectCostsCmd())
 	return cmd
 }
 
@@ -702,6 +703,61 @@ changes. --metric, --detail and --order are as for 'inspect profile'.`,
 	f.StringVar(&detail, "detail", "callee", "how much code to compare: charm, callee, ops or all")
 	f.StringVar(&order, "order", "self", "compare each function's self value or its total (what it called counts)")
 	f.IntVar(&limit, "limit", 15, "show at most this many functions (0 = 15)")
+	f.BoolVar(&asJSON, "json", false, "print JSON")
+	return cmd
+}
+
+// ----- inspect costs
+
+func newInspectCostsCmd() *cobra.Command {
+	var (
+		sf     scopeFlags
+		by     string
+		sortBy string
+		limit  int
+		skip   int
+		asJSON bool
+	)
+	cmd := &cobra.Command{
+		Use:   "costs <recording>",
+		Short: "What each observer, event, unit or application cost, summed over hooks",
+		Long: `costs adds up what charm init and the observers cost over the hooks a scope picks
+(recorded with --attach unit), and groups it by observer (the default), by event
+name, by unit or by application: the CPU and wall time, the memory their stacks
+saw taken, how many hooks and calls. Time importing Python modules before ops
+starts isn't counted. Sort by cpu, mem or duration.`,
+		Example: `  juju-lens inspect costs ./rec --sort mem --limit 5
+  juju-lens inspect costs ./rec --by app
+  juju-lens inspect costs ./rec --unit grafana --name relation-changed`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sc, err := sf.scope()
+			if err != nil {
+				return err
+			}
+			src, err := openInspect(args[0], sf.model, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			defer src.Close()
+			p := inspect.Page{Limit: limit, Skip: skip}
+			l, err := inspect.SumCosts(src, inspect.CostsQuery{Scope: sc, Page: p, By: by, Sort: sortBy})
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return l.WriteJSON(cmd.OutOrStdout())
+			}
+			l.WriteText(cmd.OutOrStdout(), args[0], p)
+			return nil
+		},
+	}
+	sf.add(cmd)
+	f := cmd.Flags()
+	f.StringVar(&by, "by", "observer", "group by observer, event, unit or app")
+	f.StringVar(&sortBy, "sort", "cpu", "order: cpu, mem or duration (largest first)")
+	f.IntVar(&limit, "limit", 20, "show at most this many groups (0 = all)")
+	f.IntVar(&skip, "skip", 0, "leave out this many groups first")
 	f.BoolVar(&asJSON, "json", false, "print JSON")
 	return cmd
 }

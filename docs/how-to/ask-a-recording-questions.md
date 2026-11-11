@@ -32,6 +32,17 @@ next: juju-lens inspect event ./rec e39d3d6c60330477
 
 To list only the events that went wrong, pass `--fail problem`. Every list says how many events it shows of how many, and `--skip` shows the next ones.
 
+## Add the costs up
+
+To see which observer, event, unit or application costs the most over a whole recording, rather than hook by hook, use `costs`:
+
+```bash
+juju-lens inspect costs ./rec --sort mem --limit 5
+juju-lens inspect costs ./rec --by app
+```
+
+Each group has its CPU, wall time, the memory its stacks saw taken, and how many hooks and calls it adds up. The `next:` line gives the span of the group's costliest call, for `profile --span`.
+
 ## Read one hook
 
 Pass the span ID to `event`:
