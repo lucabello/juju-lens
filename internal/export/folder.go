@@ -459,6 +459,9 @@ func writeAgentsMD(dir string, want map[Part]bool) error {
 			"to bottom or pasting elsewhere.\n")
 	}
 	b.WriteByte('\n')
+	fmt.Fprintf(b, "If `juju-lens` is installed, `juju-lens inspect --help` lists commands that answer "+
+		"questions about the recording these files came from, such as events ranked by CPU or memory, "+
+		"one event in full, and profiles by function, without reading these files.\n\n")
 	fmt.Fprintf(b, "`fail` only reflects hook-execution failures (errored/retried/rpc-warn/"+
 		"interrupted/lost-continue). A hook can run cleanly and still set a wrong value or "+
 		"never do what was expected — that will not show up here.\n")

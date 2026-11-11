@@ -58,6 +58,16 @@ func WriteMarkdown(w io.Writer, r *Result) error {
 	return err
 }
 
+// WriteEventMarkdown renders one event as the report does: its heading,
+// failure explanation, statuses, charm-side tree, top stacks, and databag and
+// config changes.
+func WriteEventMarkdown(w io.Writer, ev *EventDetail) error {
+	b := &strings.Builder{}
+	writeEventSection(b, ev)
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
 func writeEventSection(b *strings.Builder, ev *EventDetail) {
 	heading := fmt.Sprintf("### %s — %s — %s", fmtTS(ev.TS), orDash(ev.Unit), ev.Summary)
 	switch {

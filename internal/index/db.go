@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -280,6 +281,27 @@ func Open(path string) (*DB, error) {
 		return nil, err
 	}
 	return d, nil
+}
+
+// StoredSchemaVersion reads the schema version of the index at path without
+// opening it for use, which Open would stamp with the current version. ok is
+// false when there is no usable index: the file is missing, isn't a SQLite
+// database, or has no version.
+func StoredSchemaVersion(path string) (version int, ok bool) {
+	if _, err := os.Stat(path); err != nil {
+		return 0, false
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(10000)")
+	if err != nil {
+		return 0, false
+	}
+	defer db.Close()
+	var v string
+	if err := db.QueryRow(`SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	return n, err == nil
 }
 
 // Close releases the underlying database handle.

@@ -132,7 +132,7 @@ Opens a recording in the viewer. See [viewer keybindings](viewer-keybindings.md)
 juju-lens export <recording> [flags]
 ```
 
-Writes a recording's hooks, state changes, and logs as a folder of plain-text files, or as one document on standard output. For hooks recorded with `--attach unit`, it also writes what the charm did in each process that ran the hook: every span in JSON, and in Markdown a tree where most hook tool and Pebble calls are folded into one line per span. When the hook was profiled, it adds the CPU and memory of charm init and each observer, and the five stacks with the most wall time and the five with the most memory growth. See [how to export a recording for an AI agent](../how-to/export-for-an-agent.md) for the files.
+Writes a recording's hooks, state changes, and logs as a folder of plain-text files, or as one document on standard output. To ask a recording questions instead of reading files, see [`inspect`](#inspect). For hooks recorded with `--attach unit`, it also writes what the charm did in each process that ran the hook: every span in JSON, and in Markdown a tree where most hook tool and Pebble calls are folded into one line per span. When the hook was profiled, it adds the CPU and memory of charm init and each observer, and the five stacks with the most wall time and the five with the most memory growth. See [how to export a recording for an AI agent](../how-to/export-for-an-agent.md) for the files.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -144,6 +144,69 @@ Writes a recording's hooks, state changes, and logs as a folder of plain-text fi
 | `--since` | none | Export only events at or after this time, in RFC 3339 format. |
 | `--until` | none | Export only events at or before this time, in RFC 3339 format. |
 | `--errors-only` | `false` | Only hooks that errored, were retried, or had an RPC error, with the hook before and after each on the same unit. |
+
+## `inspect`
+
+```text
+juju-lens inspect events <recording> [flags]
+juju-lens inspect event <recording> <span-id> [flags]
+juju-lens inspect profile <recording> [top|peek|tree|stacks] [function] [flags]
+```
+
+Answers questions about a recording as text, or as JSON with `--json`. It reads the recording's index, and builds it first, with a notice on standard error, when the recording has none or has one from an older `juju-lens`. It leaves alone the index of a recording that a recorder is still writing. Every list shows `--limit` rows, says how many it left out and how to see them, and ends with a command to go on with. The text isn't stable; the JSON fields are the ones listed here.
+
+These flags pick events, and are shared by `events` and `profile`:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--model` | the only model | The model to read. Required when the recording has more than one. |
+| `--unit` | all | Only this unit or application. Repeatable. |
+| `--name` | all | Only events whose name contains this, ignoring case, such as `config-changed`. Repeatable. |
+| `--kind` | all | Only this kind of event: `hook`, `action`, `status`, `relation`, `leader`, `secret` or `settle`. Repeatable. |
+| `--fail` | all | Only events that ended this way: `none`, `errored`, `retried`, `rpc-warn`, `interrupted`, `lost-continue`, or `problem` for any but `none`. Repeatable. |
+| `--since`, `--until` | none | RFC 3339 time bounds. |
+
+### `inspect events`
+
+Lists events, one a line. Hooks recorded with `--attach unit` and profiled also show the CPU the charm's init and observers used, and the memory their stacks saw taken.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--sort` | `time` | `time` (oldest first), `duration`, `cpu` or `mem` (largest first). Hooks without a profile come last when sorting by `cpu` or `mem`. |
+| `--limit` | `20` | Show at most this many events. `0` shows all. |
+| `--skip` | `0` | Leave out this many events first. |
+| `--json` | `false` | Print `recording`, `model`, `sort`, `total`, `skip` and `events`. Each event has `ts`, `unit`, `kind`, `name`, `fail`, `duration_ms`, `span_id`, and for profiled hooks `profiled`, `cpu_ms`, `mem_growth_bytes`, `rss_peak_bytes`, `top_frame` and `top_memory_frame`. |
+
+### `inspect event`
+
+Prints one event as the [export's report](../how-to/export-for-an-agent.md) narrates it. `<span-id>` is the `span` of an `events` line, or the ID of a span inside the hook, such as the one in a profile's `stacks` view.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--section` | all | Only these parts: `statuses`, `ops`, `stacks`, `costs`, `databags` or `config`. The heading and the failure explanation are always printed. |
+| `--json` | `false` | Print the event's details file, `details/<span_id>.json` of the export. |
+
+### `inspect profile`
+
+Shows the Python stacks that hooks recorded with `--attach unit` sampled every 10 milliseconds, with the views of [pprof](https://github.com/google/pprof). The first argument after the recording is the view; without one, `top`.
+
+| View | Shows |
+|---|---|
+| `top` | The functions with the most in their own code (self), and what they called (total). |
+| `peek <function>` | What called one function and what it called. `<function>` is part of its name; a name that matches several functions is refused, with the candidates. |
+| `tree` | The call tree, outermost function first, without the branches under 1% of the total. |
+| `stacks` | The heaviest stacks, outermost frame first and joined with `;`, each with the span it ran in. |
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--span` | none | One hook, by the span ID of its event, or one span in it, such as an observer or charm init. Replaces the flags that pick events. |
+| `--metric` | `wall` | What to weigh by: `wall` time, `cpu` time of the main thread, or `mem`, the memory the process took. |
+| `--detail` | `callee` | How much code to show: `charm`, the charm's own; `callee`, the charm's and what it calls directly; `ops`, the charm's and ops'; or `all`. What the hidden code cost is added to the function that called it. |
+| `--order` | `self` | For `top`: order by `self` or `total`. |
+| `--limit` | by view | Rows to show, and lines for `tree`. |
+| `--json` | `false` | Print `recording`, `model`, `scope`, `view`, `metric` (`wall` and `cpu` in nanoseconds, `mem` in bytes), `detail`, `samples`, and `functions`, `peek`, `tree` or `stacks` for the view. |
+
+The memory metric adds up how much resident memory grew between two samples. It shows where memory was taken, not where it was held.
 
 ## `synth`
 
