@@ -177,7 +177,7 @@ Where a flag is repeatable here or in the commands below (`--unit`, `--name`, `-
 
 ### `inspect events`
 
-Lists events, one a line, most of them hooks. Hooks recorded with `--attach unit` and profiled also show the CPU the charm's init and observers used, and the memory their stacks saw taken.
+Lists events, one a line, most of them hooks. Hooks recorded with `--attach unit` and profiled also show the CPU the charm's init and observers used, and the memory their stacks saw taken; time importing Python modules before ops starts is not counted in either. Sizes in the text output use 1024-based units, labelled `KB`, `MB` and so on.
 
 | Flag | Default | Meaning |
 |---|---|---|

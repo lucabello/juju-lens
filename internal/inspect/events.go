@@ -110,6 +110,12 @@ func (l EventList) WriteText(w io.Writer, rec string, p Page) {
 		fmt.Fprintln(w)
 	}
 	fmt.Fprintln(w, p.more(len(l.Events), l.Total, "events"))
+	for _, r := range l.Events {
+		if r.Profiled {
+			fmt.Fprintln(w, "CPU and memory taken are those of charm init and the observers; time importing Python modules before ops starts is not counted. Memory sizes use 1024-based units")
+			break
+		}
+	}
 	if len(l.Events) > 0 {
 		first := l.Events[0]
 		fmt.Fprintf(w, "next: juju-lens inspect event %s %s\n", rec, first.SpanID)
