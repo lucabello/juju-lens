@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -260,5 +261,155 @@ func TestInspectLeavesALiveRecordersIndexAlone(t *testing.T) {
 	// The index is of an old schema, but a recorder is writing it: leave it.
 	if _, errOut, _ := runInspect(t, "events", dir, "--limit", "1"); strings.Contains(errOut, "indexing") {
 		t.Errorf("rebuilt the index of a recording that is being written: %q", errOut)
+	}
+}
+
+// A recording the user can't write to, with no index, can't be indexed in
+// place; the error says what to do instead of a bare permission error.
+func TestInspectExplainsAnUnwritableRecording(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes anywhere")
+	}
+	dir := opsRecording(t)
+	if err := os.Remove(recording.NewLayout(dir).IndexDB()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o755)
+	_, _, err := runInspect(t, "events", dir)
+	if err == nil || !strings.Contains(err.Error(), "can't write there to index it") || !strings.Contains(err.Error(), "juju-lens index") {
+		t.Fatalf("want an explanation, got %v", err)
+	}
+}
+
+// fixtureRecording copies a lab recording of the tap's records, which has no
+// manifest, and gives it one.
+func fixtureRecording(t *testing.T, name string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.CopyFS(dir, os.DirFS(filepath.Join("..", "recording", "testdata", "ops", name))); err != nil {
+		t.Fatal(err)
+	}
+	man := recording.New("juju-lens", "test", "", name)
+	man.Finalize(recording.EndReasonSynth)
+	if err := man.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// The memory of a hook says how the process and the containers moved, and
+// names the observer and the code running at the biggest jump.
+func TestInspectMemoryNamesTheCodeThatTookIt(t *testing.T) {
+	dir := fixtureRecording(t, "cost-k8s")
+	var list inspect.EventList
+	out, _, err := runInspect(t, "events", dir, "--json", "--name", "config-changed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list.Events) == 0 {
+		t.Fatalf("events: %v %s", err, out)
+	}
+	out, _, err = runInspect(t, "memory", dir, list.Events[0].SpanID, "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep inspect.MemoryReport
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]inspect.MemoryRow{}
+	for _, r := range rep.Rows {
+		rows[r.Name] = r
+	}
+	if hp := rows["hook process"]; hp.HighestBytes < hp.BeforeBytes+50<<20 {
+		t.Errorf("hook process %+v: the lab hook grew by about 70 MB", hp)
+	}
+	if _, ok := rows["charm container"]; !ok {
+		t.Errorf("no charm container row: %+v", rep.Rows)
+	}
+	found := false
+	for _, j := range rep.Jumps {
+		if j.Series == "hook process" && strings.Contains(j.During, "observer") && strings.Contains(strings.Join(j.Code, " "), "compress") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no hook process jump in an observer, in compress: %+v", rep.Jumps)
+	}
+	text, _, _ := runInspect(t, "memory", dir, list.Events[0].SpanID)
+	if !strings.Contains(text, "code: compress") || !strings.Contains(text, "next: juju-lens inspect profile") {
+		t.Errorf("text lacks the code or the next step:\n%s", text)
+	}
+}
+
+// A recording of the host side only has no memory readings; the error says
+// where they come from.
+func TestInspectMemoryWithoutUnitCapture(t *testing.T) {
+	dir := t.TempDir()
+	if err := runSynth(context.Background(), synth.ScenarioTrivial, synthFlags{output: dir, model: "default"}); err != nil {
+		t.Fatal(err)
+	}
+	out, _, _ := runInspect(t, "events", dir, "--json", "--limit", "1")
+	var list inspect.EventList
+	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list.Events) == 0 {
+		t.Fatalf("events: %v", err)
+	}
+	if _, _, err := runInspect(t, "memory", dir, list.Events[0].SpanID); err == nil || !strings.Contains(err.Error(), "--attach unit") {
+		t.Errorf("want an error pointing at --attach unit, got %v", err)
+	}
+}
+
+// The trace of a hook nests its spans and functions, leaves short rows out
+// unless asked, and says which process of a retried hook it shows.
+func TestInspectTrace(t *testing.T) {
+	dir := fixtureRecording(t, "cost-k8s")
+	var list inspect.EventList
+	out, _, _ := runInspect(t, "events", dir, "--json", "--name", "config-changed")
+	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list.Events) == 0 {
+		t.Fatalf("events: %v", err)
+	}
+	id := list.Events[0].SpanID
+
+	var compact, full inspect.TraceReport
+	for _, tc := range []struct {
+		args []string
+		into *inspect.TraceReport
+	}{{[]string{"trace", dir, id, "--json", "--limit", "1000"}, &compact}, {[]string{"trace", dir, id, "--json", "--all", "--limit", "1000"}, &full}} {
+		out, _, err := runInspect(t, tc.args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(out), tc.into); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(compact.Rows) == 0 || len(full.Rows) <= len(compact.Rows) {
+		t.Errorf("%d rows compact, %d with --all: --all should show more", len(compact.Rows), len(full.Rows))
+	}
+	var init, reconcile int
+	for i, r := range compact.Rows {
+		if r.Kind == "init" || strings.Contains(r.Label, "__init__") {
+			init = i + 1
+		}
+		if strings.Contains(r.Label, "_reconcile") {
+			reconcile = i + 1
+			if r.Depth <= compact.Rows[max(init-1, 0)].Depth {
+				t.Errorf("_reconcile at depth %d isn't under init at depth %d", r.Depth, compact.Rows[max(init-1, 0)].Depth)
+			}
+		}
+	}
+	if init == 0 || reconcile <= init {
+		t.Errorf("want init, then _reconcile under it; got rows %+v", compact.Rows[:min(6, len(compact.Rows))])
+	}
+
+	out, _, _ = runInspect(t, "trace", dir, id, "--depth", "1", "--limit", "5")
+	if !strings.Contains(out, "next: juju-lens inspect memory") {
+		t.Errorf("no next step:\n%s", out)
+	}
+	if _, _, err := runInspect(t, "trace", dir, id, "--attempt", "2"); err == nil || !strings.Contains(err.Error(), "ran in 1 process") {
+		t.Errorf("--attempt 2 of a one-process hook: %v", err)
 	}
 }

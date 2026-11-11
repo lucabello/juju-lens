@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,11 +31,13 @@ much it left out, and ends with the command to go on with.
   juju-lens inspect events <recording>            list and rank events
   juju-lens inspect event <recording> <span-id>   one event in full
   juju-lens inspect profile <recording> [view]    where the charm's time and memory went
+  juju-lens inspect memory <recording> <span-id>  memory around a hook, and the code that took it
+  juju-lens inspect trace <recording> <span-id>   what a hook did along time: events, observers, calls, functions
 
 A recording without an index.db, or with one from an older juju-lens, is
 indexed first.`,
 	}
-	cmd.AddCommand(newInspectEventsCmd(), newInspectEventCmd(), newInspectProfileCmd())
+	cmd.AddCommand(newInspectEventsCmd(), newInspectEventCmd(), newInspectProfileCmd(), newInspectMemoryCmd(), newInspectTraceCmd())
 	return cmd
 }
 
@@ -119,6 +122,16 @@ func ensureIndex(dir string, notice io.Writer) error {
 	why := "has no index"
 	if have {
 		why = fmt.Sprintf("has an index of schema %d, and this juju-lens reads %d", v, index.SchemaVersion)
+	}
+	if f, err := os.CreateTemp(dir, ".juju-lens-write-*"); err != nil {
+		msg := fmt.Sprintf("%s %s, and juju-lens can't write there to index it: %v\nrun `juju-lens index %s` as the user that owns the recording, or copy the recording somewhere you can write", dir, why, err, dir)
+		if hint := recording.OwnerHint(dir); hint != "" {
+			msg += "\n" + hint
+		}
+		return errors.New(msg)
+	} else {
+		f.Close()
+		os.Remove(f.Name())
 	}
 	fmt.Fprintf(notice, "juju-lens: %s %s; indexing it first\n", dir, why)
 	return runIndex(dir, nil)
@@ -287,6 +300,108 @@ only the charm (charm), the charm and ops (ops), or all of it.`,
 	cmd.Flags().StringVar(&detail, "detail", "callee", "how much code to show: charm, callee, ops or all")
 	cmd.Flags().StringVar(&order, "order", "self", "for top: order by self or total (what the function called counts)")
 	cmd.Flags().IntVar(&limit, "limit", 0, "show at most this many rows (the tree: lines); 0 picks a size for the view")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	return cmd
+}
+
+// ----- inspect memory
+
+func newInspectMemoryCmd() *cobra.Command {
+	var (
+		model  string
+		asJSON bool
+	)
+	cmd := &cobra.Command{
+		Use:   "memory <recording> <span-id>",
+		Short: "Memory around a hook, and the code that took it",
+		Long: `memory says what happened to memory around one hook of a recording made with
+--attach unit: how the hook's process, the charm container and the workload
+containers moved, the biggest jumps with the observer and the code running at
+each, and the Pebble change a workload's jump followed. <span-id> is the one in
+an events line, or the id of a span inside the hook.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			src, err := openInspect(args[0], model, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			defer src.Close()
+			ev, _, err := inspect.FindEvent(src, args[0], args[1])
+			if err != nil {
+				return err
+			}
+			rep, err := inspect.MemoryOf(src, args[0], ev)
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return rep.WriteJSON(cmd.OutOrStdout())
+			}
+			rep.WriteText(cmd.OutOrStdout())
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&model, "model", "", "the model to read (required if the recording has more than one)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	return cmd
+}
+
+// ----- inspect trace
+
+func newInspectTraceCmd() *cobra.Command {
+	var (
+		model   string
+		attempt int
+		detail  string
+		all     bool
+		depth   int
+		minDur  time.Duration
+		limit   int
+		asJSON  bool
+	)
+	cmd := &cobra.Command{
+		Use:   "trace <recording> <span-id>",
+		Short: "What a hook did along time",
+		Long: `trace lays one process of a hook, recorded with --attach unit, out along
+time: charm init, the events it emitted, the observers they reached, the hook
+tool and Pebble calls that took long, and under each the functions of the
+charm's code that ran, from the stack samples. Each row has when it started
+(from the start of the process), how long it took, the CPU and the memory it
+took. A hook that was retried ran in more than one process; --attempt picks one.
+Short rows are left out unless --all.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d, err := inspect.ParseDetail(detail)
+			if err != nil {
+				return err
+			}
+			src, err := openInspect(args[0], model, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			defer src.Close()
+			ev, _, err := inspect.FindEvent(src, args[0], args[1])
+			if err != nil {
+				return err
+			}
+			rep, err := inspect.TraceOf(src, args[0], ev, inspect.TraceQuery{Attempt: attempt, Detail: d, All: all, Depth: depth, MinDuration: minDur, Limit: limit})
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return rep.WriteJSON(cmd.OutOrStdout())
+			}
+			rep.WriteText(cmd.OutOrStdout())
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&model, "model", "", "the model to read (required if the recording has more than one)")
+	cmd.Flags().IntVar(&attempt, "attempt", 1, "which process of the hook, from 1")
+	cmd.Flags().StringVar(&detail, "detail", "callee", "how much code the function rows show: charm, callee, ops or all")
+	cmd.Flags().BoolVar(&all, "all", false, "list every span, call and function, however short")
+	cmd.Flags().IntVar(&depth, "depth", 0, "only this many levels below the process (0 = all)")
+	cmd.Flags().DurationVar(&minDur, "min-duration", 0, "leave out rows shorter than this, such as 50ms")
+	cmd.Flags().IntVar(&limit, "limit", 80, "show at most this many rows (0 = 80)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	return cmd
 }

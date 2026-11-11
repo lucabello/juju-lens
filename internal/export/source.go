@@ -17,6 +17,7 @@ type Source struct {
 	Model     index.Model
 
 	db       *index.DB
+	spans    []recording.SpanRow
 	spanByID map[string]recording.SpanRow
 	events   []narrative.Event
 	ops      *narrative.OpsIndex
@@ -48,6 +49,7 @@ func OpenSource(dir, model string) (*Source, error) {
 		Recording: RecordingInfo{Dir: dir, Controller: man.Controller.Name, Started: man.Started, Ended: man.Ended},
 		Model:     mm,
 		db:        db,
+		spans:     spans,
 		spanByID:  make(map[string]recording.SpanRow, len(spans)),
 		ops:       narrative.NewOpsIndex(spans),
 	}
@@ -201,4 +203,36 @@ func (s *Source) SpanProfile(spanID string) (*narrative.Profile, narrative.Event
 	}
 	label := ev.Unit + " " + ev.Summary + ", " + s.ops.SpanLabel(spanID)
 	return narrative.NewProfile(profs, narrative.SubtreeSpans(found)), ev, label, nil
+}
+
+// Memory reads the memory around ev: the unit's cgroups, the charm
+// process's resident memory, the hooks and the Pebble changes near it.
+func (s *Source) Memory(ev narrative.Event) (*narrative.Memory, error) {
+	return narrative.LoadMemory(s.db, s.Model.ID, s.spans, ev)
+}
+
+// Trace lays out one process of the hook ev (attempt counts from 1) along
+// time: its spans, slow calls, and the functions of the charm's code. It
+// returns how many processes ran the hook, and the name of this one.
+func (s *Source) Trace(ev narrative.Event, attempt int, o narrative.TraceOptions) (tr *narrative.Trace, attempts int, hook string, err error) {
+	trees := s.ops.Trees(ev.OpsSpans)
+	if len(trees) == 0 {
+		return nil, 0, "", fmt.Errorf("no charm-side records for %s %s: they come from a recording made with --attach unit", ev.Unit, ev.Summary)
+	}
+	if attempt < 1 || attempt > len(trees) {
+		return nil, len(trees), "", fmt.Errorf("--attempt %d: the hook ran in %d %s", attempt, len(trees), pluralWord(len(trees), "process", "processes"))
+	}
+	profs, err := s.db.Profiles(narrative.ProcessRoots(trees))
+	if err != nil {
+		return nil, 0, "", err
+	}
+	narrative.AttachCosts(trees, profs)
+	return narrative.BuildTrace(trees[attempt-1], profs, o), len(trees), trees[attempt-1].Name, nil
+}
+
+func pluralWord(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
