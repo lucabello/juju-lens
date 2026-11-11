@@ -39,6 +39,8 @@ read incrementally instead of ingesting all at once:
   details/<span_id>.json full detail for one event: statuses set, databag/
                          config diffs, failure explanation
   report.md              the same data as one narrated document, for a human
+  profiles/*.folded      every sampled charm stack as folded stacks (wall, cpu
+                         and memory), for grep and flame graph tools
   AGENTS.md               legend naming whichever of the above is present
 
 --parts restricts which of those get written (default: all); it is
@@ -61,7 +63,7 @@ another tool.`,
 	cmd.Flags().StringVar(&f.format, "format", "", "write a single merged document to stdout instead of a folder: json|md")
 	cmd.Flags().StringVar(&f.out, "out", "", "folder to write the export into (default: <recording>/derived/export)")
 	cmd.Flags().StringSliceVar(&f.parts, "parts", nil,
-		"comma-separated subset of parts to write: summary,timeline,events,details,report (default: all)")
+		"comma-separated subset of parts to write: summary,timeline,events,details,report,profiles (default: all)")
 	cmd.Flags().StringVar(&f.model, "model", "", "focus on a single model (required if the recording has more than one)")
 	cmd.Flags().StringArrayVar(&f.units, "unit", nil, "restrict to this unit or application (repeatable)")
 	cmd.Flags().StringVar(&f.since, "since", "", "RFC3339 lower time bound")
@@ -143,7 +145,7 @@ func parseParts(names []string) ([]export.Part, error) {
 	for _, n := range names {
 		p := export.Part(n)
 		if !valid[p] {
-			return nil, fmt.Errorf("unknown --parts value %q (want one of summary,timeline,events,details,report)", n)
+			return nil, fmt.Errorf("unknown --parts value %q (want one of summary,timeline,events,details,report,profiles)", n)
 		}
 		out = append(out, p)
 	}

@@ -28,11 +28,12 @@ const (
 	PartEvents   Part = "events"   // events.jsonl
 	PartDetails  Part = "details"  // details/<span_id>.json
 	PartReport   Part = "report"   // report.md
+	PartProfiles Part = "profiles" // profiles/{wall,cpu,mem}.folded
 )
 
 // AllParts is every part WriteFolder knows how to produce, in the order a
 // reader would naturally reach for them.
-var AllParts = []Part{PartSummary, PartTimeline, PartEvents, PartDetails, PartReport}
+var AllParts = []Part{PartSummary, PartTimeline, PartEvents, PartDetails, PartReport, PartProfiles}
 
 // LineRecord is one line of timeline.jsonl or events.jsonl: a flat,
 // grep-friendly projection of an Item. It deliberately omits everything that
@@ -111,6 +112,11 @@ func WriteFolder(dir string, r *Result, parts []Part) error {
 	}
 	if want[PartReport] {
 		if err := writeReportMD(dir, r); err != nil {
+			return err
+		}
+	}
+	if want[PartProfiles] {
+		if err := writeFolded(dir, r); err != nil {
 			return err
 		}
 	}
@@ -466,6 +472,13 @@ func writeAgentsMD(dir string, want map[Part]bool, recDir string) error {
 			"each observer), `top_stacks` and `top_memory_stacks` (the call stacks with the most "+
 			"wall time and memory growth, innermost frame first), and `functions` on the spans "+
 			"of the charm's code that ran. span_id comes from any line above.\n")
+	}
+	if want[PartProfiles] {
+		fmt.Fprintf(b, "- profiles/wall.folded, cpu.folded, mem.folded (only when the hooks were profiled) — every "+
+			"sampled stack of the charm, one per line, as folded stacks: `unit;event;span;outermost frame;…;innermost "+
+			"frame N`, with N the wall time and CPU time in microseconds, or the memory taken in bytes, "+
+			"added up over the hooks of that unit with that name. The span is `charm __init__` or an observer. "+
+			"`grep` a function name, or feed a file to a flame graph tool.\n")
 	}
 	if want[PartReport] {
 		fmt.Fprintf(b, "- report.md — the same data as one narrated document, for reading top "+

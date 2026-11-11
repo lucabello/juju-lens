@@ -138,7 +138,7 @@ Writes a recording's hooks, state changes, and logs as a folder of plain-text fi
 |---|---|---|
 | `--format` | none | Write a single merged document to stdout instead of a folder: `json` or `md`. |
 | `--out` | `<recording>/derived/export` | Folder to write the export into. |
-| `--parts` | all | Comma-separated files to write, from `summary`, `timeline`, `events`, `details`, and `report`. |
+| `--parts` | all | Comma-separated files to write, from `summary`, `timeline`, `events`, `details`, `report`, and `profiles`. |
 | `--model` | none | Export only this model. Required when the recording has more than one. |
 | `--unit` | none | Export only this unit or application. Repeatable. |
 | `--since` | none | Export only events at or after this time, in RFC 3339 format. |

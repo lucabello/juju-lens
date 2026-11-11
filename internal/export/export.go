@@ -85,27 +85,28 @@ type ConfigDetail struct {
 // statuses it set, the databag/config it changed, and what the charm did
 // in each process that ran the hook.
 type EventDetail struct {
-	TS              time.Time            `json:"ts"`
-	Kind            string               `json:"kind"`
-	Unit            string               `json:"unit,omitempty"`
-	App             string               `json:"app,omitempty"`
-	Summary         string               `json:"summary"`
-	Detail          string               `json:"detail,omitempty"`
-	Fail            string               `json:"fail"` // narrative.FailState.String(); "none" when clean
-	FailExplanation string               `json:"fail_explanation,omitempty"`
-	Statuses        []StatusDetail       `json:"statuses,omitempty"`
-	DurationMS      int64                `json:"duration_ms,omitempty"`
-	Running         bool                 `json:"running,omitempty"`
-	Tap             string               `json:"tap,omitempty"`        // "missing" or "truncated": the tap didn't record the hook in full
-	TapReason       string               `json:"tap_reason,omitempty"` // why, when known
-	Databags        []DatabagDetail      `json:"databags,omitempty"`
-	Config          *ConfigDetail        `json:"config,omitempty"`
-	Ops             []*narrative.OpsNode `json:"ops,omitempty"`               // one span tree per process (attempt) that ran the hook, every span included
-	Costs           []SpanCost           `json:"costs,omitempty"`             // what charm init and each observer cost, in the order they ran
-	TopStacks       []StackDetail        `json:"top_stacks,omitempty"`        // the stacks the hook's processes spent the most wall time in
-	TopMemStacks    []StackDetail        `json:"top_memory_stacks,omitempty"` // the stacks that saw the most memory growth
-	SpanID          string               `json:"span_id,omitempty"`
-	Context         bool                 `json:"context,omitempty"` // included only as a neighbour of a failure under --errors-only, not itself a failure
+	TS              time.Time              `json:"ts"`
+	Kind            string                 `json:"kind"`
+	Unit            string                 `json:"unit,omitempty"`
+	App             string                 `json:"app,omitempty"`
+	Summary         string                 `json:"summary"`
+	Detail          string                 `json:"detail,omitempty"`
+	Fail            string                 `json:"fail"` // narrative.FailState.String(); "none" when clean
+	FailExplanation string                 `json:"fail_explanation,omitempty"`
+	Statuses        []StatusDetail         `json:"statuses,omitempty"`
+	DurationMS      int64                  `json:"duration_ms,omitempty"`
+	Running         bool                   `json:"running,omitempty"`
+	Tap             string                 `json:"tap,omitempty"`        // "missing" or "truncated": the tap didn't record the hook in full
+	TapReason       string                 `json:"tap_reason,omitempty"` // why, when known
+	Databags        []DatabagDetail        `json:"databags,omitempty"`
+	Config          *ConfigDetail          `json:"config,omitempty"`
+	Ops             []*narrative.OpsNode   `json:"ops,omitempty"`               // one span tree per process (attempt) that ran the hook, every span included
+	Costs           []SpanCost             `json:"costs,omitempty"`             // what charm init and each observer cost, in the order they ran
+	TopStacks       []StackDetail          `json:"top_stacks,omitempty"`        // the stacks the hook's processes spent the most wall time in
+	TopMemStacks    []StackDetail          `json:"top_memory_stacks,omitempty"` // the stacks that saw the most memory growth
+	SpanID          string                 `json:"span_id,omitempty"`
+	profs           []recording.OpsProfile // the stack samples of the hook's processes, for the folded stacks
+	Context         bool                   `json:"context,omitempty"` // included only as a neighbour of a failure under --errors-only, not itself a failure
 }
 
 // SpanCost is what charm init or one observer cost: its wall time, and the
@@ -479,6 +480,7 @@ func addCosts(db *index.DB, d *EventDetail, ops *narrative.OpsIndex) {
 		return
 	}
 	profs, _ := db.Profiles(narrative.ProcessRoots(d.Ops))
+	d.profs = profs
 	narrative.AttachCosts(d.Ops, profs)
 	var walk func(n *narrative.OpsNode, attempt int)
 	walk = func(n *narrative.OpsNode, attempt int) {

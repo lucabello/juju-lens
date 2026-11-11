@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/lucabello/juju-lens/internal/export"
+	"github.com/lucabello/juju-lens/internal/inspect"
 	"github.com/lucabello/juju-lens/internal/narrative"
 	"github.com/lucabello/juju-lens/internal/recording"
 	"github.com/lucabello/juju-lens/internal/synth"
@@ -354,5 +356,84 @@ func TestExportFolderOmitsCostsWithoutProfiles(t *testing.T) {
 	events, _ := os.ReadFile(filepath.Join(out, "events.jsonl"))
 	if strings.Contains(string(summary), "Costliest") || strings.Contains(string(events), "cpu_ms") {
 		t.Errorf("cost output for a recording with no profiles:\n%s", summary)
+	}
+}
+
+// The folded stacks hold every sampled stack, outermost frame first, with
+// what the stack adds up to: the three files agree with the profile that
+// inspect prints, and the stack that took the memory is the first line.
+func TestExportFoldedStacks(t *testing.T) {
+	dir := t.TempDir()
+	if err := runSynth(context.Background(), synth.ScenarioOps, synthFlags{output: dir, model: "default"}); err != nil {
+		t.Fatalf("runSynth: %v", err)
+	}
+	res, err := export.Build(dir, export.Options{Model: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	if err := export.WriteFolder(out, res, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	sum := func(file string) (total int64, first string) {
+		data, err := os.ReadFile(filepath.Join(out, "profiles", file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			at := strings.LastIndexByte(l, ' ')
+			n, err := strconv.ParseInt(l[at+1:], 10, 64)
+			if err != nil || at < 0 {
+				t.Fatalf("%s line %d isn't 'stack value': %q", file, i+1, l)
+			}
+			if frames := strings.Split(l[:at], ";"); len(frames) < 4 || !strings.HasPrefix(frames[0], "otelcol/") {
+				t.Errorf("%s line %d: want unit;event;span;frames, got %q", file, i+1, l)
+			}
+			if i == 0 {
+				first = l
+			}
+			total += n
+		}
+		return total, first
+	}
+	wall, _ := sum("wall.folded")
+	_, memFirst := sum("mem.folded")
+	if !strings.Contains(memFirst, "LZMABase64.compress") {
+		t.Errorf("the stack that took the most memory is first, and it is the dashboard compression:\n%s", memFirst)
+	}
+
+	var pj inspect.ProfileJSON
+	pout, _, err := runInspect(t, "profile", dir, "--json", "--detail", "all", "--limit", "100000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(pout), &pj); err != nil {
+		t.Fatal(err)
+	}
+	var self float64
+	for _, f := range pj.Functions {
+		self += f.Self
+	}
+	if d := float64(wall)*1000 - self; d > 1000*float64(len(res.Items)) || d < -1000*float64(len(res.Items)) {
+		t.Errorf("wall.folded adds up to %d µs, the profile's self time to %.0f ns", wall, self)
+	}
+
+	agents, _ := os.ReadFile(filepath.Join(out, "AGENTS.md"))
+	if !strings.Contains(string(agents), "wall.folded") {
+		t.Errorf("AGENTS.md doesn't describe the folded stacks:\n%s", agents)
+	}
+	// A recording with no profiles writes no profiles/ and doesn't claim to.
+	plain := t.TempDir()
+	if err := runSynth(context.Background(), synth.ScenarioTrivial, synthFlags{output: plain, model: "default"}); err != nil {
+		t.Fatal(err)
+	}
+	pr, _ := export.Build(plain, export.Options{Model: "default"})
+	pout2 := t.TempDir()
+	if err := export.WriteFolder(pout2, pr, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(pout2, "profiles")); !os.IsNotExist(err) {
+		t.Errorf("profiles/ exists for a recording with no profiles: %v", err)
 	}
 }
