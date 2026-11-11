@@ -115,7 +115,7 @@ func WriteFolder(dir string, r *Result, parts []Part) error {
 	}
 	// Written last since its content depends on which of the above actually
 	// ran — it must never point at a file that isn't there.
-	return writeAgentsMD(dir, want)
+	return writeAgentsMD(dir, want, r.Recording.Dir)
 }
 
 func lineRecordForEvent(ev *EventDetail) LineRecord {
@@ -422,7 +422,7 @@ func writeSummaryMD(dir string, r *Result) error {
 // writeAgentsMD is a legend, not a procedure: it names what each present
 // file holds and where to find a field, not how to investigate. want is
 // consulted so it never references a file WriteFolder didn't actually write.
-func writeAgentsMD(dir string, want map[Part]bool) error {
+func writeAgentsMD(dir string, want map[Part]bool, recDir string) error {
 	b := &strings.Builder{}
 	fmt.Fprintf(b, "# juju-lens export\n\n")
 	if want[PartSummary] {
@@ -459,9 +459,13 @@ func writeAgentsMD(dir string, want map[Part]bool) error {
 			"to bottom or pasting elsewhere.\n")
 	}
 	b.WriteByte('\n')
-	fmt.Fprintf(b, "If `juju-lens` is installed, `juju-lens inspect --help` lists commands that answer "+
-		"questions about the recording these files came from, such as events ranked by CPU or memory, "+
-		"one event in full, and profiles by function, without reading these files.\n\n")
+	if abs, err := filepath.Abs(recDir); err == nil && recDir != "" {
+		recDir = abs
+	}
+	fmt.Fprintf(b, "If `juju-lens` is installed, `juju-lens inspect events %s` and the other `juju-lens inspect` "+
+		"commands (see `juju-lens inspect --help`) answer questions about the recording these files came "+
+		"from, such as events ranked by CPU or memory, one event in full, and profiles by function, "+
+		"without reading these files.\n\n", recDir)
 	fmt.Fprintf(b, "`fail` only reflects hook-execution failures (errored/retried/rpc-warn/"+
 		"interrupted/lost-continue). A hook can run cleanly and still set a wrong value or "+
 		"never do what was expected — that will not show up here.\n")

@@ -16,7 +16,7 @@
 - [Stop a running recording](how-to/stop-a-recording.md)
 - [Rebuild a recording's index](how-to/rebuild-the-index.md)
 - [Export a recording for an AI agent](how-to/export-for-an-agent.md)
-- [Ask a recording questions](how-to/ask-a-recording-questions.md), with `juju-lens inspect`: the costliest hooks and the code behind them
+- [Ask a recording questions](how-to/ask-a-recording-questions.md): find the costliest hooks and the code behind them with `juju-lens inspect`
 - [Generate a synthetic recording](how-to/generate-a-synthetic-recording.md), without a Juju controller
 
 ## Reference

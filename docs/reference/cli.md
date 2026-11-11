@@ -153,7 +153,7 @@ juju-lens inspect event <recording> <span-id> [flags]
 juju-lens inspect profile <recording> [top|peek|tree|stacks] [function] [flags]
 ```
 
-Answers questions about a recording as text, or as JSON with `--json`. It reads the recording's index, and builds it first, with a notice on standard error, when the recording has none or has one from an older `juju-lens`. It leaves alone the index of a recording that a recorder is still writing. Every list shows `--limit` rows, says how many it left out and how to see them, and ends with a command to go on with. The text isn't stable; the JSON fields are the ones listed here.
+Answers questions about a recording as text, or as JSON with `--json`. Most views end with a command to go on with. Every list says how many rows it shows out of how many, and how to see more. It reads the recording's index, and builds it first, with a notice on standard error, when the recording has none or has one of a different schema version. It leaves alone an existing index of a recording that a recorder is still writing. The text isn't stable; the JSON fields are the ones listed here.
 
 These flags pick events, and are shared by `events` and `profile`:
 
@@ -164,27 +164,30 @@ These flags pick events, and are shared by `events` and `profile`:
 | `--name` | all | Only events whose name contains this, ignoring case, such as `config-changed`. Repeatable. |
 | `--kind` | all | Only this kind of event: `hook`, `action`, `status`, `relation`, `leader`, `secret` or `settle`. Repeatable. |
 | `--fail` | all | Only events that ended this way: `none`, `errored`, `retried`, `rpc-warn`, `interrupted`, `lost-continue`, or `problem` for any but `none`. Repeatable. |
-| `--since`, `--until` | none | RFC 3339 time bounds. |
+| `--since`, `--until` | none | RFC 3339 time bounds, which include events at the given time. |
+
+Repeated values of one flag are alternatives. An event must match every flag you give.
 
 ### `inspect events`
 
-Lists events, one a line. Hooks recorded with `--attach unit` and profiled also show the CPU the charm's init and observers used, and the memory their stacks saw taken.
+Lists events, one a line, most of them hooks. Hooks recorded with `--attach unit` and profiled also show the CPU the charm's init and observers used, and the memory their stacks saw taken.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--sort` | `time` | `time` (oldest first), `duration`, `cpu` or `mem` (largest first). Hooks without a profile come last when sorting by `cpu` or `mem`. |
+| `--sort` | `time` | `time` (oldest first), `duration`, `cpu` or `mem` (largest first). Events without a profile come last when sorting by `cpu` or `mem`. |
 | `--limit` | `20` | Show at most this many events. `0` shows all. |
 | `--skip` | `0` | Leave out this many events first. |
-| `--json` | `false` | Print `recording`, `model`, `sort`, `total`, `skip` and `events`. Each event has `ts`, `unit`, `kind`, `name`, `fail`, `duration_ms`, `span_id`, and for profiled hooks `profiled`, `cpu_ms`, `mem_growth_bytes`, `rss_peak_bytes`, `top_frame` and `top_memory_frame`. |
+| `--json` | `false` | Print an object with `recording`, `model`, `sort`, `total`, `skip` (only when above 0) and `events`. Each event has `ts`, `kind`, `name`, `fail`, `span_id`, `profiled`, and, when set, `unit` and `duration_ms` (milliseconds). Profiled hooks also have `cpu_ms` (milliseconds), `mem_growth_bytes`, `rss_peak_bytes` (bytes), `top_frame` and `top_memory_frame`. |
 
 ### `inspect event`
 
-Prints one event as the [export's report](../how-to/export-for-an-agent.md) narrates it. `<span-id>` is the `span` of an `events` line, or the ID of a span inside the hook, such as the one in a profile's `stacks` view.
+Prints one event as the [`report.md` of the export](../how-to/export-for-an-agent.md) narrates it. `<span-id>` is the `SPAN` of an `events` line, or the ID of a span inside the hook, such as an observer's in the `costs` section of this command's output or in the `stacks` of `profile`. For a span inside a hook, the command prints the whole hook and says so.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--section` | all | Only these parts: `statuses`, `ops`, `stacks`, `costs`, `databags` or `config`. The heading and the failure explanation are always printed. |
-| `--json` | `false` | Print the event's details file, `details/<span_id>.json` of the export. |
+| `--model` | the only model | The model to read. Required when the recording has more than one. |
+| `--section` | all | Only these parts: `statuses`, `ops`, `stacks`, `costs`, `databags` or `config`. Comma-separated, or repeat the flag. The heading and the failure explanation are always printed. |
+| `--json` | `false` | Print the event's details, as in `details/<span_id>.json` of the export, without the parts `--section` leaves out. |
 
 ### `inspect profile`
 
@@ -195,7 +198,7 @@ Shows the Python stacks that hooks recorded with `--attach unit` sampled every 1
 | `top` | The functions with the most in their own code (self), and what they called (total). |
 | `peek <function>` | What called one function and what it called. `<function>` is part of its name; a name that matches several functions is refused, with the candidates. |
 | `tree` | The call tree, outermost function first, without the branches under 1% of the total. |
-| `stacks` | The heaviest stacks, outermost frame first and joined with `;`, each with the span it ran in. |
+| `stacks` | The heaviest stacks, outermost frame first and joined with `;`, each with the span it ran in and that span's ID. The opposite order from `top_stacks` in the export. |
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -203,8 +206,8 @@ Shows the Python stacks that hooks recorded with `--attach unit` sampled every 1
 | `--metric` | `wall` | What to weigh by: `wall` time, `cpu` time of the main thread, or `mem`, the memory the process took. |
 | `--detail` | `callee` | How much code to show: `charm`, the charm's own; `callee`, the charm's and what it calls directly; `ops`, the charm's and ops'; or `all`. What the hidden code cost is added to the function that called it. |
 | `--order` | `self` | For `top`: order by `self` or `total`. |
-| `--limit` | by view | Rows to show, and lines for `tree`. |
-| `--json` | `false` | Print `recording`, `model`, `scope`, `view`, `metric` (`wall` and `cpu` in nanoseconds, `mem` in bytes), `detail`, `samples`, and `functions`, `peek`, `tree` or `stacks` for the view. |
+| `--limit` | `15` for `top`, `10` for each list of `peek`, `40` lines for `tree`, `8` for `stacks` | Show at most this many rows (lines for `tree`). `0` uses the default. |
+| `--json` | `false` | Print `recording`, `model`, `scope`, `view`, `metric`, `detail`, `samples`, and the view's data: `functions` (`top`), `peek`, `tree` with `tree_hidden` (the count of functions left out), or `stacks`. Values in the view's data are nanoseconds for `wall` and `cpu`, bytes for `mem`. `functions` entries have `function`, `file`, `line`, `self`, `self_pct`, `total`, `total_pct` and `class` (`charm`, `ops` or `other`). `stacks` entries have `span`, `span_id`, `value`, `pct`, `samples` and `frames`, outermost first. The fields of `peek` and `tree` are not stable. |
 
 The memory metric adds up how much resident memory grew between two samples. It shows where memory was taken, not where it was held.
 

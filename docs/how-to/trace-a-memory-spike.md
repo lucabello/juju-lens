@@ -178,7 +178,9 @@ Back on the whole hook (`Tab`), the same path appears twice, as in the memory vi
 
 ## Get the same answer from an export
 
-To hand the hook to someone else, or to an AI agent, export it. `--unit`, `--since` and `--until` narrow the export to the hook. Take its start and end from the inspector, whose times are in UTC, on the recording's date:
+To ask the recording directly, without the viewer, see [how to ask a recording questions](ask-a-recording-questions.md). To hand the hook to someone else, or to an AI agent, export it.
+
+`--unit`, `--since` and `--until` narrow the export to the hook. Take its start and end from the inspector, whose times are in UTC, on the recording's date:
 
 ```bash
 juju-lens export /tmp/jl-t14 --format md --unit otelcol --since 2026-10-23T00:01:27Z --until 2026-10-23T00:01:32Z

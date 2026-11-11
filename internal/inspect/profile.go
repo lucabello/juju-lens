@@ -214,7 +214,7 @@ func (v *ProfileView) header(w io.Writer) {
 	fmt.Fprintf(w, "%d samples, %s wall, %s cpu, %s memory taken\n",
 		t.Samples, narrative.MetricWall.Format(float64(t.WallNs)), narrative.MetricCPU.Format(float64(t.CPUNs)),
 		narrative.FormatBytes(t.MemBytes))
-	fmt.Fprintf(w, "showing %s, %s code (--metric, --detail)\n\n", v.m(), v.q.Detail)
+	fmt.Fprintf(w, "showing %s, --detail %s\n\n", metricLabel(v.m()), detailFlag(v.q.Detail))
 }
 
 func (v *ProfileView) footer(w io.Writer) {
@@ -531,9 +531,9 @@ func (v *ProfileView) WriteText(w io.Writer) error {
 	case ViewStacks:
 		rows := v.stacks(v.limit(8))
 		for _, r := range rows {
-			fmt.Fprintf(w, "%s  %.0f%%  [%s]\n  %s\n", m.Format(r.Value), r.Pct, r.Span, strings.Join(r.Frames, ";"))
+			fmt.Fprintf(w, "%s  %.0f%%  [%s %s]\n  %s\n", m.Format(r.Value), r.Pct, r.Span, r.SpanID, strings.Join(r.Frames, ";"))
 		}
-		fmt.Fprintf(w, "\nstacks run outermost frame first, joined with ';'; each is in the span in brackets\n")
+		fmt.Fprintf(w, "\nstacks run outermost frame first, joined with ';'; each is in the span in brackets, whose id --span takes\n")
 	}
 	v.footer(w)
 	return nil
@@ -601,4 +601,15 @@ func plural(n int, one, many string) string {
 		return one
 	}
 	return many
+}
+
+// metricLabel names a metric as the output and the flags do.
+func metricLabel(m narrative.Metric) string {
+	switch m {
+	case narrative.MetricCPU:
+		return "cpu time"
+	case narrative.MetricMem:
+		return "memory taken"
+	}
+	return "wall time"
 }
