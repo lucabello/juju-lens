@@ -360,6 +360,9 @@ func IsOpsFile(path string) bool {
 // python3.12/site-packages/ops/main.py" reads "ops/main.py".
 func ShortPath(path string) string {
 	p := filepath.ToSlash(path)
+	if relativeCharmFile(p) {
+		return strings.TrimPrefix(p, "./")
+	}
 	for _, marker := range []string{"/site-packages/", "/dist-packages/", "/charm/"} {
 		if i := strings.LastIndex(p, marker); i >= 0 {
 			return p[i+len(marker):]
@@ -373,11 +376,25 @@ func ShortPath(path string) string {
 	return p
 }
 
+// relativeCharmFile reports whether p, a path that doesn't start at the root,
+// is in the charm's src/ or lib/ directory.
+func relativeCharmFile(p string) bool {
+	p = strings.TrimPrefix(p, "./")
+	return strings.HasPrefix(p, "src/") || strings.HasPrefix(p, "lib/")
+}
+
 // IsCharmFile reports whether a Python source file is the charm's own code
 // (its src/ and the charm libraries in lib/), rather than ops, another
 // library from the charm's venv, or the standard library.
+//
+// A hook process that runs the charm as ./src/charm.py has the charm's own
+// files under relative paths, "./src/charm.py" and "lib/charms/...", which
+// count as well.
 func IsCharmFile(path string) bool {
 	p := filepath.ToSlash(path)
+	if relativeCharmFile(p) {
+		return true
+	}
 	return strings.Contains(p, "/charm/") && !strings.Contains(p, "/site-packages/") &&
 		!strings.Contains(p, "/dist-packages/") && !strings.Contains(p, "/venv/")
 }
