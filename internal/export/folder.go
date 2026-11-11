@@ -3,6 +3,7 @@ package export
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -324,8 +325,21 @@ func frameNote(frame string) string {
 var failStateOrder = []string{"errored", "retried", "rpc-warn", "interrupted", "lost-continue", "none"}
 
 func writeSummaryMD(dir string, r *Result) error {
-	fs := summarizeFolder(r)
 	b := &strings.Builder{}
+	writeSummary(b, r)
+	return os.WriteFile(filepath.Join(dir, "SUMMARY.md"), []byte(b.String()), 0o644)
+}
+
+// WriteSummary writes what SUMMARY.md says about r.
+func WriteSummary(w io.Writer, r *Result) error {
+	b := &strings.Builder{}
+	writeSummary(b, r)
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
+func writeSummary(b *strings.Builder, r *Result) {
+	fs := summarizeFolder(r)
 
 	fmt.Fprintf(b, "# Recording shape\n\n")
 	fmt.Fprintf(b, "Orientation, not a diagnosis. A hook can run cleanly and still do the "+
@@ -416,7 +430,6 @@ func writeSummaryMD(dir string, r *Result) error {
 		b.WriteByte('\n')
 	}
 
-	return os.WriteFile(filepath.Join(dir, "SUMMARY.md"), []byte(b.String()), 0o644)
 }
 
 // writeAgentsMD is a legend, not a procedure: it names what each present

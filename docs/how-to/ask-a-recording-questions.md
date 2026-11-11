@@ -78,6 +78,38 @@ juju-lens inspect profile ./rec --span e39d3d6c60330477 --metric mem tree
 
 The tree shows the memory taken by each function and the ones it called. It counts growth between two samples, so it shows where memory was taken, not where it was held. [How to trace a charm's memory spike to its code](trace-a-memory-spike.md) follows a spike through the viewer.
 
+## See when in the hook it happened
+
+`trace` lays the hook out along time, with the functions of the charm's code under each span, and `memory` says when memory grew and what ran then:
+
+```bash
+juju-lens inspect trace ./rec e39d3d6c60330477 --min-duration 50ms
+juju-lens inspect memory ./rec e39d3d6c60330477
+```
+
+A hook that was retried ran in more than one process; `--attempt 2` traces the second.
+
+## Read the logs and the state around it
+
+List the log lines about a hook, the ones the index tied to it by its span ID marked with `*`, and the state Juju held when it ended:
+
+```bash
+juju-lens inspect logs ./rec --span e39d3d6c60330477 --window 5s
+juju-lens inspect state ./rec --span e39d3d6c60330477 --kind status
+```
+
+Filter logs further with `--unit`, `--level`, `--grep` and the time bounds. `state` shows relation data only for recordings made with `--attach host`.
+
+## Compare two hooks or two recordings
+
+`diff` lists the functions whose cost changed the most, per hook. Compare two hooks of a recording, or the same hook in a recording from before and after a change to the charm:
+
+```bash
+juju-lens inspect diff ./before ./after --unit otelcol --name config-changed --metric mem
+```
+
+For the shape of a whole recording first, `juju-lens inspect summary ./rec` prints what `SUMMARY.md` of the export has, for any scope.
+
 ## If a command finds nothing
 
 A recording with several models needs `--model`. A recording made with `--attach host` alone, or with `--profile=false`, has events but no stack samples, so `profile` stops with an error that says so.

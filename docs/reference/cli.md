@@ -151,6 +151,12 @@ Writes a recording's hooks, state changes, and logs as a folder of plain-text fi
 juju-lens inspect events <recording> [flags]
 juju-lens inspect event <recording> <span-id> [flags]
 juju-lens inspect profile <recording> [top|peek|tree|stacks] [function] [flags]
+juju-lens inspect memory <recording> <span-id> [flags]
+juju-lens inspect trace <recording> <span-id> [flags]
+juju-lens inspect logs <recording> [flags]
+juju-lens inspect state <recording> [flags]
+juju-lens inspect summary <recording> [flags]
+juju-lens inspect diff <recording-a> [<recording-b>] [flags]
 ```
 
 Answers questions about a recording as text, or as JSON with `--json`. Most views end with a command to go on with. Every list says how many rows it shows out of how many, and how to see more. It reads the recording's index, and builds it first, with a notice on standard error, when the recording has none or has one of a different schema version. It leaves alone an existing index of a recording that a recorder is still writing. The text isn't stable; the JSON fields are the ones listed here.
@@ -210,6 +216,83 @@ Shows the Python stacks that hooks recorded with `--attach unit` sampled every 1
 | `--json` | `false` | Print `recording`, `model`, `scope`, `view`, `metric`, `detail`, `samples`, and the view's data: `functions` (`top`), `peek`, `tree` with `tree_hidden` (the count of functions left out), or `stacks`. Values in the view's data are nanoseconds for `wall` and `cpu`, bytes for `mem`. `functions` entries have `function`, `file`, `line`, `self`, `self_pct`, `total`, `total_pct` and `class` (`charm`, `ops` or `other`). `stacks` entries have `span`, `span_id`, `value`, `pct`, `samples` and `frames`, outermost first. The fields of `peek` and `tree` are not stable. |
 
 The memory metric adds up how much resident memory grew between two samples. It shows where memory was taken, not where it was held.
+
+### `inspect memory`
+
+Says what happened to memory around one hook recorded with `--attach unit`: how the hook's process, the charm container and the workload containers moved, the biggest jumps with the observer and the charm code running at each, and the Pebble change a workload's jump followed. It is the text of the viewer's memory view. `<span-id>` is as for `inspect event`.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--model` | the only model | The model to read. |
+| `--json` | `false` | Print `recording`, `model`, `span_id`, `unit`, `event`, `host`, `hook_start`, `hook_end`, `rows` (`name`, `before_bytes`, `highest_bytes`, `after_bytes`, `limit_bytes`, `file_cache_bytes`), `jumps` (`series`, `gain_bytes`, `from_bytes`, `to_bytes`, `when`, `during`, `code`, `pebble`), `charm_container_peak_bytes`, `charm_container_peak_exact` and `limit_events`. |
+
+### `inspect trace`
+
+Lays one process of a hook out along time: charm init, events, observers, the hook tool and Pebble calls that took long, and under them the functions of the charm's code, from the stack samples. Each row has its start from the start of the process, its duration, CPU and memory taken. Short rows are left out unless `--all`.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--model` | the only model | The model to read. |
+| `--attempt` | `1` | Which process ran the hook, from 1. A hook that was retried ran in more than one. |
+| `--detail` | `callee` | How much code the function rows show: `charm`, `callee`, `ops` or `all`. |
+| `--all` | `false` | List every span, call and function, however short. |
+| `--depth` | `0` | Only this many levels below the process. `0` for all. |
+| `--min-duration` | none | Leave out rows shorter than this, such as `50ms`. |
+| `--limit` | `80` | Show at most this many rows. `0` uses the default. |
+| `--json` | `false` | Print `recording`, `model`, `span_id`, `unit`, `event`, `attempt`, `attempts`, `process`, `duration_ms`, `importing_python_ms`, `total_rows` and `rows`. A row has `depth`, `kind`, `label`, `loc`, `detail`, `span_id`, `start_ms`, `duration_ms`, `cpu_ms`, `mem_bytes`, `waiting_on`, `error`, `marks` and `short_rows_left_out`. |
+
+### `inspect logs`
+
+Lists log lines in time order: `juju debug-log`, the workload containers' logs, and the machines' journals.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--model` | the only model | The model to read. |
+| `--unit` | all | Only this unit, application or entity such as `machine-0`. Repeatable. |
+| `--level` | all | Only these levels, comma-separated, such as `error,warning`. Ignores case. |
+| `--grep` | none | Only lines containing this text, ignoring case. Repeatable. |
+| `--source` | all | Only `debug-log`, `k8s` or `journal`. |
+| `--since`, `--until` | none | RFC 3339 time bounds. |
+| `--around` | none | An RFC 3339 time: the lines within `--window` of it. |
+| `--window` | `5s` with `--around`, `2s` with `--span` | How far either side of `--around`, or of a hook. |
+| `--span` | none | The lines about this event: those the index tied to it by its span ID, marked `*`, and the same unit's lines within `--window` of the hook. |
+| `--width` | `240` | Cut each line's text at this many characters. `--json` has all of it. |
+| `--limit` | `40` | Show at most this many lines. `0` shows all. |
+| `--skip` | `0` | Leave out this many lines first. |
+| `--json` | `false` | Print `recording`, `model`, `event`, `total`, `skip` and `logs`. A line has `ts`, `source`, `unit`, `entity`, `level`, `module`, `body`, `span_id` and `matched`. |
+
+### `inspect state`
+
+Prints what Juju held at a time, one scope a line: the status of each application and unit, charm config, which unit leads, and relation data. The status and config come from `juju status` at the start and from what the hooks and agents reported; relation data values only from a recording made with `--attach host`.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--model` | the only model | The model to read. |
+| `--kind` | all | Only `status`, `config`, `databag` or `leadership`. |
+| `--at` | the end of the recording | An RFC 3339 time. |
+| `--span` | none | The state when this event's hook had ended. Replaces `--at`. |
+| `--match` | all | Only scopes containing this text, ignoring case. Repeatable. |
+| `--width` | `200` | Cut each value at this many characters. `--json` has all of it. |
+| `--limit`, `--skip` | `40`, `0` | As for `logs`. |
+| `--json` | `false` | Print `recording`, `model`, `at`, `after`, `total`, `skip`, `kinds_without_records` and `state`. A value has `kind`, `scope`, `since`, `origin` and `value`. |
+
+### `inspect summary`
+
+Prints what the export's `SUMMARY.md` says, for the whole recording or a scope. It takes `--model`, `--unit`, `--since`, `--until` and `--errors-only`, as [`export`](#export) does.
+
+### `inspect diff`
+
+Compares the stack samples of two sides, and lists the functions whose cost changed the most, per hook, so that sides with different numbers of hooks compare. A side is one hook, or the hooks that the scope flags pick. With one recording, the sides are two hooks of it, given by `--span-a` and `--span-b`. With two, each side is taken from its own recording, which compares the same hook before and after a change to the charm. Functions are matched by name and file, not by line.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--span-a`, `--span-b` | none | Side `a` or `b` is this hook or span, of the first recording and of the second (the first, with one recording). |
+| `--unit`, `--name`, `--kind`, `--fail`, `--since`, `--until`, `--model` | as for `events` | Pick the hooks of each side, applied to both. |
+| `--metric` | `wall` | `wall`, `cpu` or `mem`, as for `profile`. |
+| `--detail` | `callee` | `charm`, `callee`, `ops` or `all`. |
+| `--order` | `self` | Compare each function's `self` value, or its `total`. |
+| `--limit` | `15` | Show at most this many functions. `0` uses the default. |
+| `--json` | `false` | Print `metric`, `detail`, `order`, `a` and `b` (`label`, `scope`, `profiled_hooks`, `samples`, `wall_ns_per_hook`, `cpu_ns_per_hook`, `mem_taken_bytes_per_hook`), `functions` and `changed_functions`. A function has `function`, `file`, `a`, `b`, `delta` and `class`, in nanoseconds or bytes per hook. |
 
 ## `synth`
 

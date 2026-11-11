@@ -28,9 +28,11 @@ func newInspectCmd() *cobra.Command {
 instead of reading every file of an export. Every list is bounded, says how
 much it left out, and ends with the command to go on with.
 
+  juju-lens inspect summary <recording>           the shape of a recording: outcomes, units, slowest and costliest hooks
   juju-lens inspect events <recording>            list and rank events
   juju-lens inspect event <recording> <span-id>   one event in full
   juju-lens inspect profile <recording> [view]    where the charm's time and memory went
+  juju-lens inspect diff <recording> [<recording>]  which functions cost more or less between two hooks or recordings
   juju-lens inspect memory <recording> <span-id>  memory around a hook, and the code that took it
   juju-lens inspect trace <recording> <span-id>   what a hook did along time: events, observers, calls, functions
   juju-lens inspect logs <recording>              log lines, by unit, level, text, time or event
@@ -39,7 +41,7 @@ much it left out, and ends with the command to go on with.
 A recording without an index.db, or with one from an older juju-lens, is
 indexed first.`,
 	}
-	cmd.AddCommand(newInspectEventsCmd(), newInspectEventCmd(), newInspectProfileCmd(), newInspectMemoryCmd(), newInspectTraceCmd(), newInspectLogsCmd(), newInspectStateCmd())
+	cmd.AddCommand(newInspectEventsCmd(), newInspectEventCmd(), newInspectProfileCmd(), newInspectMemoryCmd(), newInspectTraceCmd(), newInspectLogsCmd(), newInspectStateCmd(), newInspectSummaryCmd(), newInspectDiffCmd())
 	return cmd
 }
 
@@ -563,6 +565,134 @@ hooks' own calls; relation data values come only from a recording made with
 	f.IntVar(&width, "width", 0, "cut each value at this many characters (200 by default)")
 	f.IntVar(&limit, "limit", 40, "show at most this many values (0 = all)")
 	f.IntVar(&skip, "skip", 0, "leave out this many values first")
+	f.BoolVar(&asJSON, "json", false, "print JSON")
+	return cmd
+}
+
+// ----- inspect summary
+
+func newInspectSummaryCmd() *cobra.Command {
+	var (
+		model      string
+		units      []string
+		since      string
+		until      string
+		errorsOnly bool
+	)
+	cmd := &cobra.Command{
+		Use:   "summary <recording>",
+		Short: "The shape of a recording, or of part of it",
+		Long: `summary prints what the export's SUMMARY.md says, for the whole recording or
+for a scope: the time range, how many hooks ended each way, events per unit,
+the slowest events, and for profiled recordings the hooks that used the most
+CPU and took the most memory.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sf := scopeFlags{units: units, since: since, until: until}
+			sc, err := sf.scope()
+			if err != nil {
+				return err
+			}
+			src, err := openInspect(args[0], model, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			defer src.Close()
+			res, err := src.Summarize(export.Options{Units: units, Since: sc.Since, Until: sc.Until, ErrorsOnly: errorsOnly})
+			if err != nil {
+				return err
+			}
+			if err := export.WriteSummary(cmd.OutOrStdout(), res); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "next: juju-lens inspect events %s --fail problem\n      juju-lens inspect events %s --sort cpu\n", args[0], args[0])
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&model, "model", "", "the model to read (required if the recording has more than one)")
+	f.StringArrayVar(&units, "unit", nil, "only this unit or application (repeatable)")
+	f.StringVar(&since, "since", "", "RFC3339 lower time bound")
+	f.StringVar(&until, "until", "", "RFC3339 upper time bound")
+	f.BoolVar(&errorsOnly, "errors-only", false, "only hooks that errored, retried or had an RPC error, with one neighbour each side")
+	return cmd
+}
+
+// ----- inspect diff
+
+func newInspectDiffCmd() *cobra.Command {
+	var (
+		sf     scopeFlags
+		spanA  string
+		spanB  string
+		metric string
+		detail string
+		order  string
+		limit  int
+		asJSON bool
+	)
+	cmd := &cobra.Command{
+		Use:   "diff <recording-a> [<recording-b>]",
+		Short: "Which functions cost more or less between two hooks or recordings",
+		Long: `diff compares the stack samples of two sides and lists the functions whose
+cost changed the most, per hook so that sides with different numbers of hooks
+compare. A side is one hook (--span-a, --span-b) or the hooks a scope picks
+(--unit, --name, --kind, --fail, --since, --until, applied to both sides). With
+one recording, the sides are two hooks of it (--span-a and --span-b); with two,
+each side is taken from its own recording: the same hook before and after a
+change to the charm, for example.
+
+Functions are matched by name and file, not by line, which moves when a charm
+changes. --metric, --detail and --order are as for 'inspect profile'.`,
+		Example: `  juju-lens inspect diff ./before ./after --unit otelcol --name config-changed
+  juju-lens inspect diff ./rec --span-a 7bfdb120d1995d97 --span-b 5ea2a76a77e2a8be`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sc, err := sf.scope()
+			if err != nil {
+				return err
+			}
+			q := inspect.DiffQuery{Order: order, Limit: limit}
+			if q.Metric, err = inspect.ParseMetric(metric); err != nil {
+				return err
+			}
+			if q.Detail, err = inspect.ParseDetail(detail); err != nil {
+				return err
+			}
+			a, b := inspect.Side{Label: args[0], Scope: sc, Span: spanA}, inspect.Side{Label: args[len(args)-1], Scope: sc, Span: spanB}
+			if len(args) == 1 && (spanA == "" || spanB == "") {
+				return fmt.Errorf("with one recording, diff needs --span-a and --span-b: the two hooks to compare")
+			}
+			if a.Src, err = openInspect(args[0], sf.model, cmd.ErrOrStderr()); err != nil {
+				return err
+			}
+			defer a.Src.Close()
+			b.Src = a.Src
+			if len(args) == 2 {
+				if b.Src, err = openInspect(args[1], sf.model, cmd.ErrOrStderr()); err != nil {
+					return err
+				}
+				defer b.Src.Close()
+			}
+			d, err := inspect.Compare(a, b, q)
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return d.WriteJSON(cmd.OutOrStdout())
+			}
+			d.WriteText(cmd.OutOrStdout())
+			return nil
+		},
+	}
+	sf.add(cmd)
+	f := cmd.Flags()
+	f.StringVar(&spanA, "span-a", "", "side a is this hook or span of the first recording")
+	f.StringVar(&spanB, "span-b", "", "side b is this hook or span of the second recording (or of the first, with one recording)")
+	f.StringVar(&metric, "metric", "wall", "what to weigh by: wall, cpu or mem (memory taken)")
+	f.StringVar(&detail, "detail", "callee", "how much code to compare: charm, callee, ops or all")
+	f.StringVar(&order, "order", "self", "compare each function's self value or its total (what it called counts)")
+	f.IntVar(&limit, "limit", 15, "show at most this many functions (0 = 15)")
 	f.BoolVar(&asJSON, "json", false, "print JSON")
 	return cmd
 }

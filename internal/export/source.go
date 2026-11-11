@@ -269,3 +269,7 @@ func (s *Source) RecordingEnd() time.Time {
 	}
 	return end
 }
+
+// Summarize is the export's Result for opts: its summary counts, and every
+// event in scope with its detail. It is what WriteSummary renders.
+func (s *Source) Summarize(opts Options) (*Result, error) { return s.build(opts) }

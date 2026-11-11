@@ -539,3 +539,69 @@ func TestInspectStateWithoutDatabags(t *testing.T) {
 		t.Errorf("want a note pointing at --attach host, got %v\n%s", err, out)
 	}
 }
+
+func TestInspectDiffNamesTheFunctionsThatChanged(t *testing.T) {
+	dir := opsRecording(t)
+	diff := func(args ...string) inspect.Diff {
+		t.Helper()
+		out, _, err := runInspect(t, append([]string{"diff", "--json"}, args...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var d inspect.Diff
+		if err := json.Unmarshal([]byte(out), &d); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	// Two hooks of one recording: the retried config-changed took about
+	// three times the time of the first, in the same functions.
+	d := diff(dir, "--span-a", "7bfdb120d1995d97", "--span-b", "5ea2a76a77e2a8be")
+	if d.A.Hooks != 1 || d.B.Hooks != 1 || len(d.Functions) == 0 {
+		t.Fatalf("diff: %+v", d)
+	}
+	top := d.Functions[0]
+	if top.Delta <= 0 || top.B <= top.A {
+		t.Errorf("biggest change %+v: the second hook is the slower", top)
+	}
+	for i := 1; i < len(d.Functions); i++ {
+		if abs(d.Functions[i].Delta) > abs(d.Functions[i-1].Delta) {
+			t.Errorf("row %d changed more than row %d", i, i-1)
+		}
+	}
+
+	// A recording against itself changes nothing, per hook, whatever the
+	// scope's size.
+	same := diff(dir, dir, "--unit", "otelcol/0", "--name", "config-changed")
+	if same.Total != 0 || same.A.Hooks != 2 {
+		t.Errorf("a recording against itself: %d functions differ, %d hooks", same.Total, same.A.Hooks)
+	}
+	if _, _, err := runInspect(t, "diff", dir); err == nil || !strings.Contains(err.Error(), "--span-a") {
+		t.Errorf("one recording needs two spans: %v", err)
+	}
+}
+
+func abs(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func TestInspectSummaryScopes(t *testing.T) {
+	dir := opsRecording(t)
+	all, _, err := runInspect(t, "summary", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, _, err := runInspect(t, "summary", dir, "--unit", "otelcol/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(all, "6 events") || !strings.Contains(one, "2 events") || strings.Contains(one, "otelcol/0") {
+		t.Errorf("--unit otelcol/1 should summarize its 2 events only:\n%s", one)
+	}
+	if !strings.Contains(all, "## Costliest hooks") || !strings.Contains(all, "next: juju-lens inspect events") {
+		t.Errorf("summary lacks the cost section or the next step:\n%s", all)
+	}
+}
