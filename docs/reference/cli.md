@@ -299,6 +299,26 @@ Compares the stack samples of two sides, and lists the functions whose cost chan
 | `--limit` | `15` | Show at most this many functions. `0` uses the default. |
 | `--json` | `false` | Print `metric`, `detail`, `order`, `a` and `b` (`label`, `scope`, `profiled_hooks`, `samples`, `wall_ns_per_hook`, `cpu_ns_per_hook`, `mem_taken_bytes_per_hook`), `functions` (cut by `--limit`) and `changed_functions` (how many differ in all). A function has `function`, `a`, `b`, `delta` (b minus a), `class` (`charm`, `ops` or `other`) and, when set, `file`; values are nanoseconds or bytes per hook. |
 
+## `skills`
+
+```text
+juju-lens skills list
+juju-lens skills show <name>
+juju-lens skills install [name...] --dir <directory>
+```
+
+Prints or installs the instructions for AI agents that are built into the binary, as `SKILL.md` files with a `name` and a `description` in their frontmatter, so that they describe the commands this version has. There is one skill, `investigate-a-recording`: the path through `juju-lens inspect`, and what its numbers mean.
+
+| Command | Meaning |
+|---|---|
+| `list` | Each skill's name and description. |
+| `show <name>` | Prints the skill's `SKILL.md`. |
+| `install` | Writes the named skills, or all of them, as `<dir>/<name>/SKILL.md`. |
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--dir` | none | With `install`: the directory to write under. Required; which directory an agent reads skills from depends on the agent, such as `~/.claude/skills` for Claude Code. A leading `~/` is the home directory. |
+
 ## `synth`
 
 ```text

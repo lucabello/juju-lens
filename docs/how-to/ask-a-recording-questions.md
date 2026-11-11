@@ -2,6 +2,8 @@
 
 Use this guide to find a hook of a recording that went wrong or cost a lot, and read the code and logs behind it, with `juju-lens inspect`. It answers in short text, so that you, or an AI agent with a shell, can ask for what you need. `inspect events` lists every kind of event, which are mostly hooks.
 
+To let an AI agent do this, install the skill that comes with `juju-lens` into the directory your agent reads skills from, for example `juju-lens skills install --dir ~/.claude/skills`. It describes this path and what the numbers mean, and matches the commands of the binary that installs it.
+
 ## Prerequisites
 
 - `juju-lens` installed. See [install](../../README.md#install).

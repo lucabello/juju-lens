@@ -37,6 +37,7 @@ func newRootCmd(bi BuildInfo) *cobra.Command {
 		newIndexCmd(),
 		newViewCmd(),
 		newExportCmd(),
+		newSkillsCmd(),
 		newInspectCmd(),
 		newProbeCmd(bi),
 	)
