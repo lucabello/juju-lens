@@ -109,7 +109,7 @@ A hook that hasn't reached `continue` yet and matches none of the rules is still
 
 The default view marks errored, retried, and RPC warning hooks. Capture gaps and interrupted hooks describe the recording, not the charm, so they're only marked in verbose mode.
 
-The same classification appears in `juju-lens export`. See [how to export a recording for an agent](../how-to/export-for-an-agent.md).
+The same classification appears in `juju-lens inspect events`, whose `--fail` flag picks events by how they ended. See [how to ask a recording questions](../how-to/ask-a-recording-questions.md).
 
 ## Hooks the tap missed
 

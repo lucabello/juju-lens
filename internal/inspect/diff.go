@@ -9,14 +9,14 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/narrative"
+	"github.com/lucabello/juju-lens/internal/query"
 )
 
 // Side is one half of a diff: the hooks of a recording that a scope picks,
 // or one hook.
 type Side struct {
-	Src   *export.Source
+	Src   *query.Source
 	Label string // the recording as the user named it
 	Scope Scope
 	Span  string // one hook, by span id; replaces Scope

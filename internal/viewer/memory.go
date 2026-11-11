@@ -103,17 +103,6 @@ func (st *memState) paint(cells []rune, t0, t1 time.Time, mark rune) {
 	}
 }
 
-// window is the readings from the window the view covers.
-func (st *memState) window(pts []narrative.MemPoint) []narrative.MemPoint {
-	var out []narrative.MemPoint
-	for _, p := range pts {
-		if !p.T.Before(st.From) && !p.T.After(st.To) {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 // memRow is what happened to one series of memory readings.
 type memRow struct {
 	name, what          string // the series, and what it is in words
@@ -121,19 +110,6 @@ type memRow struct {
 	shape               string
 	lo, hi              int64
 	cache               int64 // page cache at the end, when the cgroup says
-}
-
-// rel says when t was relative to the hook: "2.8 s before the hook", "1.2 s
-// into the hook", "4.0 s after the hook ended".
-func (st *memState) rel(t time.Time) string {
-	d := func(x time.Duration) string { return fmt.Sprintf("%.1f s", x.Seconds()) }
-	switch {
-	case t.Before(st.HookStart):
-		return d(st.HookStart.Sub(t)) + " before the hook"
-	case t.After(st.HookEnd):
-		return d(t.Sub(st.HookEnd)) + " after the hook ended"
-	}
-	return d(t.Sub(st.HookStart)) + " into the hook"
 }
 
 // changeWords says how a series moved, in a sentence.

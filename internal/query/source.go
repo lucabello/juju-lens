@@ -1,4 +1,4 @@
-package export
+package query
 
 import (
 	"fmt"
@@ -47,7 +47,7 @@ func OpenSource(dir, model string) (*Source, error) {
 		return nil, fmt.Errorf("loading spans: %w", err)
 	}
 	s := &Source{
-		Recording: RecordingInfo{Dir: dir, Controller: man.Controller.Name, Started: man.Started, Ended: man.Ended},
+		Recording: RecordingInfo{Dir: dir, Controller: man.Controller.Name, AttachMode: man.AttachMode, Started: man.Started, Ended: man.Ended},
 		Model:     mm,
 		db:        db,
 		spans:     spans,
@@ -86,7 +86,7 @@ func (s *Source) Event(spanID string) (narrative.Event, bool) {
 
 // Detail is everything the export knows of ev: the details/<span_id>.json.
 func (s *Source) Detail(ev narrative.Event) EventDetail {
-	return buildEventDetail(s.db, s.Model.ID, ev, s.spanByID[ev.SpanID], s.ops, false)
+	return buildEventDetail(s.db, s.Model.ID, ev, s.spanByID[ev.SpanID], s.ops)
 }
 
 // HookCost is what the charm's init and observers cost in one hook, added
@@ -248,32 +248,6 @@ func (s *Source) EventLogs(ev narrative.Event, window time.Duration, limit int) 
 	return s.db.LogsForSpan(s.Model.ID, ev.SpanID, ev.Unit, ev.TS, ev.TS.Add(ev.Dur), window, limit)
 }
 
-// State returns the value each scope of a kind of snapshot held at time at:
-// "app-status", "unit-status", "agent-status", "databag", "config" or
-// "leadership".
-func (s *Source) State(kind string, at time.Time) ([]index.SnapshotRow, error) {
-	return s.db.LatestPerScopeAsOf(s.Model.ID, kind, at)
-}
-
-// RecordingEnd is the time the recording ended, or the end of its last event
-// when the manifest doesn't say.
-func (s *Source) RecordingEnd() time.Time {
-	if !s.Recording.Ended.IsZero() {
-		return s.Recording.Ended
-	}
-	var end time.Time
-	for _, ev := range s.events {
-		if t := ev.TS.Add(ev.Dur); t.After(end) {
-			end = t
-		}
-	}
-	return end
-}
-
-// Summarize is the export's Result for opts: its summary counts, and every
-// event in scope with its detail. It is what WriteSummary renders.
-func (s *Source) Summarize(opts Options) (*Result, error) { return s.build(opts) }
-
 // SpanCosts is what charm init and each observer of the hook ev cost, in the
 // order they ran, without the rest of its detail.
 func (s *Source) SpanCosts(ev narrative.Event) []SpanCost {
@@ -283,4 +257,36 @@ func (s *Source) SpanCosts(ev narrative.Event) []SpanCost {
 	d := EventDetail{Ops: s.ops.Trees(ev.OpsSpans)}
 	addCosts(s.db, &d, s.ops)
 	return d.Costs
+}
+
+// topFrame names where the first of stacks was in the charm's own code, or,
+// with none of it on the stack, its innermost frame.
+func topFrame(stacks []StackDetail) string {
+	if len(stacks) == 0 {
+		return ""
+	}
+	if f := stacks[0].charmFrame; f != "" {
+		return f
+	}
+	if len(stacks[0].Frames) > 0 {
+		return stacks[0].Frames[0]
+	}
+	return ""
+}
+
+// hookCost is what the charm's init and observers cost in one hook, added up.
+type hookCost struct {
+	cpuMS     float64
+	memGrowth int64
+	rssPeak   int64
+}
+
+func (d *EventDetail) cost() hookCost {
+	var c hookCost
+	for _, sc := range d.Costs {
+		c.cpuMS += sc.CPUMS
+		c.memGrowth += sc.StackMemGrowthBytes
+		c.rssPeak = max(c.rssPeak, sc.RSSPeakBytes)
+	}
+	return c
 }

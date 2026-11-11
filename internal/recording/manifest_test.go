@@ -93,7 +93,6 @@ func TestLayoutPathsAreDeterministic(t *testing.T) {
 		{"k8s", l.K8sDir("m1"), "/tmp/rec/raw/k8s/m1"},
 		{"machine", l.MachineDir("controller", "0"), "/tmp/rec/raw/machine/controller/0"},
 		{"snap", l.SnapDir("controller", "0"), "/tmp/rec/raw/snap/controller/0"},
-		{"derived", l.DerivedDir(), "/tmp/rec/derived"},
 		{"index", l.IndexDB(), "/tmp/rec/index.db"},
 		{"calls", l.RPCFileFor("default")("2026-07-03T14"), "/tmp/rec/raw/rpc/default/calls-2026-07-03T14.jsonl"},
 	}
@@ -110,7 +109,7 @@ func TestLayoutInitAndExists(t *testing.T) {
 	if err := l.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	for _, d := range []string{l.Root, l.RawDir(), l.DerivedDir()} {
+	for _, d := range []string{l.Root, l.RawDir()} {
 		st, err := os.Stat(d)
 		if err != nil || !st.IsDir() {
 			t.Errorf("expected directory at %s (err=%v)", d, err)

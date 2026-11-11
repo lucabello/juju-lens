@@ -1,6 +1,6 @@
 // Package inspect answers questions about a recording as bounded text, or as
 // JSON, for an agent (or a person) that would rather ask than read every file
-// of an export. It sits on export.Source, so it agrees with the export on
+// of an export. It sits on query.Source, so it agrees with the export on
 // what a hook cost.
 package inspect
 
@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/narrative"
+	"github.com/lucabello/juju-lens/internal/query"
 )
 
 // Scope picks events. A zero Scope picks them all. Within one field the
@@ -18,17 +18,13 @@ import (
 type Scope struct {
 	Units []string  // a unit ("grafana/0") or an application ("grafana")
 	Names []string  // part of the event name, such as "config-changed"; case doesn't matter
-	Kinds []string  // "hook", "action", "status", ...; see export.KindLabel
 	Fail  []string  // a fail state, or "problem" for any but "none"
 	Since time.Time // events from this time on
 	Until time.Time // events up to this time
 }
 
 // FailStates are the values Scope.Fail takes besides "problem".
-var FailStates = []string{"none", "errored", "retried", "rpc-warn", "interrupted", "lost-continue"}
-
-// EventKinds are the values Scope.Kinds takes.
-var EventKinds = []string{"hook", "action", "status", "relation", "leader", "secret", "settle"}
+var FailStates = []string{"none", "errored", "retried", "interrupted", "rpc-warn", "lost-continue"}
 
 func oneOf(v string, set []string) bool {
 	for _, s := range set {
@@ -47,24 +43,16 @@ func (sc Scope) Validate() error {
 			return fmt.Errorf("unknown --fail %q (want problem or one of %s)", f, strings.Join(FailStates, ", "))
 		}
 	}
-	for _, k := range sc.Kinds {
-		if !oneOf(k, EventKinds) {
-			return fmt.Errorf("unknown --kind %q (want one of %s)", k, strings.Join(EventKinds, ", "))
-		}
-	}
 	return nil
 }
 
 // Events returns the events of src that the scope picks, in time order.
-func (sc Scope) Events(src *export.Source) ([]narrative.Event, error) {
+func (sc Scope) Events(src *query.Source) ([]narrative.Event, error) {
 	if err := sc.Validate(); err != nil {
 		return nil, err
 	}
 	var out []narrative.Event
-	for _, ev := range src.Events(export.Options{Units: sc.Units, Since: sc.Since, Until: sc.Until}) {
-		if len(sc.Kinds) > 0 && !oneOf(export.KindLabel(ev.Kind), sc.Kinds) {
-			continue
-		}
+	for _, ev := range src.Events(query.Options{Units: sc.Units, Since: sc.Since, Until: sc.Until}) {
 		if len(sc.Names) > 0 && !containsFold(ev.Summary, sc.Names) {
 			continue
 		}

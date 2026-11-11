@@ -22,7 +22,7 @@ To build from source, you need Go 1.25 or newer and [`just`](https://github.com/
 just build   # builds ./bin/juju-lens, with both probes embedded
 ```
 
-`go install github.com/lucabello/juju-lens/cmd/juju-lens@latest` builds `juju-lens` without the embedded probes, because they are built first. That build can view and export recordings, record with `--attach none`, and record the host it runs on with `--attach host`; it can't upload a probe, so the default `--attach unit` and `--ssh-target` need a release or `just build`.
+`go install github.com/lucabello/juju-lens/cmd/juju-lens@latest` builds `juju-lens` without the embedded probes, because they are built first. That build can view, inspect and export recordings, record with `--attach none`, and record the host it runs on with `--attach host`; it can't upload a probe, so the default `--attach unit` and `--ssh-target` need a release or `just build`.
 
 What recording needs depends on what you capture, chosen with `record --attach`:
 

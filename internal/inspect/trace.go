@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/narrative"
+	"github.com/lucabello/juju-lens/internal/query"
 )
 
 // TraceQuery asks for the trace of one process of a hook.
@@ -58,7 +58,7 @@ type TraceReport struct {
 }
 
 // TraceOf builds the trace of ev.
-func TraceOf(src *export.Source, rec string, ev narrative.Event, q TraceQuery) (*TraceReport, error) {
+func TraceOf(src *query.Source, rec string, ev narrative.Event, q TraceQuery) (*TraceReport, error) {
 	if q.Attempt < 1 {
 		return nil, fmt.Errorf("--attempt counts from 1")
 	}

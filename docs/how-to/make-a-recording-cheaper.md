@@ -20,7 +20,7 @@ Stack samples were a third of the raw data of a busy recording and almost half o
 juju-lens record my-capture --model cos --profile=false
 ```
 
-A recording of a settled model with the samples off was a quarter smaller on disk. Without them the viewer's profile and the export's `top_stacks` are empty: use this when you want to know which hook did something, not which code.
+A recording of a settled model with the samples off was a quarter smaller on disk. Without them the viewer's profile and `juju-lens inspect profile` have nothing to show: use this when you want to know which hook did something, not which code.
 
 ## Stop earlier
 
@@ -36,22 +36,15 @@ juju-lens record my-capture --model cos --max-duration 30m --max-size 500000000
 
 `--logs=false` turns off `juju debug-log`, workload logs and machine logs. In the recording of a six-unit deploy, logs were under 1% of the raw data, but in a host recording of a CI run they were a third. `--debug-log=false` also ends one `juju` process of about 110 MiB, and `--machine-log` runs `juju ssh … journalctl` for each machine. See the [command line reference](../reference/cli.md#record) for each switch.
 
-## Upload the raw data, rebuild the index
+## Upload the packed recording
 
-The index is up to as large as the raw data, and compresses worse: equal in the deploys, 60% to 75% in a settled model, where `raw/` compressed to 1.1 MB and `index.db` to 1.7 MB. Leaving `index.db` out of that recording's artifact would have taken it from 2.8 MB to 1.1 MB. Leave it out and rebuild it where you read the recording:
-
-```bash
-tar -czf recording.tar.gz --exclude=index.db -C ./recording .
-```
-
-Then unpack it and rebuild the index:
+The index is up to as large as the raw data, and compresses worse: equal in the deploys, 60% to 75% in a settled model, where `raw/` compressed to 1.1 MB and `index.db` to 1.7 MB. `juju-lens export` packs a recording without its index, which is rebuilt where you read it:
 
 ```bash
-mkdir recording && tar -xzf recording.tar.gz -C recording
-juju-lens index ./recording
+juju-lens export ./recording --output recording.tar.gz
 ```
 
-[How to rebuild a recording's index](rebuild-the-index.md) describes when to rebuild it. The viewer and the export need the index.
+[How to share a recording](share-a-recording.md) describes reading it again.
 
 ## Check what it saved
 

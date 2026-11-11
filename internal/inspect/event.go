@@ -6,17 +6,17 @@ import (
 	"io"
 	"strings"
 
-	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/narrative"
+	"github.com/lucabello/juju-lens/internal/query"
 )
 
 // EventSections are the parts of an event that WriteEvent can leave out.
-var EventSections = []string{"statuses", "ops", "stacks", "costs", "databags", "config"}
+var EventSections = []string{"statuses", "ops", "stacks", "costs"}
 
 // FindEvent resolves the span id a user gives to an event. An id from a
 // profile, which names a span inside a hook (an observer, charm init), finds
 // the hook that contains it; inside says so.
-func FindEvent(src *export.Source, recDir, spanID string) (ev narrative.Event, inside bool, err error) {
+func FindEvent(src *query.Source, recDir, spanID string) (ev narrative.Event, inside bool, err error) {
 	if ev, ok := src.Event(spanID); ok {
 		return ev, false, nil
 	}
@@ -29,7 +29,7 @@ func FindEvent(src *export.Source, recDir, spanID string) (ev narrative.Event, i
 // WriteEvent prints one event in full: as the report narrates it, or as the
 // JSON of its details file. sections, when not empty, keeps only those parts
 // of the event besides its heading and failure explanation.
-func WriteEvent(w io.Writer, src *export.Source, ev narrative.Event, recDir string, sections []string, asJSON bool) error {
+func WriteEvent(w io.Writer, src *query.Source, ev narrative.Event, recDir string, sections []string, asJSON bool) error {
 	for _, s := range sections {
 		if !oneOf(s, EventSections) {
 			return fmt.Errorf("unknown --section %q (want one of %s)", s, strings.Join(EventSections, ", "))
@@ -49,11 +49,8 @@ func WriteEvent(w io.Writer, src *export.Source, ev narrative.Event, recDir stri
 	if !keep("costs") {
 		d.Costs = nil
 	}
-	if !keep("databags") {
-		d.Databags = nil
-	}
-	if !keep("config") {
-		d.Config = nil
+	if len(sections) > 0 {
+		d.Databags, d.Config = nil, nil
 	}
 	if asJSON {
 		enc := json.NewEncoder(w)
@@ -61,7 +58,7 @@ func WriteEvent(w io.Writer, src *export.Source, ev narrative.Event, recDir stri
 		enc.SetEscapeHTML(false)
 		return enc.Encode(d)
 	}
-	if err := export.WriteEventMarkdown(w, &d); err != nil {
+	if err := query.WriteEvent(w, &d); err != nil {
 		return err
 	}
 	if len(d.Costs) > 0 {

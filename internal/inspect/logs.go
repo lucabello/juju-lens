@@ -8,8 +8,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/index"
+	"github.com/lucabello/juju-lens/internal/query"
 )
 
 // LogsQuery picks log lines. A zero query picks them all.
@@ -58,7 +58,7 @@ type LogList struct {
 }
 
 // ListLogs runs q against src.
-func ListLogs(src *export.Source, q LogsQuery) (LogList, error) {
+func ListLogs(src *query.Source, q LogsQuery) (LogList, error) {
 	var rows []index.LogRow
 	list := LogList{Recording: src.Recording.Dir, Model: src.Model.Name, Logs: []LogRow{}, width: q.Width}
 	for _, l := range q.Levels {

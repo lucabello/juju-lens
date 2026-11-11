@@ -1,4 +1,4 @@
-package export
+package query
 
 import (
 	"fmt"
@@ -10,58 +10,10 @@ import (
 	"github.com/lucabello/juju-lens/internal/recording"
 )
 
-// WriteMarkdown renders r as a narrated Markdown report — the "paste into an
-// LLM chat, or read top to bottom" format. Events become headings carrying
-// their failure explanation, statuses, and databag/config diffs; log lines
-// between two events render as plain indented lines so the document reads as
-// one story instead of fragmenting into hundreds of headings.
-func WriteMarkdown(w io.Writer, r *Result) error {
-	b := &strings.Builder{}
-
-	fmt.Fprintf(b, "# juju-lens export — %s / %s\n\n", orDash(r.Recording.Controller), orDash(r.Model.Name))
-	fmt.Fprintf(b, "Recording: %s\n", r.Recording.Dir)
-	if !r.Recording.Started.IsZero() {
-		ended := "(in progress)"
-		if !r.Recording.Ended.IsZero() {
-			ended = fmtTS(r.Recording.Ended)
-		}
-		fmt.Fprintf(b, "Captured: %s → %s\n", fmtTS(r.Recording.Started), ended)
-	}
-	fmt.Fprintf(b, "Scope: %s\n\n", describeFilters(r.Filters))
-
-	fmt.Fprintf(b, "## Summary\n\n")
-	fmt.Fprintf(b, "- %d events (%d errored, %d retried, %d rpc-warn)\n",
-		r.Summary.TotalEvents, r.Summary.ErroredEvents, r.Summary.RetriedEvents, r.Summary.RPCWarnEvents)
-	fmt.Fprintf(b, "- %d log lines\n", r.Summary.TotalLogs)
-	if len(r.Summary.UnitsInScope) > 0 {
-		fmt.Fprintf(b, "- units in scope: %s\n", strings.Join(r.Summary.UnitsInScope, ", "))
-	}
-	if !r.Summary.Start.IsZero() {
-		fmt.Fprintf(b, "- time range: %s → %s\n", fmtTS(r.Summary.Start), fmtTS(r.Summary.End))
-	}
-	b.WriteByte('\n')
-
-	fmt.Fprintf(b, "## Timeline\n\n")
-	if len(r.Items) == 0 {
-		fmt.Fprintf(b, "(no events or logs matched the given filters)\n")
-	}
-	for _, it := range r.Items {
-		switch it.Kind {
-		case "event":
-			writeEventSection(b, it.Event)
-		case "log":
-			writeLogLine(b, it.Log)
-		}
-	}
-
-	_, err := io.WriteString(w, b.String())
-	return err
-}
-
-// WriteEventMarkdown renders one event as the report does: its heading,
+// WriteEvent renders one event as text: its heading,
 // failure explanation, statuses, charm-side tree, top stacks, and databag and
 // config changes.
-func WriteEventMarkdown(w io.Writer, ev *EventDetail) error {
+func WriteEvent(w io.Writer, ev *EventDetail) error {
 	b := &strings.Builder{}
 	writeEventSection(b, ev)
 	_, err := io.WriteString(w, b.String())
@@ -77,9 +29,6 @@ func writeEventSection(b *strings.Builder, ev *EventDetail) {
 		heading += " [RUNNING]"
 	}
 	fmt.Fprintf(b, "%s\n", heading)
-	if ev.Context {
-		fmt.Fprintf(b, "*(context: shown around a nearby failure, not itself a failure)*\n")
-	}
 	if ev.DurationMS > 0 {
 		fmt.Fprintf(b, "duration: %dms\n", ev.DurationMS)
 	}
@@ -207,43 +156,4 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
-}
-
-func describeFilters(f Options) string {
-	var parts []string
-	if len(f.Units) > 0 {
-		parts = append(parts, "units=["+strings.Join(f.Units, ", ")+"]")
-	}
-	if !f.Since.IsZero() {
-		parts = append(parts, "since="+f.Since.Format(time.RFC3339))
-	}
-	if !f.Until.IsZero() {
-		parts = append(parts, "until="+f.Until.Format(time.RFC3339))
-	}
-	if f.ErrorsOnly {
-		parts = append(parts, "errors-only=true")
-	}
-	if len(parts) == 0 {
-		return "(none — full recording)"
-	}
-	return strings.Join(parts, ", ")
-}
-
-func writeLogLine(b *strings.Builder, lg *LogDetail) {
-	who := lg.Unit
-	if who == "" {
-		who = lg.Entity
-	}
-	src := lg.Source
-	if src == "" {
-		src = "juju"
-	}
-	if who != "" {
-		src = fmt.Sprintf("%s(%s)", src, who)
-	}
-	level := lg.Level
-	if level == "" {
-		level = "-"
-	}
-	fmt.Fprintf(b, "    %s  [%s]  %-8s  %s\n", fmtTS(lg.TS), src, level, lg.Body)
 }

@@ -7,8 +7,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/narrative"
+	"github.com/lucabello/juju-lens/internal/query"
 )
 
 // Sorts for ListEvents.
@@ -27,15 +27,14 @@ type EventsQuery struct {
 }
 
 // EventRow is one line of the list. Its cost fields are those of
-// export.HookCost, which are empty for a hook that wasn't profiled.
+// query.HookCost, which are empty for a hook that wasn't profiled.
 type EventRow struct {
 	TS         time.Time `json:"ts"`
 	Unit       string    `json:"unit,omitempty"`
-	Kind       string    `json:"kind"`
 	Name       string    `json:"name"`
 	Fail       string    `json:"fail"`
 	DurationMS int64     `json:"duration_ms,omitempty"`
-	export.HookCost
+	query.HookCost
 	SpanID string `json:"span_id"`
 }
 
@@ -50,7 +49,7 @@ type EventList struct {
 }
 
 // ListEvents runs q against src.
-func ListEvents(src *export.Source, q EventsQuery) (EventList, error) {
+func ListEvents(src *query.Source, q EventsQuery) (EventList, error) {
 	switch q.Sort {
 	case "":
 		q.Sort = SortTime
@@ -62,8 +61,8 @@ func ListEvents(src *export.Source, q EventsQuery) (EventList, error) {
 	if err != nil {
 		return EventList{}, err
 	}
-	costs := map[string]export.HookCost{}
-	cost := func(ev narrative.Event) export.HookCost {
+	costs := map[string]query.HookCost{}
+	cost := func(ev narrative.Event) query.HookCost {
 		c, ok := costs[ev.SpanID]
 		if !ok {
 			c = src.Cost(ev)
@@ -86,7 +85,7 @@ func ListEvents(src *export.Source, q EventsQuery) (EventList, error) {
 	}
 	for _, ev := range events[lo:hi] {
 		list.Events = append(list.Events, EventRow{
-			TS: ev.TS, Unit: ev.Unit, Kind: export.KindLabel(ev.Kind), Name: ev.Summary,
+			TS: ev.TS, Unit: ev.Unit, Name: ev.Summary,
 			Fail: ev.Fail.String(), DurationMS: ev.Dur.Milliseconds(),
 			HookCost: cost(ev), SpanID: ev.SpanID,
 		})
@@ -142,14 +141,14 @@ func durMS(ms float64) string {
 	return narrative.FormatOpsDur(time.Duration(ms * float64(time.Millisecond)))
 }
 
-func cpuCell(c export.HookCost) string {
+func cpuCell(c query.HookCost) string {
 	if !c.Profiled {
 		return "-"
 	}
 	return durMS(c.CPUMS)
 }
 
-func memCell(c export.HookCost) string {
+func memCell(c query.HookCost) string {
 	if !c.Profiled {
 		return "-"
 	}

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/narrative"
+	"github.com/lucabello/juju-lens/internal/query"
 )
 
 // MemoryRow is what happened to one series of readings.
@@ -55,7 +55,7 @@ type MemoryReport struct {
 
 // MemoryOf reads the memory around ev. It fails, saying what to do, for a
 // hook with no memory readings.
-func MemoryOf(src *export.Source, rec string, ev narrative.Event) (*MemoryReport, error) {
+func MemoryOf(src *query.Source, rec string, ev narrative.Event) (*MemoryReport, error) {
 	m, err := src.Memory(ev)
 	if err != nil {
 		return nil, err

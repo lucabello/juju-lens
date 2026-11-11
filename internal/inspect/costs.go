@@ -7,8 +7,8 @@ import (
 	"sort"
 	"text/tabwriter"
 
-	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/narrative"
+	"github.com/lucabello/juju-lens/internal/query"
 )
 
 // Ways to group costs.
@@ -55,7 +55,7 @@ type CostList struct {
 }
 
 // SumCosts runs q against src.
-func SumCosts(src *export.Source, q CostsQuery) (CostList, error) {
+func SumCosts(src *query.Source, q CostsQuery) (CostList, error) {
 	switch q.By {
 	case "":
 		q.By = ByObserver

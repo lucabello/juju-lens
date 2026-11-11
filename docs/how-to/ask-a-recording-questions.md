@@ -1,15 +1,35 @@
 # How to ask a recording questions
 
-Use this guide to find a hook of a recording that went wrong or cost a lot, and read the code, logs and state behind it, with `juju-lens inspect`. It answers in short text, so that you, or an AI agent with a shell, can ask for what you need instead of reading every file of an [export](export-for-an-agent.md). `inspect events` lists every kind of event, which are mostly hooks.
+Use this guide to find a hook of a recording that went wrong or cost a lot, and read the code and logs behind it, with `juju-lens inspect`. It answers in short text, so that you, or an AI agent with a shell, can ask for what you need. `inspect events` lists every kind of event, which are mostly hooks.
 
 ## Prerequisites
 
 - `juju-lens` installed. See [install](../../README.md#install).
-- A recording made with `--attach unit`, the default, for costs and profiles. Events and failures are in any recording.
+- A recording made with `--attach unit`, the default, for costs, profiles and traces.
 - The recording doesn't need an index. `inspect` builds it the first time and says so; it can take a while for a large recording.
 - `jq`, for the last step.
 
 The examples use a recording of an `opentelemetry-collector-k8s` unit, at `./rec`. Your span IDs will differ. To try the commands without a controller, [generate a synthetic recording](generate-a-synthetic-recording.md) and use its path instead of `./rec`.
+
+## Start with the summary
+
+`summary` says when the recording was taken and with what, how many events each unit ran and how they ended, the slowest events, and the hooks that used the most CPU in the charm's code (excerpt):
+
+```bash
+juju-lens inspect summary ./rec
+```
+
+```text
+recording ./rec, model expt, controller k8s
+captured 2026-11-11 17:54:31 → 18:03:18 UTC, recorded with --attach unit
+135 events, 531 log lines; ended: retried 4, none 131
+
+units:
+  alertmanager/0      21 events, 1 not clean
+  grafana/0           36 events, 1 not clean
+```
+
+Add `--unit`, `--since` or `--until` to summarize part of it.
 
 ## List the hooks that cost the most
 
@@ -51,7 +71,7 @@ Pass the span ID to `event`:
 juju-lens inspect event ./rec e39d3d6c60330477
 ```
 
-It prints what the export's report has for that hook: why it failed, the statuses it set, what the charm did in it, and its heaviest stacks. Use `--section` to print only some of that, for example `--section statuses,stacks`.
+It prints why the hook failed, the statuses it set, what the charm did in it, and its heaviest stacks. Use `--section` to print only some of that, for example `--section statuses,stacks`.
 
 ## Find the code behind the time
 
@@ -109,16 +129,15 @@ The trace starts like this (excerpt):
 
 A hook that was retried ran in more than one process; `--attempt 2` traces the second.
 
-## Read the logs and the state around it
+## Read the logs around it
 
-List the log lines about a hook, with `*` before the source of the ones the index tied to it by its span ID, and the state Juju held when it ended:
+List the log lines about a hook, with `*` before the source of the ones the index tied to it by its span ID:
 
 ```bash
 juju-lens inspect logs ./rec --span e39d3d6c60330477 --window 5s
-juju-lens inspect state ./rec --span e39d3d6c60330477 --kind status
 ```
 
-Filter logs further with `--unit`, `--level`, `--grep` and the time bounds. `state` shows relation data only for recordings made with `--attach host`.
+Filter logs further with `--unit`, `--level`, `--grep` and the time bounds.
 
 ## Compare two hooks or two recordings
 
@@ -142,15 +161,13 @@ A      B      CHANGE  FUNCTION
 450ms  1.1s   +630ms  dump (yaml/__init__.py)
 ```
 
-For the shape of a whole recording first, `juju-lens inspect summary ./rec` prints what `SUMMARY.md` of the export has, for any scope.
-
 ## If a command finds nothing
 
-A recording with several models needs `--model`. A recording made with `--attach host` alone, or with `--profile=false`, has events but no stack samples, so `profile` stops with an error that says so; `memory` and `trace` need a hook recorded with `--attach unit` and stop the same way. `logs` prints `no log lines match` when the recording holds none, and `state` says when there is no relation data, which only a recording made with `--attach host` has.
+A recording with several models needs `--model`. A recording made with `--attach host` alone, or with `--profile=false`, has events but no stack samples, so `profile` stops with an error that says so; `memory` and `trace` need a hook recorded with `--attach unit` and stop the same way. `logs` prints `no log lines match` when the recording holds none.
 
 ## Use JSON
 
-Every command except `summary` takes `--json`. For example, to pick the span of the costliest hook in a script:
+Every command takes `--json`. For example, to pick the span of the costliest hook in a script:
 
 ```bash
 juju-lens inspect events ./rec --sort cpu --limit 1 --json | jq -r '.events[0].span_id'

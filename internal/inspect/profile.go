@@ -8,8 +8,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/narrative"
+	"github.com/lucabello/juju-lens/internal/query"
 )
 
 // Views of a profile.
@@ -87,7 +87,7 @@ func metricFlag(m narrative.Metric) string {
 type ProfileView struct {
 	q       ProfileQuery
 	rec     string
-	src     *export.Source
+	src     *query.Source
 	p       *narrative.Profile
 	scope   string
 	total   narrative.Value
@@ -97,7 +97,7 @@ type ProfileView struct {
 
 // OpenProfile gathers the stacks q's scope covers and the view's inputs. It
 // fails, with what to do, when there are none.
-func OpenProfile(src *export.Source, rec string, q ProfileQuery) (*ProfileView, error) {
+func OpenProfile(src *query.Source, rec string, q ProfileQuery) (*ProfileView, error) {
 	switch q.View {
 	case "":
 		q.View = ViewTop
@@ -153,7 +153,6 @@ func (sc Scope) flags() string {
 	}
 	add("unit", sc.Units)
 	add("name", sc.Names)
-	add("kind", sc.Kinds)
 	add("fail", sc.Fail)
 	if !sc.Since.IsZero() {
 		fmt.Fprintf(&b, " --since %s", sc.Since.UTC().Format("2006-01-02T15:04:05Z"))
@@ -172,9 +171,6 @@ func (sc Scope) describe() string {
 	if len(sc.Names) > 0 {
 		parts = append(parts, "events matching "+strings.Join(sc.Names, ", "))
 	}
-	if len(sc.Kinds) > 0 {
-		parts = append(parts, "kinds "+strings.Join(sc.Kinds, ", "))
-	}
 	if len(sc.Fail) > 0 {
 		parts = append(parts, "outcomes "+strings.Join(sc.Fail, ", "))
 	}
@@ -182,18 +178,6 @@ func (sc Scope) describe() string {
 }
 
 func (v *ProfileView) m() narrative.Metric { return v.q.Metric }
-
-// fmtValue prints a value of the view's metric, and its share of the total.
-func (v *ProfileView) fmtValue(val narrative.Value) (string, string) {
-	m := v.m()
-	n := val.Get(m)
-	t := v.total.Get(m)
-	pct := "-"
-	if t > 0 {
-		pct = fmt.Sprintf("%.0f%%", n/t*100)
-	}
-	return m.Format(n), pct
-}
 
 func (v *ProfileView) frameName(f int) string {
 	if f < 0 || f >= len(v.p.Frames) {

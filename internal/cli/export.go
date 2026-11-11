@@ -2,152 +2,69 @@ package cli
 
 import (
 	"fmt"
-	"io"
-	"time"
+	"os"
+	"path/filepath"
 
-	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/recording"
 
 	"github.com/spf13/cobra"
 )
 
-type exportFlags struct {
-	format     string
-	out        string
-	parts      []string
-	model      string
-	units      []string
-	since      string
-	until      string
-	errorsOnly bool
-}
-
 func newExportCmd() *cobra.Command {
-	f := &exportFlags{}
+	var output string
 	cmd := &cobra.Command{
 		Use:   "export <recording>",
-		Short: "Write a recording's derived narrative as a folder of agent-oriented artifacts",
-		Long: `export distils a recording's derived narrative — hook runs and their
-failure state, the statuses/databags/config they changed — merged with
-every correlated log line, and writes it as a folder meant for an agent to
-read incrementally instead of ingesting all at once:
+		Short: "Pack a recording into one file to share or attach",
+		Long: `export writes a recording as one gzipped tar file: its manifest, everything
+under raw/, and recorder.log. It leaves out index.db, which is as big as raw/
+and is rebuilt from it the first time anything reads the recording.
 
-  SUMMARY.md            orientation: time range, units, hook-outcome counts
-  timeline.jsonl         events + logs merged, chronological, one JSON object
-                         per line — grep -C around a line for real context
-  events.jsonl           the same event lines, without the log volume
-  details/<span_id>.json full detail for one event: statuses set, databag/
-                         config diffs, failure explanation
-  report.md              the same data as one narrated document, for a human
-  profiles/*.folded      every sampled charm stack as folded stacks (wall, cpu
-                         and memory), for grep and flame graph tools
-  AGENTS.md               legend naming whichever of the above is present
+To read the file, extract it and point juju-lens at the directory it makes:
 
---parts restricts which of those get written (default: all); it is
-independent of the scoping flags below, which restrict what content is in
-scope regardless of which files it lands in.
+  tar -xzf my-capture.tar.gz
+  juju-lens inspect summary my-capture
 
-Unlike the raw SQLite index, this carries the same hook/failure
-classification the TUI shows (was this unit actually broken, or did it
-retry and recover), so an agent debugging an issue doesn't have to
-re-derive it from raw RPC spans.
-
---format, if set, instead writes a single merged document to stdout (json
-or md) and skips the folder — a legacy/scripting path for piping into
-another tool.`,
+The recording must not be being written: stop a running recorder first.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runExport(args[0], *f, cmd.OutOrStdout())
+			return runExport(args[0], output, cmd)
 		},
 	}
-	cmd.Flags().StringVar(&f.format, "format", "", "write a single merged document to stdout instead of a folder: json|md")
-	cmd.Flags().StringVar(&f.out, "out", "", "folder to write the export into (default: <recording>/derived/export)")
-	cmd.Flags().StringSliceVar(&f.parts, "parts", nil,
-		"comma-separated subset of parts to write: summary,timeline,events,details,report,profiles (default: all)")
-	cmd.Flags().StringVar(&f.model, "model", "", "focus on a single model (required if the recording has more than one)")
-	cmd.Flags().StringArrayVar(&f.units, "unit", nil, "restrict to this unit or application (repeatable)")
-	cmd.Flags().StringVar(&f.since, "since", "", "RFC3339 lower time bound")
-	cmd.Flags().StringVar(&f.until, "until", "", "RFC3339 upper time bound")
-	cmd.Flags().BoolVar(&f.errorsOnly, "errors-only", false,
-		"only hook runs that ended errored/retried/rpc-warn, plus one same-unit neighbour on each side for context")
+	cmd.Flags().StringVarP(&output, "output", "o", "", "file to write (default: <recording directory name>.tar.gz in the current directory)")
 	return cmd
 }
 
-// runExport is factored out of RunE so it's directly testable without going
-// through cobra, matching runIndex/runStop's convention.
-func runExport(dir string, f exportFlags, out io.Writer) error {
-	ok, err := recording.NewLayout(dir).Exists()
-	if err != nil {
-		return err
+func runExport(dir, output string, cmd *cobra.Command) error {
+	if output == "" {
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return err
+		}
+		output = filepath.Base(abs) + ".tar.gz"
 	}
-	if !ok {
+	// Check the recording before creating the file, so that a wrong path
+	// leaves nothing behind.
+	if ok, err := recording.NewLayout(dir).Exists(); err != nil {
+		return err
+	} else if !ok {
 		return fmt.Errorf("no manifest.json under %q; is this a juju-lens recording?", dir)
 	}
-
-	opts := export.Options{Model: f.model, Units: f.units, ErrorsOnly: f.errorsOnly}
-	if f.since != "" {
-		t, err := time.Parse(time.RFC3339, f.since)
-		if err != nil {
-			return fmt.Errorf("--since: %w", err)
-		}
-		opts.Since = t
-	}
-	if f.until != "" {
-		t, err := time.Parse(time.RFC3339, f.until)
-		if err != nil {
-			return fmt.Errorf("--until: %w", err)
-		}
-		opts.Until = t
-	}
-
-	result, err := export.Build(dir, opts)
+	f, err := os.Create(output)
 	if err != nil {
 		return err
 	}
-
-	if f.format != "" {
-		switch f.format {
-		case "json":
-			return export.WriteJSON(out, result)
-		case "md", "markdown":
-			return export.WriteMarkdown(out, result)
-		default:
-			return fmt.Errorf("unknown --format %q (want json|md)", f.format)
-		}
+	res, err := recording.Pack(dir, f)
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
-
-	parts, err := parseParts(f.parts)
+	if err != nil {
+		_ = os.Remove(output)
+		return err
+	}
+	info, err := os.Stat(output)
 	if err != nil {
 		return err
 	}
-	outDir := f.out
-	if outDir == "" {
-		outDir = recording.NewLayout(dir).ExportDir()
-	}
-	if err := export.WriteFolder(outDir, result, parts); err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "wrote export to %s\n", outDir)
+	fmt.Fprintf(cmd.OutOrStdout(), "wrote %s: %d files, %d bytes of raw data in %d bytes\n", output, res.Files, res.Bytes, info.Size())
 	return nil
-}
-
-// parseParts validates --parts against the known Part values. An empty list
-// means "all parts", handled the same way WriteFolder itself treats nil.
-func parseParts(names []string) ([]export.Part, error) {
-	if len(names) == 0 {
-		return nil, nil
-	}
-	valid := make(map[export.Part]bool, len(export.AllParts))
-	for _, p := range export.AllParts {
-		valid[p] = true
-	}
-	out := make([]export.Part, 0, len(names))
-	for _, n := range names {
-		p := export.Part(n)
-		if !valid[p] {
-			return nil, fmt.Errorf("unknown --parts value %q (want one of summary,timeline,events,details,report,profiles)", n)
-		}
-		out = append(out, p)
-	}
-	return out, nil
 }

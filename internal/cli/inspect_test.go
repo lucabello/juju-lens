@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/index"
 	"github.com/lucabello/juju-lens/internal/inspect"
+	"github.com/lucabello/juju-lens/internal/query"
 	"github.com/lucabello/juju-lens/internal/recording"
 	"github.com/lucabello/juju-lens/internal/synth"
 )
@@ -97,7 +97,6 @@ func TestInspectRejectsValuesThatMatchNothing(t *testing.T) {
 	dir := opsRecording(t)
 	for _, tc := range [][]string{
 		{"events", dir, "--fail", "broken"},
-		{"events", dir, "--kind", "hooks"},
 		{"events", dir, "--sort", "size"},
 		{"event", dir, "no-such-span"},
 		{"profile", dir, "--metric", "bytes"},
@@ -483,64 +482,6 @@ func TestInspectLogsFiltersAndCorrelates(t *testing.T) {
 	}
 }
 
-func TestInspectStateAsOf(t *testing.T) {
-	dir := t.TempDir()
-	if err := runSynth(context.Background(), synth.ScenarioTrivial, synthFlags{output: dir, model: "default"}); err != nil {
-		t.Fatal(err)
-	}
-	state := func(args ...string) inspect.StateList {
-		t.Helper()
-		out, _, err := runInspect(t, append([]string{"state", dir, "--json"}, args...)...)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var l inspect.StateList
-		if err := json.Unmarshal([]byte(out), &l); err != nil {
-			t.Fatal(err)
-		}
-		return l
-	}
-	value := func(l inspect.StateList, scope string) string {
-		for _, r := range l.State {
-			if r.Scope == scope {
-				var v struct{ Value string }
-				_ = json.Unmarshal(r.Value, &v)
-				return v.Value
-			}
-		}
-		return ""
-	}
-	early := state("--kind", "status", "--at", "2026-07-03T14:30:12Z")
-	late := state("--kind", "status")
-	if e, l := value(early, "app-status:grafana"), value(late, "app-status:grafana"); e != "maintenance" || l != "active" {
-		t.Errorf("grafana was %q early and %q at the end, want maintenance then active", e, l)
-	}
-	if l := state("--kind", "status", "--match", "prometheus"); l.Total == 0 {
-		t.Error("--match prometheus found nothing")
-	} else {
-		for _, r := range l.State {
-			if !strings.Contains(r.Scope, "prometheus") {
-				t.Errorf("--match prometheus returned %s", r.Scope)
-			}
-		}
-	}
-	if l := state("--kind", "databag"); l.Total == 0 {
-		t.Error("the host-side recording has databags")
-	}
-	if _, _, err := runInspect(t, "state", dir, "--kind", "secrets"); err == nil {
-		t.Error("an unknown kind should fail")
-	}
-}
-
-// A unit-only recording has no relation data, and the output says why.
-func TestInspectStateWithoutDatabags(t *testing.T) {
-	dir := opsRecording(t)
-	out, _, err := runInspect(t, "state", dir, "--kind", "databag")
-	if err != nil || !strings.Contains(out, "--attach host") {
-		t.Errorf("want a note pointing at --attach host, got %v\n%s", err, out)
-	}
-}
-
 func TestInspectDiffNamesTheFunctionsThatChanged(t *testing.T) {
 	dir := opsRecording(t)
 	diff := func(args ...string) inspect.Diff {
@@ -599,11 +540,26 @@ func TestInspectSummaryScopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(all, "6 events") || !strings.Contains(one, "2 events") || strings.Contains(one, "otelcol/0") {
+	if !strings.Contains(all, "6 events") || !strings.Contains(one, "2 events,") || strings.Contains(one, "otelcol/0") {
 		t.Errorf("--unit otelcol/1 should summarize its 2 events only:\n%s", one)
 	}
-	if !strings.Contains(all, "## Costliest hooks") || !strings.Contains(all, "next: juju-lens inspect events") {
-		t.Errorf("summary lacks the cost section or the next step:\n%s", all)
+	for _, want := range []string{"errored 1, retried 1", "slowest events:", "most CPU in the charm's code", "next: juju-lens inspect events"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("summary lacks %q:\n%s", want, all)
+		}
+	}
+	// A unit-only recording has no settle markers; it must not claim its
+	// units never reached idle.
+	if strings.Contains(strings.ToLower(all), "idle") {
+		t.Errorf("summary talks about idleness:\n%s", all)
+	}
+	var js inspect.Summary
+	jout, _, err := runInspect(t, "summary", dir, "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(jout), &js); err != nil || js.Events != 6 || len(js.Units) != 2 || js.Outcomes["retried"] != 1 {
+		t.Errorf("summary --json: %v %+v", err, js)
 	}
 }
 
@@ -621,7 +577,6 @@ func TestInspectRefusesFlagsThatWouldBeIgnored(t *testing.T) {
 		{"logs", dir, "--window", "5s"},
 		{"logs", dir, "--span", id, "--around", "2026-07-03T14:30:20Z"},
 		{"logs", dir, "--level", "loud"},
-		{"state", dir, "--span", id, "--at", "2026-07-03T14:30:20Z"},
 		{"trace", dir, id, "--attempt", "0"},
 	} {
 		if _, _, err := runInspect(t, tc...); err == nil {
@@ -642,17 +597,15 @@ func TestInspectRefusesFlagsThatWouldBeIgnored(t *testing.T) {
 // costs adds up what the details files of the events say, grouped as asked.
 func TestInspectCostsSumTheHooks(t *testing.T) {
 	dir := opsRecording(t)
-	res, err := export.Build(dir, export.Options{Model: "default"})
+	src, err := query.OpenSource(dir, "default")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer src.Close()
 	var want, wantMem float64
 	obs := map[string]float64{}
-	for _, it := range res.Items {
-		if it.Kind != "event" {
-			continue
-		}
-		for _, c := range it.Event.Costs {
+	for _, ev := range src.Events(query.Options{}) {
+		for _, c := range src.Detail(ev).Costs {
 			want += c.CPUMS
 			wantMem += float64(c.StackMemGrowthBytes)
 			obs[c.Name] += c.CPUMS

@@ -65,6 +65,12 @@ juju-lens stop --timeout 120s ./recording
 
 ## Upload the recording
 
-Upload the whole recording directory as a job artifact. It includes `recorder.log`, which you need to debug a recording that ended unexpectedly. A recording compresses to about a sixth, and leaving `index.db` out and rebuilding it saves more; see [how to make a recording cheaper](make-a-recording-cheaper.md#upload-the-raw-data-rebuild-the-index) and [what a recording costs](../explanation/how-unit-capture-works.md#what-it-costs).
+Pack the recording with `juju-lens export` and upload the file as a job artifact:
+
+```bash
+juju-lens export ./recording --output recording.tar.gz
+```
+
+It holds `recorder.log`, which you need to debug a recording that ended unexpectedly, and leaves out the index, which is as large as the raw data and is rebuilt where the recording is read. See [how to share a recording](share-a-recording.md) and [what a recording costs](../explanation/how-unit-capture-works.md#what-it-costs).
 
 For every flag, see the [command line reference](../reference/cli.md#record).

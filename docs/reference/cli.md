@@ -132,35 +132,27 @@ Opens a recording in the viewer. See [viewer keybindings](viewer-keybindings.md)
 juju-lens export <recording> [flags]
 ```
 
-Writes a recording's hooks, state changes, and logs as a folder of plain-text files, or as one document on standard output. To ask a recording questions instead of reading files, see [`inspect`](#inspect). For hooks recorded with `--attach unit`, it also writes what the charm did in each process that ran the hook: every span in JSON, and in Markdown a tree where most hook tool and Pebble calls are folded into one line per span. When the hook was profiled, it adds the CPU and memory of charm init and each observer, the five stacks with the most wall time and the five with the most memory growth, and every sampled stack as folded stacks in `profiles/`. See [how to export a recording for an AI agent](../how-to/export-for-an-agent.md) for the files.
+Packs a recording into one gzipped tar file: its `manifest.json`, everything under `raw/`, and `recorder.log`. It leaves out `index.db`, which is rebuilt from `raw/` the first time anything reads the recording. The files are under one directory named after the recording, so extracting the file gives a recording directory. A recorder must not be writing to the recording: stop it first. See [how to share a recording](../how-to/share-a-recording.md).
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--format` | none | Write a single merged document to stdout instead of a folder: `json` or `md`. |
-| `--out` | `<recording>/derived/export` | Folder to write the export into. |
-| `--parts` | all | Comma-separated parts to write, from `summary`, `timeline`, `events`, `details`, `report`, and `profiles`. |
-| `--model` | none | Export only this model. Required when the recording has more than one. |
-| `--unit` | none | Export only this unit or application. Repeatable. |
-| `--since` | none | Export only events at or after this time, in RFC 3339 format. |
-| `--until` | none | Export only events at or before this time, in RFC 3339 format. |
-| `--errors-only` | `false` | Only hooks that errored, were retried, or had an RPC error, with the hook before and after each on the same unit. |
+| `--output`, `-o` | `<recording directory name>.tar.gz` | The file to write, in the current directory by default. |
 
 ## `inspect`
 
 ```text
+juju-lens inspect summary <recording> [flags]
 juju-lens inspect events <recording> [flags]
 juju-lens inspect event <recording> <span-id> [flags]
 juju-lens inspect costs <recording> [flags]
 juju-lens inspect profile <recording> [top|peek|tree|stacks] [function] [flags]
-juju-lens inspect memory <recording> <span-id> [flags]
 juju-lens inspect trace <recording> <span-id> [flags]
+juju-lens inspect memory <recording> <span-id> [flags]
 juju-lens inspect logs <recording> [flags]
-juju-lens inspect state <recording> [flags]
-juju-lens inspect summary <recording> [flags]
 juju-lens inspect diff <recording-a> [<recording-b>] [flags]
 ```
 
-Answers questions about a recording as text, or, except for `summary`, as JSON with `--json`. Most views end with a command to go on with. Every list says how many rows it shows out of how many, and how to see more. It reads the recording's index, and builds it first, with a notice on standard error, when the recording has none or has one of a different schema version. It leaves alone an existing index of a recording that a recorder is still writing. The text isn't stable; the JSON fields are the ones listed here.
+Answers questions about a recording as text, or as JSON with `--json`. Most views end with a command to go on with. Every list says how many rows it shows out of how many, and how to see more. It reads the recording's index, and builds it first, with a notice on standard error, when the recording has none or has one of a different schema version. It leaves alone an existing index of a recording that a recorder is still writing. The text isn't stable; the JSON fields are the ones listed here.
 
 These flags pick events, and are shared by `events`, `profile` and `diff`:
 
@@ -169,8 +161,7 @@ These flags pick events, and are shared by `events`, `profile` and `diff`:
 | `--model` | the only model | The model to read. Required when the recording has more than one. |
 | `--unit` | all | Only this unit or application. Repeatable. |
 | `--name` | all | Only events whose name contains this, ignoring case, such as `config-changed`. Repeatable. |
-| `--kind` | all | Only this kind of event: `hook`, `action`, `status`, `relation`, `leader`, `secret` or `settle`. Repeatable. |
-| `--fail` | all | Only events that ended this way: `none`, `errored`, `retried`, `rpc-warn`, `interrupted`, `lost-continue`, or `problem` for any but `none`. Repeatable. |
+| `--fail` | all | Only events that ended this way: `none`, `errored`, `retried`, `interrupted`, or `problem` for any but `none`. Repeatable. |
 | `--since`, `--until` | none | RFC 3339 time bounds, which include events at the given time. |
 
 Where a flag is repeatable here or in the commands below (`--unit`, `--name`, `--grep`, `--match`), repeated values are alternatives, and an event or line must match every flag you give.
@@ -184,17 +175,17 @@ Lists events, one a line, most of them hooks. Hooks recorded with `--attach unit
 | `--sort` | `time` | `time` (oldest first), `duration`, `cpu` or `mem` (largest first). Events without a profile come last when sorting by `cpu` or `mem`. |
 | `--limit` | `20` | Show at most this many events. `0` shows all. |
 | `--skip` | `0` | Leave out this many events first. |
-| `--json` | `false` | Print an object with `recording`, `model`, `sort`, `total`, `skip` (only when above 0) and `events`. Each event has `ts`, `kind`, `name`, `fail`, `span_id`, `profiled`, and, when set, `unit` and `duration_ms` (milliseconds). Profiled hooks also have `cpu_ms` (milliseconds), `mem_growth_bytes`, `rss_peak_bytes` (bytes), `top_frame` and `top_memory_frame`. |
+| `--json` | `false` | Print an object with `recording`, `model`, `sort`, `total`, `skip` (only when above 0) and `events`. Each event has `ts`, `name`, `fail`, `span_id`, `profiled`, and, when set, `unit` and `duration_ms` (milliseconds). Profiled hooks also have `cpu_ms` (milliseconds), `mem_growth_bytes`, `rss_peak_bytes` (bytes), `top_frame` and `top_memory_frame`. |
 
 ### `inspect event`
 
-Prints one event as the [`report.md` of the export](../how-to/export-for-an-agent.md) narrates it. `<span-id>` is the `SPAN` of an `events` line, or the ID of a span inside the hook, such as an observer's in the `costs` section of this command's output or in the `stacks` of `profile`. For a span inside a hook, the command prints the whole hook and says so.
+Prints one event: why it failed, the statuses it set, what the charm did in it, its cost and its heaviest stacks. `<span-id>` is the `SPAN` of an `events` line, or the ID of a span inside the hook, such as an observer's in the `costs` section of this command's output or in the `stacks` of `profile`. For a span inside a hook, the command prints the whole hook and says so.
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--model` | the only model | The model to read. Required when the recording has more than one. |
-| `--section` | all | Only these parts: `statuses`, `ops`, `stacks`, `costs`, `databags` or `config`. Comma-separated, or repeat the flag. The heading and the failure explanation are always printed. |
-| `--json` | `false` | Print the event's details, as in `details/<span_id>.json` of the export, without the parts `--section` leaves out. |
+| `--section` | all | Only these parts: `statuses`, `ops`, `stacks` or `costs`. Comma-separated, or repeat the flag. The heading and the failure explanation are always printed. |
+| `--json` | `false` | Print the event's details, without the parts `--section` leaves out. |
 
 ### `inspect costs`
 
@@ -276,24 +267,16 @@ Lists log lines in time order: `juju debug-log`, the workload containers' logs, 
 | `--skip` | `0` | Leave out this many lines first. |
 | `--json` | `false` | Print `recording`, `model`, `total` and `logs`; `event` with `--span`, and `skip` when above 0. A line always has `ts`, `source` and `body`; and when set, `unit`, `entity`, `level`, `module`, `span_id` and, with `--span`, `matched`: `span` for a line tied to the event, `window` for one near it. |
 
-### `inspect state`
+### `inspect summary`
 
-Prints what Juju held at a time, one scope a line: the status of each application and unit, charm config, which unit leads, and relation data. The status comes from `juju status` at the start and from what the hooks and agents reported. Config comes from `juju config` at the start; later changes to it, like relation data values, are only in a recording made with `--attach host`.
+The first command to run on a recording. It prints when the recording was taken and the attach mode, how many events and log lines it holds and how the events ended, the events of each unit and how many were not clean, the five slowest events, and for profiled hooks the five that used the most CPU in the charm's init and observers.
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--model` | the only model | The model to read. Required when the recording has more than one. |
-| `--kind` | all | Only `status`, `config`, `databag` or `leadership`. |
-| `--at` | the end of the recording | An RFC 3339 time. Can't be combined with `--span`. |
-| `--span` | none | The state when this event's hook had ended. |
-| `--match` | all | Only scopes containing this text, ignoring case. Repeatable. |
-| `--width` | `200` | Cut each value at this many characters. `--json` has all of it. |
-| `--limit`, `--skip` | `40`, `0` | As for `logs`. |
-| `--json` | `false` | Print `recording`, `model`, `at` (the time used), `total` and `state`; `after` with `--span`, `skip` when above 0, and `kinds_without_records` when a kind has none. A value has `kind` (`app-status`, `unit-status`, `agent-status`, `databag`, `config` or `leadership`; `--kind status` covers the first three), `scope`, `since`, `value` (JSON) and, when set, `origin`. |
-
-### `inspect summary`
-
-Prints what the export's `SUMMARY.md` says, for the whole recording or a scope, as Markdown. It has no `--json`. It takes `--model`, `--unit`, `--since`, `--until` and `--errors-only`, as [`export`](#export) does.
+| `--unit` | all | Only this unit or application. Repeatable. |
+| `--since`, `--until` | none | RFC 3339 time bounds. |
+| `--json` | `false` | Print `recording`, `model`, `started`, `events`, `log_lines`, `outcomes` (a count for each way an event ended), `units` (`unit`, `events`, `problems`) and `slowest`, and when set `controller`, `attach_mode`, `ended` and `costliest`. `slowest` and `costliest` hold events as `inspect events` prints them in `--json`. |
 
 ### `inspect diff`
 
@@ -303,7 +286,7 @@ Compares the stack samples of two sides, and lists the functions whose cost chan
 |---|---|---|
 | `--span-a` | none | Side `a` is this hook or span of the first recording. |
 | `--span-b` | none | Side `b` is this hook or span of the second recording, or of the first when only one is given. |
-| `--unit`, `--name`, `--kind`, `--fail`, `--since`, `--until`, `--model` | as for `events` | Pick the hooks of each side, applied to both. |
+| `--unit`, `--name`, `--fail`, `--since`, `--until`, `--model` | as for `events` | Pick the hooks of each side, applied to both. |
 | `--metric` | `wall` | `wall`, `cpu` or `mem`, as for `profile`. |
 | `--detail` | `callee` | `charm`, `callee`, `ops` or `all`. |
 | `--order` | `self` | Compare each function's `self` value, or its `total`. |

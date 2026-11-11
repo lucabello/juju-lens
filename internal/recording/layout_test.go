@@ -22,7 +22,6 @@ func TestRawSizeCountsEverySourceUnderRaw(t *testing.T) {
 		filepath.Join(l.RawDir(), "k8s", "m", "app-0", "c", "logs-h.log"): 30000,
 		filepath.Join(l.RawDir(), "status", "m", "bootstrap.json"):        400,
 		filepath.Join(l.Root, "index.db"):                                 99999,
-		filepath.Join(l.DerivedDir(), "export", "SUMMARY.md"):             99999,
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -32,7 +31,7 @@ func TestRawSizeCountsEverySourceUnderRaw(t *testing.T) {
 		}
 	}
 	if got, want := l.RawSize(), int64(100+2000+30000+400); got != want {
-		t.Fatalf("RawSize = %d, want %d (index.db and derived/ are not raw/)", got, want)
+		t.Fatalf("RawSize = %d, want %d (index.db is not raw/)", got, want)
 	}
 }
 

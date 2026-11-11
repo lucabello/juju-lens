@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/index"
 	"github.com/lucabello/juju-lens/internal/inspect"
+	"github.com/lucabello/juju-lens/internal/query"
 	"github.com/lucabello/juju-lens/internal/recording"
 
 	"github.com/spf13/cobra"
@@ -24,25 +24,25 @@ func newInspectCmd() *cobra.Command {
 		Use:   "inspect",
 		Short: "Ask a recording questions: events, one event in full, profiles",
 		Long: `inspect answers questions about a recording as short text, or as JSON with
---json, so that an agent (or a person at a shell) can ask for what it needs
-instead of reading every file of an export. Every list is bounded, says how
-much it left out, and ends with the command to go on with.
+--json, so that an agent (or a person at a shell) can ask for what it needs.
+Every list is bounded, says how much it left out, and ends with the command to
+go on with. Costs, profiles, traces and memory come from hooks recorded with
+--attach unit, the default.
 
-  juju-lens inspect summary <recording>           the shape of a recording: outcomes, units, slowest and costliest hooks
-  juju-lens inspect events <recording>            list and rank events
-  juju-lens inspect event <recording> <span-id>   one event in full
-  juju-lens inspect costs <recording>             what each observer, event, unit or app cost, summed over hooks
-  juju-lens inspect profile <recording> [view]    where the charm's time and memory went
-  juju-lens inspect diff <recording> [<recording>]  which functions cost more or less between two hooks or recordings
-  juju-lens inspect memory <recording> <span-id>  memory around a hook, and the code that took it
-  juju-lens inspect trace <recording> <span-id>   what a hook did along time: events, observers, calls, functions
-  juju-lens inspect logs <recording>              log lines, by unit, level, text, time or event
-  juju-lens inspect state <recording>             status, config, leadership and databags at a time
+  juju-lens inspect summary <recording>             start here: outcomes, units, slowest and costliest hooks
+  juju-lens inspect events <recording>              list, filter and rank events
+  juju-lens inspect event <recording> <span-id>     one event in full
+  juju-lens inspect costs <recording>               what observers, events, units or apps cost, summed over hooks
+  juju-lens inspect profile <recording> [view]      the functions the charm's time and memory went to
+  juju-lens inspect trace <recording> <span-id>     what a hook did along time
+  juju-lens inspect memory <recording> <span-id>    memory around a hook, and the code that took it
+  juju-lens inspect logs <recording>                log lines, by unit, level, text, time or event
+  juju-lens inspect diff <recording> [<recording>]  which functions cost more or less between hooks or recordings
 
 A recording without an index.db, or with one from an older juju-lens, is
 indexed first.`,
 	}
-	cmd.AddCommand(newInspectEventsCmd(), newInspectEventCmd(), newInspectProfileCmd(), newInspectMemoryCmd(), newInspectTraceCmd(), newInspectLogsCmd(), newInspectStateCmd(), newInspectSummaryCmd(), newInspectDiffCmd(), newInspectCostsCmd())
+	cmd.AddCommand(newInspectEventsCmd(), newInspectEventCmd(), newInspectProfileCmd(), newInspectMemoryCmd(), newInspectTraceCmd(), newInspectLogsCmd(), newInspectSummaryCmd(), newInspectDiffCmd(), newInspectCostsCmd())
 	return cmd
 }
 
@@ -51,7 +51,6 @@ type scopeFlags struct {
 	model string
 	units []string
 	names []string
-	kinds []string
 	fail  []string
 	since string
 	until string
@@ -62,8 +61,7 @@ func (f *scopeFlags) add(cmd *cobra.Command) {
 	fl.StringVar(&f.model, "model", "", "the model to read (required if the recording has more than one)")
 	fl.StringArrayVar(&f.units, "unit", nil, "only this unit or application (repeatable)")
 	fl.StringArrayVar(&f.names, "name", nil, "only events whose name contains this, such as config-changed (repeatable)")
-	fl.StringArrayVar(&f.kinds, "kind", nil, "only this kind of event: "+joinValues(inspect.EventKinds)+" (repeatable)")
-	fl.StringArrayVar(&f.fail, "fail", nil, "only events that ended this way: problem (any but none), "+joinValues(inspect.FailStates)+" (repeatable)")
+	fl.StringArrayVar(&f.fail, "fail", nil, "only events that ended this way: problem (any but none), errored, retried, interrupted or none (repeatable)")
 	fl.StringVar(&f.since, "since", "", "RFC3339 lower time bound")
 	fl.StringVar(&f.until, "until", "", "RFC3339 upper time bound")
 }
@@ -80,7 +78,7 @@ func joinValues(v []string) string {
 }
 
 func (f *scopeFlags) scope() (inspect.Scope, error) {
-	sc := inspect.Scope{Units: f.units, Names: f.names, Kinds: f.kinds, Fail: f.fail}
+	sc := inspect.Scope{Units: f.units, Names: f.names, Fail: f.fail}
 	var err error
 	if f.since != "" {
 		if sc.Since, err = time.Parse(time.RFC3339, f.since); err != nil {
@@ -96,11 +94,11 @@ func (f *scopeFlags) scope() (inspect.Scope, error) {
 }
 
 // openInspect indexes the recording at dir if it needs it, and opens it.
-func openInspect(dir, model string, notice io.Writer) (*export.Source, error) {
+func openInspect(dir, model string, notice io.Writer) (*query.Source, error) {
 	if err := ensureIndex(dir, notice); err != nil {
 		return nil, err
 	}
-	return export.OpenSource(dir, model)
+	return query.OpenSource(dir, model)
 }
 
 // ensureIndex builds the index of the recording at dir when it has none or
@@ -157,7 +155,7 @@ func newInspectEventsCmd() *cobra.Command {
 		Short: "List events, filtered and ranked",
 		Long: `events lists the hooks and other events of a recording, one per line, with
 how each ended and, for hooks recorded with --attach unit and profiled, the
-CPU and memory the charm's own code used. Filter with --unit, --name, --kind,
+CPU and memory the charm's own code used. Filter with --unit, --name,
 --fail and the time bounds; rank with --sort. The list shows --limit lines
 and says how to see more.`,
 		Example: `  juju-lens inspect events ./rec --unit otelcol --name config-changed --sort cpu --limit 5
@@ -204,10 +202,9 @@ func newInspectEventCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "event <recording> <span-id>",
 		Short: "Show one event in full",
-		Long: `event prints one event as the export's report narrates it: why it failed,
-the statuses it set, what the charm did in it (events, observers, hook tool and
-Pebble calls), what it cost, its heaviest stacks, and the databag and
-configuration changes. <span-id> is the one in an events line, or the id of a
+		Long: `event prints one event: why it failed, the statuses it set, what the charm
+did in it (events, observers, hook tool and Pebble calls), what it cost, and
+its heaviest stacks. <span-id> is the one in an events line, or the id of a
 span inside the hook, such as an observer in a profile.
 
 --section keeps only some parts: ` + joinValues(inspect.EventSections) + `.`,
@@ -258,7 +255,7 @@ every 10 ms, and shows them as pprof does:
   stacks   the heaviest stacks, outermost frame first, as folded stacks
 
 Scope it to one hook or one observer with --span (an id from events or from a
-profile), or to many hooks with --unit, --name, --kind and --fail. --metric
+profile), or to many hooks with --unit, --name and --fail. --metric
 chooses wall time, cpu time, or memory taken. --detail chooses how much code
 shows: the charm's own code and what it calls directly (callee, the default),
 only the charm (charm), the charm and ops (ops), or all of it.`,
@@ -509,93 +506,23 @@ within --window of the hook (2s by default).`,
 	return cmd
 }
 
-// ----- inspect state
-
-func newInspectStateCmd() *cobra.Command {
-	var (
-		model  string
-		kind   string
-		at     string
-		span   string
-		match  []string
-		width  int
-		limit  int
-		skip   int
-		asJSON bool
-	)
-	cmd := &cobra.Command{
-		Use:   "state <recording>",
-		Short: "Status, config, leadership and relation data at a time",
-		Long: `state prints what Juju held at a time: the status of each application and
-unit, charm config, which unit leads, and relation databags. --at is a time
-(RFC3339; the end of the recording by default); --span an event gives the state
-when that hook had ended. --kind is ` + joinValues(inspect.StateKinds) + `, --match keeps scopes that contain
-some text, such as an application name.
-
-The status and config come from 'juju status' at the start and from the
-hooks' own calls; relation data values come only from a recording made with
---attach host.`,
-		Example: `  juju-lens inspect state ./rec --kind status --match otelcol
-  juju-lens inspect state ./rec --kind config --span 7bfdb120d1995d97`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			q := inspect.StateQuery{Page: inspect.Page{Limit: limit, Skip: skip}, Kind: kind, Span: span, Match: match, Width: width}
-			if at != "" && span != "" {
-				return fmt.Errorf("--at and --span can't be combined: --span is the time its hook ended")
-			}
-			if at != "" {
-				t, err := time.Parse(time.RFC3339, at)
-				if err != nil {
-					return fmt.Errorf("--at: %w", err)
-				}
-				q.At = t
-			}
-			src, err := openInspect(args[0], model, cmd.ErrOrStderr())
-			if err != nil {
-				return err
-			}
-			defer src.Close()
-			l, err := inspect.ReadState(src, q)
-			if err != nil {
-				return err
-			}
-			if asJSON {
-				return l.WriteJSON(cmd.OutOrStdout())
-			}
-			l.WriteText(cmd.OutOrStdout(), args[0], q.Page)
-			return nil
-		},
-	}
-	f := cmd.Flags()
-	f.StringVar(&model, "model", "", "the model to read (required if the recording has more than one)")
-	f.StringVar(&kind, "kind", "", "only this kind: "+joinValues(inspect.StateKinds))
-	f.StringVar(&at, "at", "", "RFC3339 time (default: the end of the recording)")
-	f.StringVar(&span, "span", "", "the state when this event's hook had ended, by span id; replaces --at")
-	f.StringArrayVar(&match, "match", nil, "only scopes containing this text, ignoring case (repeatable)")
-	f.IntVar(&width, "width", 0, "cut each value at this many characters (200 by default)")
-	f.IntVar(&limit, "limit", 40, "show at most this many values (0 = all)")
-	f.IntVar(&skip, "skip", 0, "leave out this many values first")
-	f.BoolVar(&asJSON, "json", false, "print JSON")
-	return cmd
-}
-
 // ----- inspect summary
 
 func newInspectSummaryCmd() *cobra.Command {
 	var (
-		model      string
-		units      []string
-		since      string
-		until      string
-		errorsOnly bool
+		model  string
+		units  []string
+		since  string
+		until  string
+		asJSON bool
 	)
 	cmd := &cobra.Command{
 		Use:   "summary <recording>",
-		Short: "The shape of a recording, or of part of it",
-		Long: `summary prints what the export's SUMMARY.md says, for the whole recording or
-for a scope: the time range, how many hooks ended each way, events per unit,
-the slowest events, and for profiled recordings the hooks that used the most
-CPU and took the most memory.`,
+		Short: "The shape of a recording, or of part of it: where to look first",
+		Long: `summary is the first thing to run on a recording: when it was taken and what
+it captured, how many events each unit ran and how they ended, the slowest
+events, and for hooks recorded with --attach unit the ones that used the most
+CPU. Narrow it with --unit, --since and --until.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sf := scopeFlags{units: units, since: since, until: until}
@@ -608,14 +535,14 @@ CPU and took the most memory.`,
 				return err
 			}
 			defer src.Close()
-			res, err := src.Summarize(export.Options{Units: units, Since: sc.Since, Until: sc.Until, ErrorsOnly: errorsOnly})
+			sum, err := inspect.Summarize(src, args[0], sc)
 			if err != nil {
 				return err
 			}
-			if err := export.WriteSummary(cmd.OutOrStdout(), res); err != nil {
-				return err
+			if asJSON {
+				return sum.WriteJSON(cmd.OutOrStdout())
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "next: juju-lens inspect events %s --fail problem\n      juju-lens inspect events %s --sort cpu\n", args[0], args[0])
+			sum.WriteText(cmd.OutOrStdout())
 			return nil
 		},
 	}
@@ -624,7 +551,7 @@ CPU and took the most memory.`,
 	f.StringArrayVar(&units, "unit", nil, "only this unit or application (repeatable)")
 	f.StringVar(&since, "since", "", "RFC3339 lower time bound")
 	f.StringVar(&until, "until", "", "RFC3339 upper time bound")
-	f.BoolVar(&errorsOnly, "errors-only", false, "only hooks that errored, retried or had an RPC error, with one neighbour each side")
+	f.BoolVar(&asJSON, "json", false, "print JSON")
 	return cmd
 }
 
@@ -647,7 +574,7 @@ func newInspectDiffCmd() *cobra.Command {
 		Long: `diff compares the stack samples of two sides and lists the functions whose
 cost changed the most, per hook so that sides with different numbers of hooks
 compare. A side is one hook (--span-a, --span-b) or the hooks a scope picks
-(--unit, --name, --kind, --fail, --since, --until, applied to both sides). With
+(--unit, --name, --fail, --since, --until, applied to both sides). With
 one recording, the sides are two hooks of it (--span-a and --span-b); with two,
 each side is taken from its own recording: the same hook before and after a
 change to the charm, for example.
