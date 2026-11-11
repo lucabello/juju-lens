@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -652,5 +653,66 @@ func TestInspectCostsSumTheHooks(t *testing.T) {
 	}
 	if _, _, err := runInspect(t, "costs", dir, "--by", "span"); err == nil {
 		t.Error("an unknown --by should fail")
+	}
+}
+
+// The folded stacks hold every sampled stack, outermost frame first, with a
+// value that adds up to the profile's total for the metric, largest first.
+func TestInspectFoldedStacks(t *testing.T) {
+	dir := opsRecording(t)
+	var pj inspect.ProfileJSON
+	pout, _, err := runInspect(t, "profile", dir, "--json", "--detail", "all", "--limit", "100000", "--metric", "cpu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(pout), &pj); err != nil {
+		t.Fatal(err)
+	}
+	var self float64
+	for _, f := range pj.Functions {
+		self += f.Self
+	}
+
+	out, _, err := runInspect(t, "profile", dir, "stacks", "--folded", "--metric", "cpu", "--limit", "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total, prev int64 = 0, 1 << 62
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for i, l := range lines {
+		at := strings.LastIndexByte(l, ' ')
+		n, err := strconv.ParseInt(l[at+1:], 10, 64)
+		if at < 0 || err != nil {
+			t.Fatalf("line %d isn't 'stack value': %q", i+1, l)
+		}
+		if frames := strings.Split(l[:at], ";"); len(frames) < 4 || !strings.HasPrefix(frames[0], "otelcol/") {
+			t.Errorf("line %d: want unit;event;span;frames, got %q", i+1, l)
+		}
+		if n > prev {
+			t.Errorf("line %d has %d after %d: not largest first", i+1, n, prev)
+		}
+		prev, total = n, total+n
+	}
+	if d := float64(total)*1000 - self; d > 1000*float64(len(lines)) || d < -1000*float64(len(lines)) {
+		t.Errorf("folded values add up to %d µs, the profile's self CPU to %.0f ns", total, self)
+	}
+
+	// The stack that took the most memory is the dashboard compression.
+	mem, _, err := runInspect(t, "profile", dir, "stacks", "--folded", "--metric", "mem", "--limit", "1")
+	if err != nil || !strings.Contains(mem, "LZMABase64.compress") {
+		t.Errorf("the heaviest memory stack: %v\n%s", err, mem)
+	}
+	// One hook, by span id, and the flag's conditions.
+	var ev inspect.EventList
+	eout, _, _ := runInspect(t, "events", dir, "--json", "--sort", "cpu", "--limit", "1")
+	_ = json.Unmarshal([]byte(eout), &ev)
+	one, _, err := runInspect(t, "profile", dir, "--span", ev.Events[0].SpanID, "stacks", "--folded")
+	if err != nil || len(one) == 0 || len(strings.Split(strings.TrimSpace(one), "\n")) >= len(lines)*2 {
+		t.Errorf("--span with --folded: %v", err)
+	}
+	for _, bad := range [][]string{{"profile", dir, "--folded"}, {"profile", dir, "top", "--folded"}, {"profile", dir, "stacks", "--folded", "--json"}} {
+		if _, _, err := runInspect(t, bad...); err == nil {
+			t.Errorf("inspect %v: want an error", bad)
+		}
 	}
 }

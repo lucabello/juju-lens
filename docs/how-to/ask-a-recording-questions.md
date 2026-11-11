@@ -99,6 +99,17 @@ juju-lens inspect profile ./rec --span e39d3d6c60330477 peek _reconcile
 
 For the whole call tree, use `tree`. To scope a profile to charm init or one observer, pass its span ID to `--span`. The `stacks` view prints the span each stack ran in, with its ID, and `juju-lens inspect event ./rec <span-id> --section costs` lists them.
 
+## Hand the stacks to a flame graph tool
+
+`stacks --folded` prints every stack of the scope as folded stacks, one per line, which flame graph tools read and `grep` searches:
+
+```bash
+juju-lens inspect profile ./rec --unit grafana --metric cpu stacks --folded > grafana.folded
+grep compress grafana.folded | head -3
+```
+
+Each line is `unit;event;span;frame;…;frame value`, outermost frame first, with the value in microseconds for wall time and CPU, or in bytes for memory taken.
+
 ## Find where memory went
 
 Weigh the profile by memory instead of time:

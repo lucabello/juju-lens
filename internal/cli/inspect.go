@@ -10,6 +10,7 @@ import (
 
 	"github.com/lucabello/juju-lens/internal/index"
 	"github.com/lucabello/juju-lens/internal/inspect"
+	"github.com/lucabello/juju-lens/internal/narrative"
 	"github.com/lucabello/juju-lens/internal/query"
 	"github.com/lucabello/juju-lens/internal/recording"
 
@@ -241,6 +242,7 @@ func newInspectProfileCmd() *cobra.Command {
 		detail string
 		order  string
 		limit  int
+		folded bool
 		asJSON bool
 	)
 	cmd := &cobra.Command{
@@ -281,11 +283,25 @@ only the charm (charm), the charm and ops (ops), or all of it.`,
 			if q.Detail, err = inspect.ParseDetail(detail); err != nil {
 				return err
 			}
+			if folded {
+				if q.View != inspect.ViewStacks {
+					return fmt.Errorf("--folded needs the stacks view: juju-lens inspect profile <recording> stacks --folded")
+				}
+				if asJSON {
+					return fmt.Errorf("--folded and --json can't be combined")
+				}
+				if !cmd.Flags().Changed("detail") {
+					q.Detail = narrative.DetailAll
+				}
+			}
 			src, err := openInspect(args[0], sf.model, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
 			defer src.Close()
+			if folded {
+				return inspect.WriteFolded(cmd.OutOrStdout(), src, q)
+			}
 			v, err := inspect.OpenProfile(src, args[0], q)
 			if err != nil {
 				return err
@@ -302,6 +318,7 @@ only the charm (charm), the charm and ops (ops), or all of it.`,
 	cmd.Flags().StringVar(&detail, "detail", "callee", "how much code to show: charm, callee, ops or all")
 	cmd.Flags().StringVar(&order, "order", "self", "for top: order by self or total (what the function called counts)")
 	cmd.Flags().IntVar(&limit, "limit", 0, "show at most this many rows (the tree: lines); 0 picks a size for the view")
+	cmd.Flags().BoolVar(&folded, "folded", false, "with the stacks view: print every stack as folded stacks, for flame graph tools and grep: unit;event;span;frame;...;frame value, in microseconds (wall, cpu) or bytes (mem); all frames unless --detail is given; --limit 0 prints all")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	return cmd
 }
