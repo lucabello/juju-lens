@@ -21,10 +21,11 @@ Every list is bounded, says how much it left out (`--skip`, `--limit`), and ends
    - `juju-lens inspect profile <recording> --span <span-id>`: the functions the time went to; views `top` (default), `peek <function>`, `tree` and `stacks`; `--metric wall|cpu|mem`; `--detail charm` for the charm's own code only; `--order total` to rank by what a function called too.
    - `juju-lens inspect logs <recording> --span <span-id>`: the log lines about the hook; filter logs by `--unit`, `--level`, `--grep`, `--since`, `--until`.
 5. Compare: `juju-lens inspect diff <recording> --span-a <id> --span-b <id>` for two hooks, or `juju-lens inspect diff <before> <after> --unit <u> --name <event>` for the same hook in two recordings.
-6. For a flame graph tool or `grep`: `juju-lens inspect profile <recording> --unit <u> stacks --folded`.
+6. For a flame graph tool or `grep`: `juju-lens inspect profile <recording> --unit <u> stacks --folded`. The span of each stack is in its third field, so `grep` an observer's name in `--metric mem` output for the heaviest stacks of that observer across all hooks.
 
 ## What the numbers mean
 
+- In `profile`, the rows `(importing Python modules)` and `(Python runtime and libraries)` stand for code the detail level hides; they are not functions of the charm, so skip them when ranking. `costs` and `events` already leave the import phase out.
 - CPU and memory of a hook count charm init and the observers, with what they called. The time Python spends importing modules before ops starts is not in them; the profile shows it as `(importing Python modules)`.
 - A hook's CPU includes the processes the hook started that were sampled too. Ranking by the main process alone can give another hook first.
 - Memory taken is the growth of resident memory between two samples (10 ms apart), summed: it says where memory was taken, not where it was held. A function that frees later still counts.
