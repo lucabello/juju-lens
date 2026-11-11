@@ -195,43 +195,21 @@ type Result struct {
 // its narrative, applies opts, and assembles a Result. It does not render
 // anything.
 func Build(dir string, opts Options) (*Result, error) {
-	man, err := recording.Load(dir)
-	if err != nil {
-		return nil, fmt.Errorf("loading manifest at %s: %w", dir, err)
-	}
-	layout := recording.NewLayout(dir)
-	db, err := index.Open(layout.IndexDB())
-	if err != nil {
-		return nil, fmt.Errorf("opening index (run `juju-lens index %s`): %w", dir, err)
-	}
-	defer db.Close()
-
-	mm, err := resolveModel(db, opts.Model)
+	src, err := OpenSource(dir, opts.Model)
 	if err != nil {
 		return nil, err
 	}
+	defer src.Close()
+	return src.build(opts)
+}
 
-	spans, err := db.Spans(mm.ID)
-	if err != nil {
-		return nil, fmt.Errorf("loading spans: %w", err)
-	}
-	spanByID := make(map[string]recording.SpanRow, len(spans))
-	for _, sp := range spans {
-		spanByID[sp.SpanID] = sp
-	}
-	databagSpans, _ := db.ProducingSpanIDs(mm.ID, string(index.KindDatabag))
-	unitStatusBySpan, _ := db.StatusBySpan(mm.ID, string(index.KindUnitStatus))
-	appStatusBySpan, _ := db.StatusBySpan(mm.ID, string(index.KindAppStatus))
-	statusBySpan := narrative.StatusMapFromSnapshots(unitStatusBySpan, appStatusBySpan)
-	events := narrative.BuildEventsWithStatus(spans, databagSpans, statusBySpan)
-	ops := narrative.NewOpsIndex(spans)
-
+func (s *Source) build(opts Options) (*Result, error) {
 	units := unitSet(opts.Units)
-	scoped := filterEvents(events, units, opts.Since, opts.Until)
+	scoped := filterEvents(s.events, units, opts.Since, opts.Until)
 	final, contextOnly := applyErrorsOnly(scoped, opts.ErrorsOnly)
 
 	lo, hi := timeWindow(opts, final)
-	logs, err := db.Logs(mm.ID, 0)
+	logs, err := s.db.Logs(s.Model.ID, 0)
 	if err != nil {
 		return nil, fmt.Errorf("loading logs: %w", err)
 	}
@@ -240,8 +218,7 @@ func Build(dir string, opts Options) (*Result, error) {
 	items := make([]Item, 0, len(final)+len(logs))
 	summary := Summary{UnitsInScope: opts.Units}
 	for _, ev := range final {
-		sp := spanByID[ev.SpanID]
-		detail := buildEventDetail(db, mm.ID, ev, sp, ops, contextOnly[ev.SpanID])
+		detail := buildEventDetail(s.db, s.Model.ID, ev, s.spanByID[ev.SpanID], s.ops, contextOnly[ev.SpanID])
 		items = append(items, Item{TS: ev.TS, Kind: "event", Event: &detail})
 		summary.TotalEvents++
 		switch ev.Fail {
@@ -267,14 +244,11 @@ func Build(dir string, opts Options) (*Result, error) {
 	}
 
 	return &Result{
-		Recording: RecordingInfo{
-			Dir: dir, Controller: man.Controller.Name,
-			Started: man.Started, Ended: man.Ended,
-		},
-		Model:   ModelInfo{Name: mm.Name, UUID: mm.UUID},
-		Filters: opts,
-		Summary: summary,
-		Items:   items,
+		Recording: s.Recording,
+		Model:     ModelInfo{Name: s.Model.Name, UUID: s.Model.UUID},
+		Filters:   opts,
+		Summary:   summary,
+		Items:     items,
 	}, nil
 }
 
@@ -581,6 +555,10 @@ func plural(n int, one, many string) string {
 	}
 	return many
 }
+
+// KindLabel is the name of an event kind in the export: "hook", "action",
+// "status", "relation", "leader", "secret", "settle" or "unknown".
+func KindLabel(k narrative.EventKind) string { return eventKindLabel(k) }
 
 func eventKindLabel(k narrative.EventKind) string {
 	switch k {
