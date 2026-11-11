@@ -162,3 +162,37 @@ func TestExportRefusesWhatItCannotPackWell(t *testing.T) {
 		t.Errorf("a refused export left %s behind", out)
 	}
 }
+
+// A scoped export of a real-shaped recording holds the scope, says so in the
+// manifest, and inspect answers from it.
+func TestExportScopedToAUnitReadsBack(t *testing.T) {
+	src := opsRecording(t)
+	archive := filepath.Join(t.TempDir(), "unit.tar.gz")
+	if _, err := runExportCmd(t, src, "--unit", "otelcol/1", "-o", archive); err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	untar(t, archive, dst)
+	var dir string
+	ents, _ := os.ReadDir(dst)
+	for _, e := range ents {
+		dir = filepath.Join(dst, e.Name())
+	}
+	out, _, err := runInspect(t, "summary", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "a part of the recording, exported with --unit otelcol/1") || !strings.Contains(out, "2 events,") || strings.Contains(out, "otelcol/0") {
+		t.Errorf("summary of the unit's export:\n%s", out)
+	}
+
+	if _, err := runExportCmd(t, src, "--unit", "nosuch", "-o", filepath.Join(t.TempDir(), "none.tar.gz")); err == nil || !strings.Contains(err.Error(), "nothing in the recording matches") {
+		t.Errorf("a scope that matches nothing: %v", err)
+	}
+	if _, err := runExportCmd(t, src, "--model", "nosuch"); err == nil || !strings.Contains(err.Error(), "no model") {
+		t.Errorf("an unknown model: %v", err)
+	}
+	if _, err := runExportCmd(t, src, "--since", "2026-07-03T15:00:00Z", "--until", "2026-07-03T14:00:00Z"); err == nil {
+		t.Error("--until before --since should fail")
+	}
+}

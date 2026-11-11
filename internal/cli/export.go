@@ -4,17 +4,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/lucabello/juju-lens/internal/recording"
 
 	"github.com/spf13/cobra"
 )
 
+type exportFlags struct {
+	output string
+	models []string
+	units  []string
+	since  string
+	until  string
+}
+
 func newExportCmd() *cobra.Command {
-	var output string
+	f := &exportFlags{}
 	cmd := &cobra.Command{
 		Use:   "export <recording>",
-		Short: "Pack a recording into one file to share or attach",
+		Short: "Pack a recording, or part of it, into one file to share or attach",
 		Long: `export writes a recording as one gzipped tar file: its manifest, everything
 under raw/, and recorder.log. It leaves out index.db, which is as big as raw/
 and is rebuilt from it the first time anything reads the recording.
@@ -24,17 +34,55 @@ To read the file, extract it and point juju-lens at the directory it makes:
   tar -xzf my-capture.tar.gz
   juju-lens inspect summary my-capture
 
+Pack part of a recording with:
+
+  --model   only these models' files (repeatable)
+  --unit    only these units, or applications: their unit probe and workload
+            logs, and the lines of the debug log and the RPC capture that
+            name them (repeatable)
+  --since, --until
+            only lines in this time window (RFC 3339), read from each
+            line's own timestamp
+
+A hook that straddles the window is cut, and inspect marks it as cut. Status
+snapshots of a kept model are kept whole. The archive's manifest says it is
+partial.
+
 The recording must not be being written: stop a running recorder first.`,
+		Example: `  juju-lens export ./recordings/2026-11-11T17-54-31--expt
+  juju-lens export ./rec --model testing --unit grafana -o grafana.tar.gz
+  juju-lens export ./rec --since 2026-11-11T17:55:00Z --until 2026-11-11T17:57:00Z`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runExport(args[0], output, cmd)
+			return runExport(args[0], *f, cmd)
 		},
 	}
-	cmd.Flags().StringVarP(&output, "output", "o", "", "file to write (default: <recording directory name>.tar.gz in the current directory)")
+	fl := cmd.Flags()
+	fl.StringVarP(&f.output, "output", "o", "", "file to write (default: <recording directory name>.tar.gz in the current directory)")
+	fl.StringArrayVar(&f.models, "model", nil, "only this model (repeatable)")
+	fl.StringArrayVar(&f.units, "unit", nil, "only this unit or application (repeatable)")
+	fl.StringVar(&f.since, "since", "", "only lines at or after this time (RFC 3339)")
+	fl.StringVar(&f.until, "until", "", "only lines at or before this time (RFC 3339)")
 	return cmd
 }
 
-func runExport(dir, output string, cmd *cobra.Command) error {
+func runExport(dir string, f exportFlags, cmd *cobra.Command) error {
+	opts := recording.PackOptions{Models: f.models, Units: f.units}
+	var err error
+	if f.since != "" {
+		if opts.Since, err = time.Parse(time.RFC3339, f.since); err != nil {
+			return fmt.Errorf("--since: %w", err)
+		}
+	}
+	if f.until != "" {
+		if opts.Until, err = time.Parse(time.RFC3339, f.until); err != nil {
+			return fmt.Errorf("--until: %w", err)
+		}
+	}
+	if !opts.Since.IsZero() && !opts.Until.IsZero() && opts.Until.Before(opts.Since) {
+		return fmt.Errorf("--until is before --since")
+	}
+	output := f.output
 	if output == "" {
 		abs, err := filepath.Abs(dir)
 		if err != nil {
@@ -49,13 +97,21 @@ func runExport(dir, output string, cmd *cobra.Command) error {
 	} else if !ok {
 		return fmt.Errorf("no manifest.json under %q; is this a juju-lens recording?", dir)
 	}
-	f, err := os.Create(output)
+	for _, m := range f.models {
+		if !recording.HasModel(dir, m) {
+			return fmt.Errorf("no model %q in this recording (it has %s)", m, strings.Join(recording.Models(dir), ", "))
+		}
+	}
+	file, err := os.Create(output)
 	if err != nil {
 		return err
 	}
-	res, err := recording.Pack(dir, f)
-	if cerr := f.Close(); err == nil {
+	res, err := recording.Pack(dir, file, opts)
+	if cerr := file.Close(); err == nil {
 		err = cerr
+	}
+	if err == nil && res.RawFiles == 0 && (len(f.models) > 0 || len(f.units) > 0 || !opts.Since.IsZero() || !opts.Until.IsZero()) {
+		err = fmt.Errorf("nothing in the recording matches --model, --unit, --since and --until")
 	}
 	if err != nil {
 		_ = os.Remove(output)

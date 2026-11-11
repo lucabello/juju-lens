@@ -25,11 +25,12 @@ type Options struct {
 
 // RecordingInfo is what the manifest says of a recording.
 type RecordingInfo struct {
-	Dir        string    `json:"dir"`
-	Controller string    `json:"controller"`
-	AttachMode string    `json:"attach_mode,omitempty"` // what the recording captured: unit, host, host,unit or none
-	Started    time.Time `json:"started"`
-	Ended      time.Time `json:"ended,omitempty"`
+	Dir        string                 `json:"dir"`
+	Controller string                 `json:"controller"`
+	AttachMode string                 `json:"attach_mode,omitempty"` // what the recording captured: unit, host, host,unit or none
+	Exported   *recording.ExportScope `json:"exported,omitempty"`    // set when the recording is a part of another, made by export
+	Started    time.Time              `json:"started"`
+	Ended      time.Time              `json:"ended,omitempty"`
 }
 
 // StatusDetail is one status a hook set, ready for display: Who is "unit" or

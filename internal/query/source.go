@@ -47,7 +47,7 @@ func OpenSource(dir, model string) (*Source, error) {
 		return nil, fmt.Errorf("loading spans: %w", err)
 	}
 	s := &Source{
-		Recording: RecordingInfo{Dir: dir, Controller: man.Controller.Name, AttachMode: man.AttachMode, Started: man.Started, Ended: man.Ended},
+		Recording: RecordingInfo{Dir: dir, Controller: man.Controller.Name, AttachMode: man.AttachMode, Exported: man.Exported, Started: man.Started, Ended: man.Ended},
 		Model:     mm,
 		db:        db,
 		spans:     spans,

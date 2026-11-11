@@ -132,11 +132,16 @@ Opens a recording in the viewer. See [viewer keybindings](viewer-keybindings.md)
 juju-lens export <recording> [flags]
 ```
 
-Packs a recording into one gzipped tar file: its `manifest.json`, everything under `raw/`, and `recorder.log`. It leaves out `index.db`, which is rebuilt from `raw/` the first time anything reads the recording. The files are under one directory named after the recording, so extracting the file gives a recording directory. A recorder must not be writing to the recording: stop it first. See [how to share a recording](../how-to/share-a-recording.md).
+Packs a recording, or part of it, into one gzipped tar file: its `manifest.json`, everything under `raw/`, and `recorder.log`. It leaves out `index.db`, which is rebuilt from `raw/` the first time anything reads the recording. The files are under one directory named after the recording, so extracting the file gives a recording directory. A recorder must not be writing to the recording: stop it first. See [how to share a recording](../how-to/share-a-recording.md).
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--output`, `-o` | `<recording directory name>.tar.gz` | The file to write, in the current directory by default. |
+| `--model` | all | Only the files of this model. Repeatable. An error if the recording has no such model. |
+| `--unit` | all | Only this unit or application. Repeatable. It keeps the unit probe's files of the unit, on a machine of every unit its probe covers, and the workload logs of its pod; of the debug log and the RPC capture, only the lines that name it; and its entries in `status-log.json`. |
+| `--since`, `--until` | none | Only lines at or after, or at or before, this time, in RFC 3339 format. Each line's own timestamp decides. A unit probe's `hello` and `loader` records are kept whatever the time. |
+
+With any of these, the archive's `manifest.json` has an `exported` object with the scope, and `inspect summary` says that the recording is a part. Status snapshots of a kept model (`bootstrap.json`, `databags.json`, `config.json`) are kept whole. A line that continues the one before, as in a multi-line log message, follows it. A hook that straddles the window is cut: its records outside the window are gone. `export` fails, and writes no file, when nothing in the recording matches the scope.
 
 ## `inspect`
 

@@ -1,6 +1,6 @@
 # How to share a recording
 
-Use this guide to pack a recording into one file, to attach to an issue, upload from a CI job, or hand to someone else, and to read it again on another machine.
+Use this guide to pack a recording, or part of it, into one file, to attach to an issue, upload from a CI job, or hand to someone else, and to read it again on another machine.
 
 ## Prerequisites
 
@@ -22,6 +22,16 @@ juju-lens export ./recordings/my-capture --output my-capture.tar.gz
 ```
 
 The file holds `manifest.json`, everything under `raw/`, and `recorder.log`. It leaves out `index.db`, which is as large as `raw/` and is rebuilt from it. A recording of five charms over nine minutes was 19 MB of raw data and packed to 2.1 MB.
+
+## Pack part of a recording
+
+To share only what matters, scope the export to a model, a unit or application, or a time window:
+
+```bash
+juju-lens export ./recordings/my-capture --unit grafana --since 2026-11-11T17:55:00Z --until 2026-11-11T17:58:00Z
+```
+
+The archive is a recording of its own, and its manifest says that it is a part: `inspect summary` shows the scope. A hook that straddles the window is cut. The [command line reference](../reference/cli.md#export) describes what each flag keeps.
 
 ## Read a packed recording
 
