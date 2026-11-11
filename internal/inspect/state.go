@@ -129,9 +129,12 @@ func (l StateList) WriteText(w io.Writer, rec string, p Page) {
 	}
 	fmt.Fprintln(w, p.more(len(l.State), l.Total, "values"))
 	for _, k := range l.Missing {
-		if k == "databag" {
+		switch k {
+		case "databag":
 			fmt.Fprintln(w, "no relation data: a unit recording doesn't hold databag values; record with --attach host")
-		} else {
+		case "config":
+			fmt.Fprintln(w, "no config records match: config after the start of the recording comes only from a recording made with --attach host")
+		default:
 			fmt.Fprintf(w, "no %s records match\n", k)
 		}
 	}

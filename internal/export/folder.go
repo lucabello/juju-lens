@@ -477,8 +477,10 @@ func writeAgentsMD(dir string, want map[Part]bool, recDir string) error {
 		fmt.Fprintf(b, "- profiles/wall.folded, cpu.folded, mem.folded (only when the hooks were profiled) — every "+
 			"sampled stack of the charm, one per line, as folded stacks: `unit;event;span;outermost frame;…;innermost "+
 			"frame N`, with N the wall time and CPU time in microseconds, or the memory taken in bytes, "+
-			"added up over the hooks of that unit with that name. The span is `charm __init__` or an observer. "+
-			"`grep` a function name, or feed a file to a flame graph tool.\n")
+			"added up over the hooks of that unit with that name; each frame is `function (file:line)`, lines "+
+			"are largest first, and a stack with no value for that file is left out. The span is `charm __init__`, "+
+			"an observer, `deferred events`, an ops event, or `process`. `grep` a function name, or feed a "+
+			"file to a flame graph tool.\n")
 	}
 	if want[PartReport] {
 		fmt.Fprintf(b, "- report.md — the same data as one narrated document, for reading top "+

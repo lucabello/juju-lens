@@ -18,7 +18,7 @@ type TraceQuery struct {
 	All         bool          // list every span, call and function, however short
 	Depth       int           // at most this many levels below the process; 0 for all
 	MinDuration time.Duration // leave out rows shorter than this
-	Limit       int           // at most this many rows; 0 picks 80
+	Limit       int           // at most this many rows; 0 for all
 }
 
 // TraceRowJSON is a row of a trace.
@@ -59,8 +59,8 @@ type TraceReport struct {
 
 // TraceOf builds the trace of ev.
 func TraceOf(src *export.Source, rec string, ev narrative.Event, q TraceQuery) (*TraceReport, error) {
-	if q.Attempt == 0 {
-		q.Attempt = 1
+	if q.Attempt < 1 {
+		return nil, fmt.Errorf("--attempt counts from 1")
 	}
 	tr, attempts, hook, err := src.Trace(ev, q.Attempt, narrative.TraceOptions{Detail: q.Detail, All: q.All})
 	if err != nil {
@@ -73,7 +73,7 @@ func TraceOf(src *export.Source, rec string, ev narrative.Event, q TraceQuery) (
 	}
 	limit := q.Limit
 	if limit == 0 {
-		limit = 80
+		limit = int(^uint(0) >> 1)
 	}
 	for _, r := range tr.Rows {
 		if q.Depth > 0 && r.Depth > q.Depth {

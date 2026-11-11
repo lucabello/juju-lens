@@ -1,6 +1,6 @@
 # How to ask a recording questions
 
-Use this guide to find the slowest or costliest hooks of a recording, and the code behind them, with `juju-lens inspect`. It answers in short text, so that you, or an AI agent with a shell, can ask for what you need instead of reading every file of an [export](export-for-an-agent.md). `inspect events` lists every kind of event, which are mostly hooks.
+Use this guide to find a hook of a recording that went wrong or cost a lot, and read the code, logs and state behind it, with `juju-lens inspect`. It answers in short text, so that you, or an AI agent with a shell, can ask for what you need instead of reading every file of an [export](export-for-an-agent.md). `inspect events` lists every kind of event, which are mostly hooks.
 
 ## Prerequisites
 
@@ -87,11 +87,20 @@ juju-lens inspect trace ./rec e39d3d6c60330477 --min-duration 50ms
 juju-lens inspect memory ./rec e39d3d6c60330477
 ```
 
+The trace starts like this (excerpt):
+
+```text
+   START     TOOK      CPU   MEMORY  SPAN OR FUNCTION
+   0.0ms     3.9s             +70MB  config-changed  · exit 0
+   543ms     3.2s             +19MB    OpenTelemetryCollectorK8sCharm.__init__ (charm.py:93)  · 82% of the hook
+   545ms     3.2s     88ms    +19MB      OpenTelemetryCollectorK8sCharm._reconcile (charm.py:101)
+```
+
 A hook that was retried ran in more than one process; `--attempt 2` traces the second.
 
 ## Read the logs and the state around it
 
-List the log lines about a hook, the ones the index tied to it by its span ID marked with `*`, and the state Juju held when it ended:
+List the log lines about a hook, with `*` before the source of the ones the index tied to it by its span ID, and the state Juju held when it ended:
 
 ```bash
 juju-lens inspect logs ./rec --span e39d3d6c60330477 --window 5s
@@ -102,21 +111,35 @@ Filter logs further with `--unit`, `--level`, `--grep` and the time bounds. `sta
 
 ## Compare two hooks or two recordings
 
-`diff` lists the functions whose cost changed the most, per hook. Compare two hooks of a recording, or the same hook in a recording from before and after a change to the charm:
+`diff` lists the functions whose cost changed the most, per hook. Compare two hooks of a recording, with the span IDs from `events`:
+
+```bash
+juju-lens inspect diff ./rec --span-a e39d3d6c60330477 --span-b <other-span-id>
+```
+
+Or compare the same hook in a recording from before and after a change to the charm:
 
 ```bash
 juju-lens inspect diff ./before ./after --unit otelcol --name config-changed --metric mem
+```
+
+The table starts with the totals of each side, then lists each function (excerpt):
+
+```text
+A      B      CHANGE  FUNCTION
+580ms  1.7s   +1.2s   SocketIO.readinto (socket.py)
+450ms  1.1s   +630ms  dump (yaml/__init__.py)
 ```
 
 For the shape of a whole recording first, `juju-lens inspect summary ./rec` prints what `SUMMARY.md` of the export has, for any scope.
 
 ## If a command finds nothing
 
-A recording with several models needs `--model`. A recording made with `--attach host` alone, or with `--profile=false`, has events but no stack samples, so `profile` stops with an error that says so.
+A recording with several models needs `--model`. A recording made with `--attach host` alone, or with `--profile=false`, has events but no stack samples, so `profile` stops with an error that says so; `memory` and `trace` need a hook recorded with `--attach unit` and stop the same way. `logs` prints `no log lines match` when the recording holds none, and `state` says when there is no relation data, which only a recording made with `--attach host` has.
 
 ## Use JSON
 
-Every command takes `--json`. For example, to pick the span of the costliest hook in a script:
+Every command except `summary` takes `--json`. For example, to pick the span of the costliest hook in a script:
 
 ```bash
 juju-lens inspect events ./rec --sort cpu --limit 1 --json | jq -r '.events[0].span_id'

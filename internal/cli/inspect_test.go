@@ -605,3 +605,35 @@ func TestInspectSummaryScopes(t *testing.T) {
 		t.Errorf("summary lacks the cost section or the next step:\n%s", all)
 	}
 }
+
+// Flags that can't be used together, or that mean nothing alone, are
+// refused instead of being ignored.
+func TestInspectRefusesFlagsThatWouldBeIgnored(t *testing.T) {
+	dir := opsRecording(t)
+	var list inspect.EventList
+	out, _, _ := runInspect(t, "events", dir, "--json", "--limit", "1")
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		t.Fatal(err)
+	}
+	id := list.Events[0].SpanID
+	for _, tc := range [][]string{
+		{"logs", dir, "--window", "5s"},
+		{"logs", dir, "--span", id, "--around", "2026-07-03T14:30:20Z"},
+		{"logs", dir, "--level", "loud"},
+		{"state", dir, "--span", id, "--at", "2026-07-03T14:30:20Z"},
+		{"trace", dir, id, "--attempt", "0"},
+	} {
+		if _, _, err := runInspect(t, tc...); err == nil {
+			t.Errorf("inspect %v: want an error", tc)
+		}
+	}
+	// --limit 0 shows every row of a trace.
+	var tr inspect.TraceReport
+	out, _, err := runInspect(t, "trace", dir, id, "--json", "--all", "--limit", "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(out), &tr); err != nil || len(tr.Rows) != tr.Total {
+		t.Errorf("--limit 0: %d rows of %d (%v)", len(tr.Rows), tr.Total, err)
+	}
+}

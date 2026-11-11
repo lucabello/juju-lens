@@ -405,7 +405,7 @@ Short rows are left out unless --all.`,
 	cmd.Flags().BoolVar(&all, "all", false, "list every span, call and function, however short")
 	cmd.Flags().IntVar(&depth, "depth", 0, "only this many levels below the process (0 = all)")
 	cmd.Flags().DurationVar(&minDur, "min-duration", 0, "leave out rows shorter than this, such as 50ms")
-	cmd.Flags().IntVar(&limit, "limit", 80, "show at most this many rows (0 = 80)")
+	cmd.Flags().IntVar(&limit, "limit", 80, "show at most this many rows (0 = all)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	return cmd
 }
@@ -455,6 +455,12 @@ within --window of the hook (2s by default).`,
 				return
 			}
 			q.Since, q.Until = parse("since", since), parse("until", until)
+			if around != "" && span != "" {
+				return fmt.Errorf("--around and --span can't be combined: --span is the hook's own time, with --window around it")
+			}
+			if window != 0 && around == "" && span == "" {
+				return fmt.Errorf("--window needs --around or --span")
+			}
 			if around != "" {
 				at := parse("around", around)
 				w := window
@@ -533,6 +539,9 @@ hooks' own calls; relation data values come only from a recording made with
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			q := inspect.StateQuery{Page: inspect.Page{Limit: limit, Skip: skip}, Kind: kind, Span: span, Match: match, Width: width}
+			if at != "" && span != "" {
+				return fmt.Errorf("--at and --span can't be combined: --span is the time its hook ended")
+			}
 			if at != "" {
 				t, err := time.Parse(time.RFC3339, at)
 				if err != nil {

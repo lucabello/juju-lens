@@ -29,6 +29,9 @@ type LogsQuery struct {
 	Width int
 }
 
+// logLevels are the levels a log line has.
+var logLevels = []string{"TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
 // LogRow is a log line.
 type LogRow struct {
 	TS      time.Time `json:"ts"`
@@ -58,6 +61,11 @@ type LogList struct {
 func ListLogs(src *export.Source, q LogsQuery) (LogList, error) {
 	var rows []index.LogRow
 	list := LogList{Recording: src.Recording.Dir, Model: src.Model.Name, Logs: []LogRow{}, width: q.Width}
+	for _, l := range q.Levels {
+		if !containsEq(l, logLevels) {
+			return list, fmt.Errorf("unknown --level %q (want one of %s)", l, strings.Join(logLevels, ", "))
+		}
+	}
 	if q.Source != "" && q.Source != "debug-log" && q.Source != "k8s" && q.Source != "journal" {
 		return list, fmt.Errorf("unknown --source %q (want debug-log, k8s or journal)", q.Source)
 	}
