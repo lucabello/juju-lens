@@ -69,19 +69,20 @@ type Memory struct {
 	spanByID func(string) (recording.SpanRow, bool)
 }
 
-// LoadMemory reads the memory around ev. It returns a Memory with no hook
-// start when ev has no charm-side records (the recording wasn't made with
+// LoadMemory reads the memory around a hook of a unit, given the roots of the
+// hook's processes (Event.OpsSpans). It returns a Memory with no hook
+// start when the hook has no charm-side records (the recording wasn't made with
 // --attach unit). spans are the model's spans.
-func LoadMemory(db *index.DB, modelID int64, spans []recording.SpanRow, ev Event) (*Memory, error) {
+func LoadMemory(db *index.DB, modelID int64, spans []recording.SpanRow, unitName string, opsSpans []string) (*Memory, error) {
 	byID := make(map[string]recording.SpanRow, len(spans))
 	for _, sp := range spans {
 		byID[sp.SpanID] = sp
 	}
 	m := &Memory{spanByID: func(id string) (recording.SpanRow, bool) { sp, ok := byID[id]; return sp, ok }}
-	if len(ev.OpsSpans) == 0 {
+	if len(opsSpans) == 0 {
 		return m, nil
 	}
-	for _, id := range ev.OpsSpans {
+	for _, id := range opsSpans {
 		sp, ok := byID[id]
 		if !ok {
 			continue
@@ -96,9 +97,9 @@ func LoadMemory(db *index.DB, modelID int64, spans []recording.SpanRow, ev Event
 	if m.HookStart.IsZero() {
 		return m, nil
 	}
-	m.Host, _ = db.SpanHost(ev.OpsSpans[0])
+	m.Host, _ = db.SpanHost(opsSpans[0])
 	linger := unit.DefaultLinger
-	if root, ok := byID[ev.OpsSpans[0]]; ok {
+	if root, ok := byID[opsSpans[0]]; ok {
 		m.Peak, m.PeakExact = hookPeak(root.Attrs)
 		if ms, err := strconv.ParseInt(root.Attrs[recording.AttrResLingerMs], 10, 64); err == nil && ms > 0 {
 			linger = time.Duration(ms) * time.Millisecond
@@ -154,12 +155,12 @@ func LoadMemory(db *index.DB, modelID int64, spans []recording.SpanRow, ev Event
 	// The unit's hook processes in the window, and their RSS.
 	var roots []string
 	for _, sp := range spans {
-		if sp.Service != recording.ServiceOps || sp.ParentSpanID != "" || sp.Unit != ev.Unit ||
+		if sp.Service != recording.ServiceOps || sp.ParentSpanID != "" || sp.Unit != unitName ||
 			sp.Attrs["kind"] != recording.OpsRoot || sp.End.Before(m.From) || sp.Start.After(m.To) {
 			continue
 		}
 		this := false
-		for _, id := range ev.OpsSpans {
+		for _, id := range opsSpans {
 			this = this || id == sp.SpanID
 		}
 		name := sp.Name

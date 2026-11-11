@@ -209,7 +209,7 @@ func (s *Source) SpanProfile(spanID string) (*narrative.Profile, narrative.Event
 // Memory reads the memory around ev: the unit's cgroups, the charm
 // process's resident memory, the hooks and the Pebble changes near it.
 func (s *Source) Memory(ev narrative.Event) (*narrative.Memory, error) {
-	return narrative.LoadMemory(s.db, s.Model.ID, s.spans, ev)
+	return narrative.LoadMemory(s.db, s.Model.ID, s.spans, ev.Unit, ev.OpsSpans)
 }
 
 // Trace lays out one process of the hook ev (attempt counts from 1) along
