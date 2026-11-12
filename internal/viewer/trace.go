@@ -351,6 +351,10 @@ func (m *model) renderTraceView(b *strings.Builder, ev event) {
 	st := &m.trace
 	d, ok := m.traceBuild(ev)
 	if !ok {
+		if ev.tap != "" {
+			renderTap(b, ev) // the hook was in scope; say why there's nothing, not how to record
+			return
+		}
 		fmt.Fprintf(b, "%s\n", styleDim.Render("no charm-side trace for this hook: record with --attach unit"))
 		return
 	}

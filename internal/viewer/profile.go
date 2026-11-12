@@ -631,6 +631,10 @@ func (m *model) renderFlameView(b *strings.Builder, ev event) {
 	st.ensure()
 	d, ok := m.flameData(ev, m.flameWidth())
 	if !ok {
+		if ev.tap != "" {
+			renderTap(b, ev) // the hook was in scope; say why there's nothing, not how to record
+			return
+		}
 		fmt.Fprintf(b, "%s\n", styleDim.Render("no stack samples for this hook: record with --attach unit (and --profile, on by default) to sample them"))
 		return
 	}

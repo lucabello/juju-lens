@@ -75,6 +75,7 @@ When the recording is indexed, each hook or action that ran on a unit a unit pro
 | `the tap can't be installed: <reason>` | The probe skipped the charm, for example because it has its own `sitecustomize.py`. |
 | `the tap couldn't be set up on the host: <reason>` | The probe couldn't create the spool. |
 | `the tap wasn't installed yet: the pod had just started` | The unit's agent started during the recording, and the hook ran before the probe installed the tap in the new venv: on Kubernetes, the first hooks in a pod a refresh recreated. |
+| `the unit probe wasn't running yet: the machine had just started` | The unit's agent started during the recording, and the hook ran before the probe, which reaches a new machine over `juju ssh` only once it is up, was running: on machine models, the first hooks of a machine added during the recording. |
 | `the tap wasn't installed yet` | The hook ran before the probe installed the tap. |
 | `the tap wasn't back yet in the venv a refresh replaced` | A refresh replaced the venv, and the hook ran before the probe put the tap back. |
 | `the unit probe hadn't started yet` | The hook ran before the unit's first probe session. |

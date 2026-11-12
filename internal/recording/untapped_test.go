@@ -1,6 +1,7 @@
 package recording
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -116,5 +117,34 @@ func TestOpsKilledProcessIsTruncated(t *testing.T) {
 	want := "22:21:12 config-changed truncated " + ReasonKilled + " ERROR"
 	if len(truncated) != 1 || truncated[0] != want {
 		t.Fatalf("truncated roots = %q, want [%q]", truncated, want)
+	}
+}
+
+// A hook that ran on a new machine before the unit probe reached it is
+// explained in terms of the machine, not a pod.
+func TestTapCoverageReasonOnNewMachine(t *testing.T) {
+	for _, c := range []struct{ substrate, want string }{
+		{"machine", ReasonMachineStart},
+		{"kubernetes", ReasonPodStart},
+	} {
+		root := t.TempDir()
+		dir := filepath.Join(root, "raw", "unit", "m1", "host-0")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		hello := `{"kind":"hello","ts":"2026-11-12T12:33:36Z","hello":{"substrate":"` + c.substrate +
+			`","units":["ubuntu/0"],"agent_start":"2026-11-12T12:33:13Z"}}` + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "unit-2026-11-12T12.jsonl"), []byte(hello), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		since, _ := time.Parse(time.RFC3339, "2026-11-12T12:32:31Z")
+		cov, err := LoadTapCoverage(root, since)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hook, _ := time.Parse(time.RFC3339, "2026-11-12T12:33:14Z")
+		if got := cov.Reason("m1", "ubuntu/0", hook); got != c.want {
+			t.Errorf("%s: reason %q, want %q", c.substrate, got, c.want)
+		}
 	}
 }

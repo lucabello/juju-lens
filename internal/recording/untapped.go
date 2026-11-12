@@ -42,6 +42,7 @@ const (
 	ReasonAfterProbe    = "the unit probe had stopped"
 	ReasonNoSession     = "no unit probe session was running"
 	ReasonPodStart      = "the tap wasn't installed yet: the pod had just started"
+	ReasonMachineStart  = "the unit probe wasn't running yet: the machine had just started"
 	ReasonNotInstalled  = "the tap wasn't installed yet"
 	ReasonVenvReplaced  = "the tap wasn't back yet in the venv a refresh replaced"
 	ReasonRemoved       = "the tap had been removed"
@@ -229,6 +230,7 @@ type hostSession struct {
 	unavailAt   time.Time // when the spool couldn't be set up; zero if it could
 	unavailWhy  string
 	prevEnd     time.Time // the end of the host's previous session
+	substrate   string    // unit.Hello.Substrate: "kubernetes" or "machine"
 	hasPrevious bool
 }
 
@@ -278,7 +280,7 @@ func LoadTapCoverage(root string, since time.Time) (*TapCoverage, error) {
 				continue
 			}
 			if r.Kind == unit.KindHello && r.Hello != nil {
-				hs := &hostSession{start: r.TS, end: r.TS, agentStart: r.Hello.AgentStart}
+				hs := &hostSession{start: r.TS, end: r.TS, agentStart: r.Hello.AgentStart, substrate: r.Hello.Substrate}
 				if prev := cur[hk]; prev != nil {
 					hs.prevEnd, hs.hasPrevious = prev.end, true
 				}
@@ -360,7 +362,7 @@ func (c *TapCoverage) Reason(model, unitName string, t time.Time) string {
 	i := sort.Search(len(uc.sessions), func(i int) bool { return uc.sessions[i].host.start.After(t) }) - 1
 	if i < 0 {
 		if next := uc.sessions[0].host; c.podStarted(next) && !t.Before(next.agentStart) {
-			return ReasonPodStart
+			return startReason(next)
 		}
 		return ReasonBeforeProbe
 	}
@@ -370,7 +372,7 @@ func (c *TapCoverage) Reason(model, unitName string, t time.Time) string {
 			return ReasonAfterProbe
 		}
 		if next := uc.sessions[i+1].host; c.podStarted(next) && !t.Before(next.agentStart) {
-			return ReasonPodStart
+			return startReason(next)
 		}
 		return ReasonNoSession
 	}
@@ -411,9 +413,20 @@ func (c *TapCoverage) Reason(model, unitName string, t time.Time) string {
 		}
 	}
 	if c.podStarted(cs.host) && !t.Before(cs.host.agentStart) {
-		return ReasonPodStart
+		return startReason(cs.host)
 	}
 	return ReasonNotInstalled
+}
+
+// startReason names what the host's agent starting during the recording
+// means for the tap: on a machine, the probe reaches a new machine over ssh
+// only once it is up, after its first hooks; in a pod, the new venv has no
+// tap yet.
+func startReason(hs *hostSession) string {
+	if hs.substrate == "machine" {
+		return ReasonMachineStart
+	}
+	return ReasonPodStart
 }
 
 // podStarted reports whether the agent of session hs started during the
