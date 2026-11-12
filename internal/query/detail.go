@@ -1,11 +1,9 @@
-// Package export assembles a recording's derived narrative — hook runs,
-// their failure state, the statuses/databags/config they changed, and every
-// correlated log line — into a single, merged, time-ordered document meant
-// to be handed to a human or an LLM agent debugging an issue offline. It sits
-// on top of internal/narrative (the derivation) and internal/index (the
-// SQLite query layer); it never imports internal/viewer, so it carries none
-// of the TUI's rendering concerns.
-package export
+// Package query reads a recording's index for the inspect commands: its
+// events, what each cost, its stack samples, memory, trace and logs. It sits
+// on internal/narrative (the derivation) and internal/index (the SQLite query
+// layer); it never imports internal/viewer, so it carries none of the TUI's
+// rendering concerns.
+package query
 
 import (
 	"fmt"
@@ -18,32 +16,21 @@ import (
 	"github.com/lucabello/juju-lens/internal/recording"
 )
 
-// Options configures what an export includes.
+// Options narrows the events a Source lists.
 type Options struct {
-	Model      string    `json:"model,omitempty"`
-	Units      []string  `json:"units,omitempty"` // each may be a unit ("grafana/0") or an application ("grafana") name; empty = all
-	Since      time.Time `json:"since,omitempty"`
-	Until      time.Time `json:"until,omitempty"`
-	ErrorsOnly bool      `json:"errors_only,omitempty"` // keep only failed hook runs, plus one same-unit neighbour on each side for context
+	Units []string  // each may be a unit ("grafana/0") or an application ("grafana") name; empty = all
+	Since time.Time // events from this time on
+	Until time.Time // events up to this time
 }
 
-// contextPad is how far around the surviving events' time span logs are
-// still included, so a log line immediately before/after the first/last
-// included event isn't dropped at the boundary.
-const contextPad = 10 * time.Second
-
-// RecordingInfo is the manifest-derived header of an export.
+// RecordingInfo is what the manifest says of a recording.
 type RecordingInfo struct {
-	Dir        string    `json:"dir"`
-	Controller string    `json:"controller"`
-	Started    time.Time `json:"started"`
-	Ended      time.Time `json:"ended,omitempty"`
-}
-
-// ModelInfo identifies the model an export was built from.
-type ModelInfo struct {
-	Name string `json:"name"`
-	UUID string `json:"uuid,omitempty"`
+	Dir        string                 `json:"dir"`
+	Controller string                 `json:"controller"`
+	AttachMode string                 `json:"attach_mode,omitempty"` // what the recording captured: unit, host, host,unit or none
+	Exported   *recording.ExportScope `json:"exported,omitempty"`    // set when the recording is a part of another, made by export
+	Started    time.Time              `json:"started"`
+	Ended      time.Time              `json:"ended,omitempty"`
 }
 
 // StatusDetail is one status a hook set, ready for display: Who is "unit" or
@@ -85,27 +72,27 @@ type ConfigDetail struct {
 // statuses it set, the databag/config it changed, and what the charm did
 // in each process that ran the hook.
 type EventDetail struct {
-	TS              time.Time            `json:"ts"`
-	Kind            string               `json:"kind"`
-	Unit            string               `json:"unit,omitempty"`
-	App             string               `json:"app,omitempty"`
-	Summary         string               `json:"summary"`
-	Detail          string               `json:"detail,omitempty"`
-	Fail            string               `json:"fail"` // narrative.FailState.String(); "none" when clean
-	FailExplanation string               `json:"fail_explanation,omitempty"`
-	Statuses        []StatusDetail       `json:"statuses,omitempty"`
-	DurationMS      int64                `json:"duration_ms,omitempty"`
-	Running         bool                 `json:"running,omitempty"`
-	Tap             string               `json:"tap,omitempty"`        // "missing" or "truncated": the tap didn't record the hook in full
-	TapReason       string               `json:"tap_reason,omitempty"` // why, when known
-	Databags        []DatabagDetail      `json:"databags,omitempty"`
-	Config          *ConfigDetail        `json:"config,omitempty"`
-	Ops             []*narrative.OpsNode `json:"ops,omitempty"`               // one span tree per process (attempt) that ran the hook, every span included
-	Costs           []SpanCost           `json:"costs,omitempty"`             // what charm init and each observer cost, in the order they ran
-	TopStacks       []StackDetail        `json:"top_stacks,omitempty"`        // the stacks the hook's processes spent the most wall time in
-	TopMemStacks    []StackDetail        `json:"top_memory_stacks,omitempty"` // the stacks that saw the most memory growth
-	SpanID          string               `json:"span_id,omitempty"`
-	Context         bool                 `json:"context,omitempty"` // included only as a neighbour of a failure under --errors-only, not itself a failure
+	TS              time.Time              `json:"ts"`
+	Kind            string                 `json:"kind"`
+	Unit            string                 `json:"unit,omitempty"`
+	App             string                 `json:"app,omitempty"`
+	Summary         string                 `json:"summary"`
+	Detail          string                 `json:"detail,omitempty"`
+	Fail            string                 `json:"fail"` // narrative.FailState.String(); "none" when clean
+	FailExplanation string                 `json:"fail_explanation,omitempty"`
+	Statuses        []StatusDetail         `json:"statuses,omitempty"`
+	DurationMS      int64                  `json:"duration_ms,omitempty"`
+	Running         bool                   `json:"running,omitempty"`
+	Tap             string                 `json:"tap,omitempty"`        // "missing" or "truncated": the tap didn't record the hook in full
+	TapReason       string                 `json:"tap_reason,omitempty"` // why, when known
+	Databags        []DatabagDetail        `json:"databags,omitempty"`
+	Config          *ConfigDetail          `json:"config,omitempty"`
+	Ops             []*narrative.OpsNode   `json:"ops,omitempty"`               // one span tree per process (attempt) that ran the hook, every span included
+	Costs           []SpanCost             `json:"costs,omitempty"`             // what charm init and each observer cost, in the order they ran
+	TopStacks       []StackDetail          `json:"top_stacks,omitempty"`        // the stacks the hook's processes spent the most wall time in
+	TopMemStacks    []StackDetail          `json:"top_memory_stacks,omitempty"` // the stacks that saw the most memory growth
+	SpanID          string                 `json:"span_id,omitempty"`
+	profs           []recording.OpsProfile // the stack samples of the hook's processes, for the folded stacks
 }
 
 // SpanCost is what charm init or one observer cost: its wall time, and the
@@ -133,6 +120,9 @@ type StackDetail struct {
 	// digest is what the Markdown shows of Frames: the innermost few, then
 	// the charm's own frames among the rest, with gaps marked.
 	digest []string
+	// charmFrame is the innermost frame of the charm's own code, which says
+	// more about what the charm was doing than a socket read at the top.
+	charmFrame string
 }
 
 // Stack digests show this many innermost frames, then up to this many of
@@ -144,136 +134,6 @@ const (
 
 // topStacks is how many stacks the export lists per hook and metric.
 const topStacks = 5
-
-// LogDetail is one merged log line.
-type LogDetail struct {
-	TS     time.Time `json:"ts"`
-	Source string    `json:"source"`
-	Unit   string    `json:"unit,omitempty"`
-	Entity string    `json:"entity,omitempty"`
-	Level  string    `json:"level,omitempty"`
-	Module string    `json:"module,omitempty"`
-	Body   string    `json:"body"`
-	SpanID string    `json:"span_id,omitempty"` // the span this log line correlated to, if any (index.DB.Logs' exact-match join)
-}
-
-// Item is one line of the merged, time-ordered export: either an event or a
-// log line, never both.
-type Item struct {
-	TS    time.Time    `json:"ts"`
-	Kind  string       `json:"kind"` // "event" | "log"
-	Event *EventDetail `json:"event,omitempty"`
-	Log   *LogDetail   `json:"log,omitempty"`
-}
-
-// Summary is the at-a-glance header both output formats lead with.
-type Summary struct {
-	TotalEvents   int       `json:"total_events"`
-	ErroredEvents int       `json:"errored_events"`
-	RetriedEvents int       `json:"retried_events"`
-	RPCWarnEvents int       `json:"rpc_warn_events"`
-	TotalLogs     int       `json:"total_logs"`
-	UnitsInScope  []string  `json:"units_in_scope,omitempty"`
-	Start         time.Time `json:"start,omitempty"`
-	End           time.Time `json:"end,omitempty"`
-}
-
-// Result is the fully assembled, filtered export, format-agnostic.
-type Result struct {
-	Recording RecordingInfo `json:"recording"`
-	Model     ModelInfo     `json:"model"`
-	Filters   Options       `json:"filters"`
-	Summary   Summary       `json:"summary"`
-	Items     []Item        `json:"items"`
-}
-
-// Build opens a recording's index (which must already exist — the same
-// precondition as `juju-lens view`; export does not index on the fly), derives
-// its narrative, applies opts, and assembles a Result. It does not render
-// anything.
-func Build(dir string, opts Options) (*Result, error) {
-	man, err := recording.Load(dir)
-	if err != nil {
-		return nil, fmt.Errorf("loading manifest at %s: %w", dir, err)
-	}
-	layout := recording.NewLayout(dir)
-	db, err := index.Open(layout.IndexDB())
-	if err != nil {
-		return nil, fmt.Errorf("opening index (run `juju-lens index %s`): %w", dir, err)
-	}
-	defer db.Close()
-
-	mm, err := resolveModel(db, opts.Model)
-	if err != nil {
-		return nil, err
-	}
-
-	spans, err := db.Spans(mm.ID)
-	if err != nil {
-		return nil, fmt.Errorf("loading spans: %w", err)
-	}
-	spanByID := make(map[string]recording.SpanRow, len(spans))
-	for _, sp := range spans {
-		spanByID[sp.SpanID] = sp
-	}
-	databagSpans, _ := db.ProducingSpanIDs(mm.ID, string(index.KindDatabag))
-	unitStatusBySpan, _ := db.StatusBySpan(mm.ID, string(index.KindUnitStatus))
-	appStatusBySpan, _ := db.StatusBySpan(mm.ID, string(index.KindAppStatus))
-	statusBySpan := narrative.StatusMapFromSnapshots(unitStatusBySpan, appStatusBySpan)
-	events := narrative.BuildEventsWithStatus(spans, databagSpans, statusBySpan)
-	ops := narrative.NewOpsIndex(spans)
-
-	units := unitSet(opts.Units)
-	scoped := filterEvents(events, units, opts.Since, opts.Until)
-	final, contextOnly := applyErrorsOnly(scoped, opts.ErrorsOnly)
-
-	lo, hi := timeWindow(opts, final)
-	logs, err := db.Logs(mm.ID, 0)
-	if err != nil {
-		return nil, fmt.Errorf("loading logs: %w", err)
-	}
-	logs = filterLogs(logs, units, lo, hi)
-
-	items := make([]Item, 0, len(final)+len(logs))
-	summary := Summary{UnitsInScope: opts.Units}
-	for _, ev := range final {
-		sp := spanByID[ev.SpanID]
-		detail := buildEventDetail(db, mm.ID, ev, sp, ops, contextOnly[ev.SpanID])
-		items = append(items, Item{TS: ev.TS, Kind: "event", Event: &detail})
-		summary.TotalEvents++
-		switch ev.Fail {
-		case narrative.FailErrored:
-			summary.ErroredEvents++
-		case narrative.FailRetried:
-			summary.RetriedEvents++
-		case narrative.FailRPCWarn:
-			summary.RPCWarnEvents++
-		}
-	}
-	for i := range logs {
-		lg := logs[i]
-		items = append(items, Item{TS: lg.Ts, Kind: "log", Log: &LogDetail{
-			TS: lg.Ts, Source: lg.Source, Unit: lg.Unit, Entity: lg.Entity,
-			Level: lg.Level, Module: lg.Module, Body: lg.Body, SpanID: lg.SpanID,
-		}})
-		summary.TotalLogs++
-	}
-	sort.SliceStable(items, func(i, j int) bool { return items[i].TS.Before(items[j].TS) })
-	if len(items) > 0 {
-		summary.Start, summary.End = items[0].TS, items[len(items)-1].TS
-	}
-
-	return &Result{
-		Recording: RecordingInfo{
-			Dir: dir, Controller: man.Controller.Name,
-			Started: man.Started, Ended: man.Ended,
-		},
-		Model:   ModelInfo{Name: mm.Name, UUID: mm.UUID},
-		Filters: opts,
-		Summary: summary,
-		Items:   items,
-	}, nil
-}
 
 // resolveModel picks the model an export focuses on: the explicitly named
 // one, the only one when there's exactly one, or an error listing the
@@ -353,127 +213,16 @@ func filterEvents(events []narrative.Event, units map[string]bool, since, until 
 	return out
 }
 
-// applyErrorsOnly, when enabled, keeps only hook runs that actually failed
-// (errored/retried/rpc-warn — not "interrupted", which usually just means the
-// recording was truncated, not that the charm broke) plus one same-unit
-// neighbour on each side so a reader sees what led up to and followed the
-// failure. It returns the final event list and the set of span ids that were
-// pulled in only as context (not themselves failures).
-func applyErrorsOnly(scoped []narrative.Event, errorsOnly bool) (final []narrative.Event, contextOnly map[string]bool) {
-	if !errorsOnly {
-		return scoped, nil
-	}
-	contextOnly = map[string]bool{}
-	keep := map[string]bool{}
-	byUnit := map[string][]int{}
-	for i, ev := range scoped {
-		byUnit[ev.Unit] = append(byUnit[ev.Unit], i)
-	}
-	isFailure := func(ev narrative.Event) bool {
-		switch ev.Fail {
-		case narrative.FailErrored, narrative.FailRetried, narrative.FailRPCWarn:
-			return true
-		}
-		return false
-	}
-	for i, ev := range scoped {
-		if !isFailure(ev) {
-			continue
-		}
-		keep[ev.SpanID] = true
-		idxs := byUnit[ev.Unit]
-		pos := -1
-		for p, idx := range idxs {
-			if idx == i {
-				pos = p
-				break
-			}
-		}
-		if pos < 0 {
-			continue
-		}
-		if pos > 0 {
-			nb := scoped[idxs[pos-1]]
-			if !keep[nb.SpanID] {
-				contextOnly[nb.SpanID] = true
-			}
-			keep[nb.SpanID] = true
-		}
-		if pos+1 < len(idxs) {
-			nb := scoped[idxs[pos+1]]
-			if !keep[nb.SpanID] {
-				contextOnly[nb.SpanID] = true
-			}
-			keep[nb.SpanID] = true
-		}
-	}
-	for _, ev := range scoped {
-		if keep[ev.SpanID] {
-			final = append(final, ev)
-		}
-	}
-	return final, contextOnly
-}
-
-// timeWindow is the [lo, hi] range logs are kept within: the explicit
-// --since/--until bounds when given, else the surviving events' own span
-// padded by contextPad so boundary logs aren't dropped.
-func timeWindow(opts Options, events []narrative.Event) (lo, hi time.Time) {
-	lo, hi = opts.Since, opts.Until
-	if !lo.IsZero() && !hi.IsZero() {
-		return lo, hi
-	}
-	var evLo, evHi time.Time
-	for _, ev := range events {
-		if evLo.IsZero() || ev.TS.Before(evLo) {
-			evLo = ev.TS
-		}
-		if evHi.IsZero() || ev.TS.After(evHi) {
-			evHi = ev.TS
-		}
-	}
-	if lo.IsZero() && !evLo.IsZero() {
-		lo = evLo.Add(-contextPad)
-	}
-	if hi.IsZero() && !evHi.IsZero() {
-		hi = evHi.Add(contextPad)
-	}
-	return lo, hi
-}
-
-// filterLogs keeps log lines matching the unit scope (or carrying no
-// unit/entity at all) within [lo, hi]. A zero lo/hi bound is unbounded.
-func filterLogs(logs []index.LogRow, units map[string]bool, lo, hi time.Time) []index.LogRow {
-	out := make([]index.LogRow, 0, len(logs))
-	for _, lg := range logs {
-		who := lg.Unit
-		if who == "" {
-			who = lg.Entity
-		}
-		if !scopeMatches(units, appOf(who), lg.Unit) {
-			continue
-		}
-		if !lo.IsZero() && lg.Ts.Before(lo) {
-			continue
-		}
-		if !hi.IsZero() && lg.Ts.After(hi) {
-			continue
-		}
-		out = append(out, lg)
-	}
-	return out
-}
-
 // buildEventDetail enriches ev with the same data the TUI's inspector
 // overlay gathers for it: the failure explanation, statuses set, the
 // databag/config it changed, and the charm-side span trees.
-func buildEventDetail(db *index.DB, modelID int64, ev narrative.Event, sp recording.SpanRow, ops *narrative.OpsIndex, contextOnly bool) EventDetail {
+func buildEventDetail(db *index.DB, modelID int64, ev narrative.Event, sp recording.SpanRow, ops *narrative.OpsIndex) EventDetail {
 	d := EventDetail{
 		TS: ev.TS, Kind: eventKindLabel(ev.Kind), Unit: ev.Unit, App: ev.App,
 		Summary: ev.Summary, Detail: ev.Detail, Fail: ev.Fail.String(),
 		DurationMS: ev.Dur.Milliseconds(), Running: ev.Running,
 		Tap: ev.Tap, TapReason: ev.TapReason,
-		Ops: ops.Trees(ev.OpsSpans), SpanID: ev.SpanID, Context: contextOnly,
+		Ops: ops.Trees(ev.OpsSpans), SpanID: ev.SpanID,
 	}
 	addCosts(db, &d, ops)
 	if ev.Fail != narrative.FailNone {
@@ -502,6 +251,7 @@ func addCosts(db *index.DB, d *EventDetail, ops *narrative.OpsIndex) {
 		return
 	}
 	profs, _ := db.Profiles(narrative.ProcessRoots(d.Ops))
+	d.profs = profs
 	narrative.AttachCosts(d.Ops, profs)
 	var walk func(n *narrative.OpsNode, attempt int)
 	walk = func(n *narrative.OpsNode, attempt int) {
@@ -546,6 +296,9 @@ func stackDetails(p *narrative.Profile, m narrative.Metric, ops *narrative.OpsIn
 			fn, loc := p.FrameLabel(f)
 			label := fn + " (" + loc + ")"
 			sd.Frames = append(sd.Frames, label)
+			if sd.charmFrame == "" && p.IsCharmFrame(f) && !narrative.IsWrapperFrame(p.Frames[f]) {
+				sd.charmFrame = label
+			}
 			if i < digestInner || p.IsCharmFrame(f) && !narrative.IsWrapperFrame(p.Frames[f]) && charm < digestCharm {
 				if skipped > 0 {
 					sd.digest = append(sd.digest, fmt.Sprintf("… %d %s", skipped, plural(skipped, "frame", "frames")))
@@ -575,6 +328,10 @@ func plural(n int, one, many string) string {
 	}
 	return many
 }
+
+// KindLabel is the name of an event kind in the export: "hook", "action",
+// "status", "relation", "leader", "secret", "settle" or "unknown".
+func KindLabel(k narrative.EventKind) string { return eventKindLabel(k) }
 
 func eventKindLabel(k narrative.EventKind) string {
 	switch k {

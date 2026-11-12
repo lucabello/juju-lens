@@ -34,7 +34,7 @@ func newProbeCmd(bi BuildInfo) *cobra.Command {
 
 // errNoProbe is what a juju-lens built without the embedded probes says when
 // asked to upload one.
-var errNoProbe = errors.New("this juju-lens was built without the embedded probes, so it can't upload one; use a release build or `just build`")
+var errNoProbe = errors.New("this juju-lens was built without the embedded probes, so it can't upload one; use a release build or `just build`. Without them, --attach none and --attach host (on this machine) still work")
 
 // probeAvailable says early whether this build carries the probes to upload.
 func probeAvailable() error {

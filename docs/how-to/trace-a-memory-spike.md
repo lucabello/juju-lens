@@ -176,53 +176,28 @@ Memory taken counts how much resident memory grew between two samples, 10 ms apa
 
 Back on the whole hook (`Tab`), the same path appears twice, as in the memory view.
 
-## Get the same answer from an export
+## Get the same answer without the viewer
 
-To hand the hook to someone else, or to an AI agent, export it. `--unit`, `--since` and `--until` narrow the export to the hook. Take its start and end from the inspector, whose times are in UTC, on the recording's date:
-
-```bash
-juju-lens export /tmp/jl-t14 --format md --unit otelcol --since 2026-10-23T00:01:27Z --until 2026-10-23T00:01:32Z
-```
-
-The Markdown has the same tree and cost columns as the inspector, then the five stacks with the most wall time and the five with the most memory growth:
-
-```text
-top stacks by memory growth
-  1. 17MB (19%) · cpu 9.0ms · 1 sample · in charm __init__
-       compress (lzma.py:319)
-       LZMABase64.compress (cosl/utils.py:16)
-       CharmedDashboard.load_dashboards_from_dir (lib/charms/grafana_k8s/v0/grafana_dashboard.py:992)
-       GrafanaDashboardProvider._update_all_dashboards_from_dir (lib/charms/grafana_k8s/v0/grafana_dashboard.py:1257)
-       GrafanaDashboardProvider.reload_dashboards (lib/charms/grafana_k8s/v0/grafana_dashboard.py:1253)
-       forward_dashboards (src/integrations.py:419)
-       OpenTelemetryCollectorK8sCharm._reconcile (src/charm.py:101)
-       OpenTelemetryCollectorK8sCharm.__init__ (src/charm.py:93)
-       … 4 outer frames
-  2. 16MB (19%) · cpu 7.8ms · 1 sample · in GrafanaDashboardProvider._update_all_dashboards_from_dir
-       compress (lzma.py:319)
-       LZMABase64.compress (cosl/utils.py:16)
-       CharmedDashboard.load_dashboards_from_dir (lib/charms/grafana_k8s/v0/grafana_dashboard.py:992)
-       GrafanaDashboardProvider._update_all_dashboards_from_dir (lib/charms/grafana_k8s/v0/grafana_dashboard.py:1257)
-       … 8 frames
-       <module> (src/charm.py:1)
-```
-
-In JSON, each hook event has `costs`, per charm `__init__` and observer, and `top_stacks` and `top_memory_stacks`:
+To ask the recording directly, from a shell or an AI agent, use `juju-lens inspect`; [how to ask a recording questions](ask-a-recording-questions.md) describes the commands. Find the hook, then ask what happened to its memory:
 
 ```bash
-juju-lens export /tmp/jl-t14 --format json --unit otelcol --since 2026-10-23T00:01:27Z --until 2026-10-23T00:01:32Z \
-  | jq -c '.items[] | select(.kind == "event") | .event.top_memory_stacks[] | {span, mem_growth_bytes, caller: .frames[1]}'
+juju-lens inspect events /tmp/jl-t14 --unit otelcol --name config-changed --sort mem --limit 1
+juju-lens inspect memory /tmp/jl-t14 <span-id>
 ```
+
+`memory` lists the biggest jumps of the hook process with the observer and the charm's functions running at each, innermost first (excerpt):
 
 ```text
-{"span":"charm __init__","mem_growth_bytes":17330176,"caller":"LZMABase64.compress (cosl/utils.py:16)"}
-{"span":"GrafanaDashboardProvider._update_all_dashboards_from_dir","mem_growth_bytes":17125376,"caller":"LZMABase64.compress (cosl/utils.py:16)"}
-{"span":"config-changed process","mem_growth_bytes":6234112,"caller":"SourceFileLoader.path_stats (<frozen importlib._bootstrap_external>:1202)"}
-{"span":"config-changed process","mem_growth_bytes":4919296,"caller":"SourceLoader.get_code (<frozen importlib._bootstrap_external>:1062)"}
-{"span":"config-changed process","mem_growth_bytes":3371008,"caller":"_type_check (typing.py:175)"}
+what took memory in the hook process (the biggest jumps; code is innermost first):
+  +17MB  67MB → 84MB  3.9 s into the hook
+      during observer GrafanaDashboardProvider._update_all_dashboards_from_dir
+      code: compress ← CharmedDashboard.load_dashboards_from_dir ← GrafanaDashboardProvider._update_all_dashboards_from_dir
+  +17MB  66MB → 83MB  2.6 s into the hook
+      during the charm's __init__
+      code: compress ← CharmedDashboard.load_dashboards_from_dir ← GrafanaDashboardProvider._update_all_dashboards_from_dir ← GrafanaDashboardProvider.reload_dashboards ← forward_dashboards
 ```
 
-[How to export a recording for an AI agent](export-for-an-agent.md) describes the other files.
+To add up which observer took the most memory over a whole recording, use `juju-lens inspect costs /tmp/jl-t14 --sort mem`. To hand the recording to someone else, pack it with `juju-lens export`; see [how to share a recording](share-a-recording.md).
 
 ## If the hook is missing or cut short
 

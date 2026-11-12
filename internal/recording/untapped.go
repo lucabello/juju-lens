@@ -53,6 +53,11 @@ const (
 const (
 	ReasonKilled     = "it exited without proc_end: killed (SIGKILL, out of memory) or ended without running its exit handlers"
 	ReasonSessionCut = "its unit probe session ended before it did, as when the pod is deleted"
+	// ReasonWindowEnd and ReasonWindowStart are set on a recording made by
+	// `export` with a time window that cuts a hook.
+	ReasonWindowEnd   = "the export's time window ends before it did"
+	ReasonWindowStart = "the export's time window starts after it began"
+	ReasonWindowBoth  = "the export's time window starts after it began and ends before it did"
 )
 
 // HookSighting is one hook or action run that something other than the tap

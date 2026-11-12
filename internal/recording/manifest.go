@@ -93,6 +93,21 @@ type Manifest struct {
 	// --ssh-target machine. Empty without host capture and for synthetic
 	// recordings.
 	AttachTargets []string `json:"attach_targets,omitempty"`
+
+	// Exported is set in the manifest of an archive made by `export` with a
+	// scope: the recording holds only part of what was captured, so what it
+	// says about sources and models describes the whole.
+	Exported *ExportScope `json:"exported,omitempty"`
+}
+
+// ExportScope says which part of a recording an archive holds.
+type ExportScope struct {
+	Models []string   `json:"models,omitempty"`
+	Units  []string   `json:"units,omitempty"`
+	Since  *time.Time `json:"since,omitempty"`
+	Until  *time.Time `json:"until,omitempty"`
+	// WithoutValues: databags.json and config.json were left out.
+	WithoutValues bool `json:"without_values,omitempty"`
 }
 
 // New builds a manifest with the given tool and controller identity. Started

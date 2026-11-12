@@ -1,6 +1,6 @@
 # How unit capture works
 
-`juju-lens record --attach unit` records what happens inside each charm while it runs a hook: which events ops emitted, which observers ran and for how long, the hook tools and Pebble calls they made, what the hook cost in CPU and memory, and where its Python spent that time. This page describes how that works, what it changes on the units, what it costs them, and what it can't see. [How to trace a charm's memory spike to its code](../how-to/trace-a-memory-spike.md) shows how to use it.
+`juju-lens record --attach unit`, which is what `record` does without `--attach`, records what happens inside each charm while it runs a hook: which events ops emitted, which observers ran and for how long, the hook tools and Pebble calls they made, what the hook cost in CPU and memory, and where its Python spent that time. This page describes how that works, what it changes on the units, what it costs them, and what it can't see. [How to trace a charm's memory spike to its code](../how-to/trace-a-memory-spike.md) shows how to use it.
 
 ## Why capture from inside the unit
 
@@ -108,6 +108,44 @@ Each figure below was measured on the deployment named, by comparing hooks with 
 | The probe, during hooks | 17.4-17.9 ms of CPU per second of hook, 2.5% of the hooks' own CPU; 12-14 MB of memory. | Four COS charms on MicroK8s, `update-status` every 15 s. |
 
 On the recorder's side, each probed unit, or machine, keeps one `juju ssh` session open for the whole recording. On Kubernetes, `juju ssh` goes through the controller and the Kubernetes API, so a recording of many units holds that many sessions through the controller. In the workload containers' logs, the probe adds about four lines for its shell per session, and Pebble's own log of the probe listing changes every 5 seconds.
+
+### On a whole deployment
+
+Sizes on disk are in megabytes (1,000,000 bytes), and memory in the mebibytes that the cgroup and process counters report. Two deployments of the COS Lite bundle (alertmanager, catalogue, grafana, loki, prometheus and traefik, six units, Juju 3.6.27 on a single-node Canonical Kubernetes) were recorded with `--attach unit` from before the deploy, and two were not. Each was left idle for 5 minutes after it settled. The model's pods were measured from the host's cgroups, and the controller's from its containers'.
+
+| What | Without a recording | With a recording |
+|---|---|---|
+| Deploy until every unit is idle for 30 seconds | 320 s and 540 s | 315 s and 449 s |
+| CPU of the model's pods, whole deploy | 501 s and 512 s | 521 s and 578 s |
+| CPU of the controller, during the deploy | 52 s and 64 s | 61 s and 72 s |
+| CPU of the controller, over 5 idle minutes | 10.9 s and 10.9 s | 13.1 s and 15.1 s |
+| Memory of the model's pods | 1552 MB and 1556 MB | 1610 MB and 1644 MB |
+
+The deploy times differ more between runs of the same kind than between the two kinds, because during a deploy charms restart their pods to apply resource limits, which takes a variable time, so they show no cost. The model's pods used about 9% more CPU on average with a recording, between 4% and 15% for the four pairs of runs, and each pod held about 9 to 15 MB more memory. The controller used about 15% more CPU during the deploy and 20% to 39% more over the idle minutes, which are most likely the `juju ssh` sessions: no run separated them from the rest.
+
+To see the effect on a single charm's operations, 18 configuration changes of grafana and prometheus, on a settled model, 18 in each condition, took a mean of 6.3 seconds to settle with a recording and 6.7 seconds without, from the change until every unit was idle again, which is within the spread of the individual changes (3.8 to 13 seconds).
+
+The machine that runs `juju-lens` pays for the sessions. In the two recordings of the deploy, the recorder and its `juju ssh` clients used 35 seconds of CPU in about 12 minutes. Their memory peaked at 830 and 855 MiB in all. The parts peaked at different times: about 130 MiB for `juju-lens`, and about 790 MiB for the seven `juju` client processes together, around 110 MiB each, one for each unit's session and one for `juju debug-log`. The sessions were measured on Kubernetes only, where each unit has one; on a machine model a session covers a machine. A recording of more units holds more.
+
+### What a recording takes on disk
+
+| Recording | Raw data | Index | Compressed, whole |
+|---|---|---|---|
+| `--attach unit`, the two deploys above, 12 minutes | 33 and 36 MB | 34 and 36 MB | 11 and 12 MB |
+| `--attach unit`, a settled model of six units, 7 minutes, `update-status` every minute | 10.0 and 10.4 MB | 7.7 and 7.9 MB | 2.8 MB |
+| The same, with `--profile=false` | 8.4 and 8.7 MB | 5.1 and 5.1 MB | 1.9 MB |
+| `--attach host`, a 13-minute CI run of 7 units | 14 MB, of which 9 MB are RPCs | 15 MB | 4.9 MB |
+
+In the deploys, stack samples were 33% of the raw data, resource samples 35%, hook tool calls 16%, and everything else 16%, over 246 hooks: about 140 KB of raw data for each hook. In the settled model, with few hooks, resource samples were 61% of the raw data with profiling and 75% without it. The profile tables were 47% of the index of a deploy. With `--profile=false`, that recording was a quarter smaller on disk and a third smaller compressed. A deploy has more stack samples, so it would save more, but that wasn't measured. With `update-status` at its default of every 5 minutes, one 7-minute recording of the same model, with 7 hooks, took 4.2 MB on disk in all.
+
+The raw data compresses to about a tenth of its size, and the index, which `juju-lens index` rebuilds from the raw data, to about a fifth: in the settled model, `raw/` compressed to 1.1 MB and `index.db` to 1.7 MB. A recording that travels as an artifact can leave `index.db` out; see [how to rebuild the index](../how-to/rebuild-the-index.md).
+
+### What wasn't measured
+
+- `--attach host` was not measured beyond the size of a recording.
+- Juju 4, TLS between COS components, `opentelemetry-collector-k8s` in the bundle, and machine models were not part of the deployment run. The per-hook figures above come from earlier measurements on MicroK8s.
+- Each deployment condition was run twice, and each recording of a settled model twice. The figures say what the cost is, not to a precision beyond that.
+- A recording of a deploy and a CI run of a different deployment are not a like-for-like comparison of `unit` and `host` sizes.
 
 ## What's left behind
 

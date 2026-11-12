@@ -151,7 +151,7 @@ func renderTap(b *strings.Builder, ev event) {
 	case recording.TapMissing:
 		line = "not instrumented — the hook ran, but the tap recorded nothing of it: no events, observers or calls"
 	case recording.TapTruncated:
-		line = "truncated — the tap's records of this hook stop before its process exited"
+		line = "truncated — the tap's records of this hook are incomplete"
 	default:
 		return
 	}

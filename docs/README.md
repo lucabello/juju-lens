@@ -1,6 +1,6 @@
 # juju-lens documentation
 
-`juju-lens` records what a Juju controller and its models do, and lets you browse the recording offline: hooks, status changes, relation data, and logs on one timeline. For installation, see the [project README](../README.md#install).
+`juju-lens` records what a Juju controller and its models do, and lets you browse the recording offline: hooks, status changes, relation data (with `--attach host`), and logs on one timeline. For installation, see the [project README](../README.md#install).
 
 ## Tutorials
 
@@ -12,9 +12,11 @@
 - [Record a controller in CI](how-to/record-in-ci.md)
 - [Watch a live model](how-to/watch-a-live-model.md)
 - [Trace a charm's memory spike to its code](how-to/trace-a-memory-spike.md), from inside the units with only `juju ssh`
+- [Make a recording cheaper](how-to/make-a-recording-cheaper.md)
 - [Stop a running recording](how-to/stop-a-recording.md)
 - [Rebuild a recording's index](how-to/rebuild-the-index.md)
-- [Export a recording for an AI agent](how-to/export-for-an-agent.md)
+- [Share a recording](how-to/share-a-recording.md): pack it into one file, and read it elsewhere
+- [Ask a recording questions](how-to/ask-a-recording-questions.md): find a hook that went wrong or cost a lot, and its code and logs, with `juju-lens inspect`
 - [Generate a synthetic recording](how-to/generate-a-synthetic-recording.md), without a Juju controller
 
 ## Reference

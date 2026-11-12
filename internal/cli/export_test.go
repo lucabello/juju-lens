@@ -1,266 +1,292 @@
 package cli
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/lucabello/juju-lens/internal/export"
-	"github.com/lucabello/juju-lens/internal/narrative"
+	"github.com/lucabello/juju-lens/internal/inspect"
 	"github.com/lucabello/juju-lens/internal/recording"
 	"github.com/lucabello/juju-lens/internal/synth"
 )
 
-func TestExportRejectsNonRecordingDir(t *testing.T) {
-	dir := t.TempDir() // empty; no manifest
-	err := runExport(dir, exportFlags{format: "md", model: "default"}, &strings.Builder{})
-	if err == nil || !strings.Contains(err.Error(), "is this a juju-lens recording") {
-		t.Fatalf("want 'is this a juju-lens recording' error, got %v", err)
-	}
+// runExportCmd runs `juju-lens export ...` and returns its output.
+func runExportCmd(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	root := newRootCmd(BuildInfo{Version: "test"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs(append([]string{"export"}, args...))
+	err := root.Execute()
+	return out.String(), err
 }
 
-func TestExportJSONAndMarkdownEndToEnd(t *testing.T) {
-	dir := t.TempDir()
-	if err := runSynth(context.Background(), synth.ScenarioTrivial, synthFlags{output: dir}); err != nil {
-		t.Fatalf("runSynth: %v", err)
-	}
-
-	var md strings.Builder
-	if err := runExport(dir, exportFlags{format: "md", model: "default"}, &md); err != nil {
-		t.Fatalf("runExport md: %v", err)
-	}
-	if !strings.Contains(md.String(), "## Timeline") {
-		t.Errorf("markdown export missing timeline section:\n%s", md.String())
-	}
-
-	var js strings.Builder
-	if err := runExport(dir, exportFlags{format: "json", model: "default"}, &js); err != nil {
-		t.Fatalf("runExport json: %v", err)
-	}
-	if !strings.Contains(js.String(), `"summary"`) {
-		t.Errorf("json export missing summary field:\n%s", js.String())
-	}
-}
-
-func TestExportRejectsUnknownFormat(t *testing.T) {
-	dir := t.TempDir()
-	if err := runSynth(context.Background(), synth.ScenarioTrivial, synthFlags{output: dir}); err != nil {
-		t.Fatalf("runSynth: %v", err)
-	}
-	err := runExport(dir, exportFlags{format: "yaml", model: "default"}, &strings.Builder{})
-	if err == nil || !strings.Contains(err.Error(), "unknown --format") {
-		t.Fatalf("want 'unknown --format' error, got %v", err)
-	}
-}
-
-// Without --format, export writes the folder shape (AGENTS.md, SUMMARY.md,
-// timeline.jsonl, events.jsonl, details/, report.md) under
-// <recording>/derived/export by default, rather than printing a single
-// document to stdout.
-func TestExportWritesFolderByDefault(t *testing.T) {
-	dir := t.TempDir()
-	if err := runSynth(context.Background(), synth.ScenarioTrivial, synthFlags{output: dir}); err != nil {
-		t.Fatalf("runSynth: %v", err)
-	}
-	var stdout strings.Builder
-	if err := runExport(dir, exportFlags{model: "default"}, &stdout); err != nil {
-		t.Fatalf("runExport: %v", err)
-	}
-
-	wantDir := recording.NewLayout(dir).ExportDir()
-	if !strings.Contains(stdout.String(), wantDir) {
-		t.Errorf("expected stdout to mention %s, got %q", wantDir, stdout.String())
-	}
-	for _, name := range []string{"AGENTS.md", "SUMMARY.md", "timeline.jsonl", "events.jsonl", "report.md"} {
-		if _, err := os.Stat(filepath.Join(wantDir, name)); err != nil {
-			t.Errorf("expected %s under %s: %v", name, wantDir, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(wantDir, "details")); err != nil {
-		t.Errorf("expected details/ under %s: %v", wantDir, err)
-	}
-}
-
-// --out and --parts respectively redirect the folder and restrict which
-// artifacts land in it.
-func TestExportOutAndParts(t *testing.T) {
-	dir := t.TempDir()
-	if err := runSynth(context.Background(), synth.ScenarioTrivial, synthFlags{output: dir}); err != nil {
-		t.Fatalf("runSynth: %v", err)
-	}
-	out := t.TempDir()
-	var stdout strings.Builder
-	f := exportFlags{model: "default", out: out, parts: []string{"summary", "timeline"}}
-	if err := runExport(dir, f, &stdout); err != nil {
-		t.Fatalf("runExport: %v", err)
-	}
-	for _, name := range []string{"SUMMARY.md", "timeline.jsonl", "AGENTS.md"} {
-		if _, err := os.Stat(filepath.Join(out, name)); err != nil {
-			t.Errorf("expected %s under --out dir: %v", name, err)
-		}
-	}
-	for _, name := range []string{"events.jsonl", "report.md", "details"} {
-		if _, err := os.Stat(filepath.Join(out, name)); !os.IsNotExist(err) {
-			t.Errorf("expected %s NOT to exist for --parts summary,timeline, got err=%v", name, err)
-		}
-	}
-}
-
-func TestExportRejectsUnknownPart(t *testing.T) {
-	dir := t.TempDir()
-	if err := runSynth(context.Background(), synth.ScenarioTrivial, synthFlags{output: dir}); err != nil {
-		t.Fatalf("runSynth: %v", err)
-	}
-	err := runExport(dir, exportFlags{model: "default", parts: []string{"bogus"}}, &strings.Builder{})
-	if err == nil || !strings.Contains(err.Error(), "unknown --parts value") {
-		t.Fatalf("want 'unknown --parts value' error, got %v", err)
-	}
-}
-
-// A unit-only recording exports each hook's charm-side trees: in full in
-// JSON, folded in Markdown.
-func TestExportIncludesOpsTrees(t *testing.T) {
-	dir := t.TempDir()
-	if err := runSynth(context.Background(), synth.ScenarioOps, synthFlags{output: dir, model: "default"}); err != nil {
-		t.Fatalf("runSynth: %v", err)
-	}
-	var js strings.Builder
-	if err := runExport(dir, exportFlags{format: "json", model: "default"}, &js); err != nil {
-		t.Fatalf("runExport json: %v", err)
-	}
-	var res export.Result
-	if err := json.Unmarshal([]byte(js.String()), &res); err != nil {
-		t.Fatal(err)
-	}
-	var count func(n *narrative.OpsNode) int
-	count = func(n *narrative.OpsNode) int {
-		c := 1
-		for _, ch := range n.Children {
-			c += count(ch)
-		}
-		return c
-	}
-	hooks, jsonSpans := 0, 0
-	var failedObservers []string
-	for _, it := range res.Items {
-		if it.Event == nil || it.Event.Kind != "hook" {
-			continue
-		}
-		hooks++
-		if len(it.Event.Ops) == 0 {
-			t.Errorf("%s %s: no ops trees", it.Event.Unit, it.Event.Summary)
-		}
-		for _, tr := range it.Event.Ops {
-			jsonSpans += count(tr)
-			for _, ev := range tr.Children {
-				for _, obs := range ev.Children {
-					if obs.Kind == recording.OpsObserver && obs.Error != "" {
-						failedObservers = append(failedObservers, obs.Name)
-					}
-				}
-			}
-		}
-	}
-	if hooks != 6 || len(failedObservers) != 2 {
-		t.Errorf("%d hooks, failed observers %v; want 6 hooks and the 2 failed attempts", hooks, failedObservers)
-	}
-	spans, _, err := recording.LoadOps(dir)
+// untar extracts a gzipped tar archive into dir and lists its entries.
+func untar(t *testing.T, archive, dir string) []string {
+	t.Helper()
+	f, err := os.Open(archive)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if jsonSpans != len(spans) {
-		t.Errorf("JSON trees hold %d spans, the recording %d", jsonSpans, len(spans))
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	var md strings.Builder
-	if err := runExport(dir, exportFlags{format: "md", model: "default"}, &md); err != nil {
-		t.Fatalf("runExport md: %v", err)
-	}
-	if n := strings.Count(md.String(), "KubernetesComputeResourcesPatch._on_config_changed"); n < 4 {
-		t.Errorf("markdown names the resource patch observer %d times, want one per config-changed attempt", n)
-	}
-	if n := opsTreeLines(md.String()); n >= len(spans) {
-		t.Errorf("markdown trees have %d lines for %d spans: calls not folded", n, len(spans))
+	tr := tar.NewReader(gz)
+	var names []string
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return names
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, h.Name)
+		dst := filepath.Join(dir, h.Name)
+		if h.Typeflag == tar.TypeDir {
+			if err := os.MkdirAll(dst, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		out, err := os.Create(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.Copy(out, tr); err != nil {
+			t.Fatal(err)
+		}
+		out.Close()
 	}
 }
 
-// opsTreeLines counts the lines of the charm-side trees in a Markdown
-// export.
-func opsTreeLines(md string) int {
-	n, in := 0, false
-	for _, l := range strings.Split(md, "\n") {
+// An exported recording holds what can't be rebuilt, leaves the index out,
+// and reads back as the same recording after it is extracted.
+func TestExportPacksARecordingThatReadsBack(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "my-capture")
+	if err := runSynth(context.Background(), synth.ScenarioOps, synthFlags{output: src, model: "default"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "recorder.log"), []byte("juju-lens: started\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(recording.NewLayout(src).IndexDB()); err != nil {
+		t.Fatalf("the synthetic recording has no index to leave out: %v", err)
+	}
+
+	archive := filepath.Join(t.TempDir(), "out.tar.gz")
+	msg, err := runExportCmd(t, src, "-o", archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(msg, "wrote "+archive) {
+		t.Errorf("output %q", msg)
+	}
+
+	dst := t.TempDir()
+	names := untar(t, archive, dst)
+	var haveManifest, haveRaw, haveLog bool
+	for _, n := range names {
 		switch {
-		case strings.HasPrefix(l, "in the charm"):
-			in = true
-		case in && strings.TrimSpace(l) == "```text":
-		case in && strings.TrimSpace(l) == "```":
-			in = false
-		case in:
-			n++
+		case n == "my-capture/manifest.json":
+			haveManifest = true
+		case strings.HasPrefix(n, "my-capture/raw/"):
+			haveRaw = true
+		case n == "my-capture/recorder.log":
+			haveLog = true
+		}
+		if strings.Contains(n, "index.db") || !strings.HasPrefix(n, "my-capture/") {
+			t.Errorf("unexpected entry %q", n)
 		}
 	}
-	return n
+	if !haveManifest || !haveRaw || !haveLog {
+		t.Errorf("manifest %v, raw %v, recorder.log %v in %v", haveManifest, haveRaw, haveLog, names)
+	}
+
+	// Extracted, it indexes itself and answers as the original does.
+	events := func(dir string) inspect.EventList {
+		out, _, err := runInspect(t, "events", dir, "--json", "--limit", "0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var l inspect.EventList
+		if err := json.Unmarshal([]byte(out), &l); err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	want, got := events(src), events(filepath.Join(dst, "my-capture"))
+	if got.Total != want.Total || got.Total == 0 {
+		t.Fatalf("%d events after export, %d before", got.Total, want.Total)
+	}
+	for i := range want.Events {
+		if got.Events[i].SpanID != want.Events[i].SpanID || got.Events[i].CPUMS != want.Events[i].CPUMS {
+			t.Errorf("event %d differs: %+v vs %+v", i, got.Events[i], want.Events[i])
+		}
+	}
 }
 
-// A profiled hook exports what charm init and each observer cost, and the
-// stacks it spent the most time and memory in (the lab recording "stacks").
-func TestExportIncludesCostsAndTopStacks(t *testing.T) {
+func TestExportRefusesWhatItCannotPackWell(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.CopyFS(dir, os.DirFS(filepath.Join("..", "recording", "testdata", "ops", "stacks"))); err != nil {
-		t.Fatal(err)
+	out := filepath.Join(t.TempDir(), "x.tar.gz")
+	if _, err := runExportCmd(t, dir, "-o", out); err == nil || !strings.Contains(err.Error(), "is this a juju-lens recording") {
+		t.Errorf("a directory that isn't a recording: %v", err)
 	}
-	man := recording.New("juju-lens", "test", "", "stacks")
-	man.Finalize(recording.EndReasonSynth)
-	if err := man.Save(dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := runIndex(dir, nil); err != nil {
-		t.Fatal(err)
-	}
-	var js strings.Builder
-	if err := runExport(dir, exportFlags{format: "json"}, &js); err != nil {
-		t.Fatalf("runExport json: %v", err)
-	}
-	var res export.Result
-	if err := json.Unmarshal([]byte(js.String()), &res); err != nil {
-		t.Fatal(err)
-	}
-	var ev *export.EventDetail
-	for _, it := range res.Items {
-		if it.Event != nil && it.Event.Kind == "hook" {
-			ev = it.Event
-		}
-	}
-	if ev == nil {
-		t.Fatal("no hook exported")
-	}
-	kinds := map[string]int{}
-	for _, c := range ev.Costs {
-		kinds[c.Kind]++
-		if !c.Profiled {
-			t.Errorf("%s %s: not profiled", c.Kind, c.Name)
-		}
-	}
-	if kinds[recording.OpsInit] != 1 || kinds[recording.OpsObserver] < 3 {
-		t.Errorf("costs for %v, want init and every observer", kinds)
-	}
-	if len(ev.TopStacks) != 5 || ev.TopStacks[0].Span != "charm __init__" || len(ev.TopStacks[0].Frames) == 0 {
-		t.Errorf("top stacks %+v", ev.TopStacks)
-	}
-	if len(ev.TopMemStacks) == 0 || !strings.HasPrefix(ev.TopMemStacks[0].Frames[0], "compress ") {
-		t.Errorf("top memory stacks %+v", ev.TopMemStacks)
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("a failed export left %s behind", out)
 	}
 
-	var md strings.Builder
-	if err := runExport(dir, exportFlags{format: "md"}, &md); err != nil {
-		t.Fatalf("runExport md: %v", err)
+	rec := opsRecording(t)
+	layout := recording.NewLayout(rec)
+	if err := recording.WritePidFile(layout.PidFile(), os.Getpid()); err != nil {
+		t.Fatal(err)
 	}
-	for _, want := range []string{"wall      cpu     rss Δ     peak", "top stacks by wall time", "top stacks by memory growth", "refresh_certs (src/charm.py:46)"} {
-		if !strings.Contains(md.String(), want) {
-			t.Errorf("markdown lacks %q", want)
+	defer recording.RemovePidFile(layout.PidFile())
+	if _, err := runExportCmd(t, rec, "-o", out); err == nil || !strings.Contains(err.Error(), "still writing") {
+		t.Errorf("a recording being written: %v", err)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("a refused export left %s behind", out)
+	}
+}
+
+// A scoped export of a real-shaped recording holds the scope, says so in the
+// manifest, and inspect answers from it.
+func TestExportScopedToAUnitReadsBack(t *testing.T) {
+	src := opsRecording(t)
+	archive := filepath.Join(t.TempDir(), "unit.tar.gz")
+	if _, err := runExportCmd(t, src, "--unit", "otelcol/1", "-o", archive); err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	untar(t, archive, dst)
+	var dir string
+	ents, _ := os.ReadDir(dst)
+	for _, e := range ents {
+		dir = filepath.Join(dst, e.Name())
+	}
+	out, _, err := runInspect(t, "summary", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "a part of the recording, exported with --unit otelcol/1") || !strings.Contains(out, "2 events,") || strings.Contains(out, "otelcol/0") {
+		t.Errorf("summary of the unit's export:\n%s", out)
+	}
+
+	if _, err := runExportCmd(t, src, "--unit", "nosuch", "-o", filepath.Join(t.TempDir(), "none.tar.gz")); err == nil || !strings.Contains(err.Error(), "nothing in the recording matches") {
+		t.Errorf("a scope that matches nothing: %v", err)
+	}
+	if _, err := runExportCmd(t, src, "--model", "nosuch"); err == nil || !strings.Contains(err.Error(), "no model") {
+		t.Errorf("an unknown model: %v", err)
+	}
+	if _, err := runExportCmd(t, src, "--since", "2026-07-03T15:00:00Z", "--until", "2026-07-03T14:00:00Z"); err == nil {
+		t.Error("--until before --since should fail")
+	}
+}
+
+// A time window that cuts a hook leaves it readable: one that began before the
+// window is listed with its first records missing, one the window ends in is
+// not shown as still running, and both say that the window cut them.
+func TestExportWindowCutsAreMarked(t *testing.T) {
+	src := opsRecording(t)
+	events := func(args ...string) map[string]inspect.EventRow {
+		t.Helper()
+		archive := filepath.Join(t.TempDir(), "w.tar.gz")
+		if _, err := runExportCmd(t, append([]string{src, "-o", archive}, args...)...); err != nil {
+			t.Fatal(err)
 		}
+		dst := t.TempDir()
+		untar(t, archive, dst)
+		ents, _ := os.ReadDir(dst)
+		dir := filepath.Join(dst, ents[0].Name())
+		out, _, err := runInspect(t, "events", dir, "--json", "--limit", "0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var l inspect.EventList
+		if err := json.Unmarshal([]byte(out), &l); err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]inspect.EventRow{}
+		for _, e := range l.Events {
+			m[e.SpanID] = e
+		}
+		return m
+	}
+	detail := func(args []string, span string) string {
+		t.Helper()
+		archive := filepath.Join(t.TempDir(), "d.tar.gz")
+		if _, err := runExportCmd(t, append([]string{src, "-o", archive}, args...)...); err != nil {
+			t.Fatal(err)
+		}
+		dst := t.TempDir()
+		untar(t, archive, dst)
+		ents, _ := os.ReadDir(dst)
+		out, _, err := runInspect(t, "event", filepath.Join(dst, ents[0].Name()), span, "--section", "statuses")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	// update-status of otelcol/0 ran 14:30:33.000 to 14:30:35.003.
+	since := []string{"--since", "2026-07-03T14:30:34Z"}
+	if _, ok := events(since...)["df695ee88b809b12"]; !ok {
+		t.Error("a hook that began before --since isn't listed")
+	}
+	if out := detail(since, "df695ee88b809b12"); !strings.Contains(out, "truncated") || !strings.Contains(out, "starts after it began") {
+		t.Errorf("a hook cut at its start isn't marked:\n%s", out)
+	}
+	// config-changed of otelcol/0 ran 14:30:52.000 to 14:30:53.317.
+	until := []string{"--until", "2026-07-03T14:30:53Z"}
+	if out := detail(until, "f158f3b1b957b81d"); !strings.Contains(out, "truncated") || !strings.Contains(out, "ends before it did") || strings.Contains(out, "RUNNING") {
+		t.Errorf("a hook cut at its end isn't marked, or reads as running:\n%s", out)
+	}
+	// A hook inside the window is as it was.
+	if out := detail([]string{"--since", "2026-07-03T14:30:00Z", "--until", "2026-07-03T15:00:00Z"}, "df695ee88b809b12"); strings.Contains(out, "truncated") {
+		t.Errorf("a hook the window doesn't cut is marked:\n%s", out)
+	}
+}
+
+// An archive without the value snapshots reads back: inspect needs neither.
+func TestExportWithoutValuesReadsBack(t *testing.T) {
+	src := opsRecording(t)
+	for _, f := range []string{"databags.json", "config.json"} {
+		p := filepath.Join(src, "raw", "status", "default", f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(`{"grafana/0":"secret-value"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archive := filepath.Join(t.TempDir(), "nv.tar.gz")
+	if _, err := runExportCmd(t, src, "--without-values", "-o", archive); err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	names := untar(t, archive, dst)
+	for _, n := range names {
+		if strings.HasSuffix(n, "databags.json") || strings.HasSuffix(n, "config.json") {
+			t.Errorf("%s in the archive", n)
+		}
+	}
+	ents, _ := os.ReadDir(dst)
+	out, _, err := runInspect(t, "summary", filepath.Join(dst, ents[0].Name()))
+	if err != nil || !strings.Contains(out, "6 events,") || !strings.Contains(out, "--without-values") {
+		t.Errorf("summary of the archive: %v\n%s", err, out)
 	}
 }

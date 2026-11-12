@@ -64,17 +64,20 @@ name and is stored in manifest.json.
 
 --attach chooses what is captured, as a comma-separated set:
 
+  unit   run the probe inside every unit in scope over 'juju ssh': in
+         the charm container on Kubernetes, next to the machine agent (with
+         sudo) on machine models. Needs nothing but 'juju ssh', so it works
+         on a remote cluster and without root. Records the charm's side of
+         each hook: ops events, observers, hook tool and Pebble calls, CPU
+         and memory, and Python stacks sampled every 10 ms (--profile=false
+         turns the stacks off). Databag values are not recorded. This is
+         the default.
   host   run the probe where the Juju agents run, and capture every Juju
          API RPC at their crypto/tls boundary with read-only eBPF uprobes. The
          probe runs on this host (juju-lens runs itself as 'juju-lens probe'),
          or on --ssh-target, to which juju-lens uploads it over 'juju ssh' and
-         runs it with sudo. Needs root or CAP_BPF there. This is the default.
-  unit   run the probe inside every unit in scope over 'juju ssh': in
-         the charm container on Kubernetes, next to the machine agent (with
-         sudo) on machine models. Needs nothing but 'juju ssh'. Records the
-         charm's side of each hook: ops events, observers, hook tool and
-         Pebble calls, CPU and memory, and Python stacks sampled every 10 ms
-         (--profile=false turns the stacks off).
+         runs it with sudo. Needs root or CAP_BPF there. Sees Juju's side:
+         relation data, agent status, run-hook markers.
   none   capture nothing from the agents: record only logs and the status
          snapshot. Needs nothing but the juju client.
 
@@ -82,11 +85,19 @@ name and is stored in manifest.json.
 carries a static build for linux/amd64 and linux/arm64, and uploads the one
 that matches each machine's architecture.
 
---app and --unit, with --model, narrow the recording to some of its
-applications or units: only they get a unit probe (on a machine model, the
-machines that host them, where the probe still covers every unit), and
-debug-log is limited to them. The status snapshot and --attach host still
-cover the whole model.
+What unit capture costs, measured on a Kubernetes cos-lite deployment: about
+9% more CPU in the model's pods, 9 to 15 MB of memory per unit, one 'juju
+ssh' session per unit (a juju client of about 110 MB each on the machine
+running juju-lens), and about 15% more controller CPU while deploying.
+--profile=false makes the recording of a settled model about a quarter
+smaller. See docs/explanation/how-unit-capture-works.md.
+
+With no --model, every model of the controller is in scope, and every unit
+of every model gets a probe. --app and --unit, with --model, narrow the
+recording to some of its applications or units: only they get a unit probe
+(on a machine model, the machines that host them, where the probe still
+covers every unit), and debug-log is limited to them. The status snapshot
+and --attach host still cover the whole model.
 
 record never changes the controller: host attach only adds read-only uprobes.
 Unit attach writes into each unit for as long as it runs:
@@ -122,11 +133,17 @@ connection with --attach unit, which needs no cluster access; else with
 			if err != nil {
 				return err
 			}
+			if f.sshTarget != "" && !sides.host {
+				return errors.New("--ssh-target needs --attach host (or host,unit)")
+			}
+			if len(f.pids) > 0 && !sides.host {
+				return errors.New("--pid needs --attach host (or host,unit)")
+			}
 			if cmd.Flags().Changed("profile") && !sides.unit {
-				return errors.New("--profile needs --attach unit")
+				return errors.New("--profile needs --attach unit (or host,unit)")
 			}
 			if cmd.Flags().Changed("linger") && !sides.unit {
-				return errors.New("--linger needs --attach unit")
+				return errors.New("--linger needs --attach unit (or host,unit)")
 			}
 			if f.linger < 0 {
 				return errors.New("--linger can't be negative")
@@ -142,7 +159,7 @@ connection with --attach unit, which needs no cluster access; else with
 		},
 	}
 	cmd.Flags().StringVarP(&f.output, "output", "o", "", "recording directory (default: ./recordings/<ts>--<name>)")
-	cmd.Flags().StringVar(&f.attach, "attach", "host", "what to capture, comma-separated: "+attachValues+" (see above)")
+	cmd.Flags().StringVar(&f.attach, "attach", "unit", "what to capture, comma-separated: "+attachValues+" (see above)")
 	cmd.Flags().StringVar(&f.controller, "controller", "", "scope to this juju controller (all its models); default: current controller")
 	cmd.Flags().StringVar(&f.model, "model", "", "scope to a single model, as \"model\", \"owner/model\" or \"controller:model\" (\"controller:owner/model\" for a model another user owns, such as on a JAAS controller)")
 	cmd.Flags().StringVar(&f.sshTarget, "ssh-target", "", "with --attach host, run the probe on this machine over 'juju ssh' (e.g. 'controller/0')")
@@ -468,7 +485,7 @@ func runRecord(ctx context.Context, name string, f recordFlags, sides attachSide
 				case <-ctx.Done():
 					return
 				case <-t.C:
-					if w.total() >= f.maxSize {
+					if layout.RawSize() >= f.maxSize {
 						fmt.Fprintf(os.Stderr, "juju-lens: hit --max-size %d bytes, stopping\n", f.maxSize)
 						endReason = recording.EndReasonMaxSize
 						cancel()
@@ -682,8 +699,8 @@ func probeArgs(f recordFlags, filter probeFilter) []string {
 }
 
 // rpcWriters owns one RotatingWriter per model and delivers captured messages
-// to the right one. It is safe for the single ingest goroutine plus the
-// max-size ticker (which only reads totals).
+// to the right one. It is safe for the single ingest goroutine and the
+// goroutine that reads its message count.
 type rpcWriters struct {
 	layout recording.Layout
 	mu     sync.Mutex
@@ -713,16 +730,6 @@ func (w *rpcWriters) sink(cm wire.CapturedMessage) error {
 	}
 	w.n++
 	return nil
-}
-
-func (w *rpcWriters) total() int64 {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	var t int64
-	for _, rw := range w.ws {
-		t += rw.Total()
-	}
-	return t
 }
 
 func (w *rpcWriters) count() int64 {

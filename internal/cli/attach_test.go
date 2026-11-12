@@ -11,7 +11,7 @@ func TestParseAttach(t *testing.T) {
 		want    string
 		wantErr string
 	}{
-		{in: "", want: "host"},
+		{in: "", want: "unit"},
 		{in: "host", want: "host"},
 		{in: "host,host", want: "host"},
 		{in: " host ", want: "host"},

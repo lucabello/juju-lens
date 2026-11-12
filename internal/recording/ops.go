@@ -108,10 +108,13 @@ type opsProc struct {
 	unit     string
 	pid      int
 	lines    []opsLine
-	agentPID int             // the host's agent, from the session's hello; 0 if unknown
-	parent   *opsKey         // the tapped process that started this one
-	hook     string          // its spans' Hook, settled at proc_start
-	res      *unit.Execution // what it cost, from the probe; nil if not measured
+	agentPID int     // the host's agent, from the session's hello; 0 if unknown
+	parent   *opsKey // the tapped process that started this one
+	hook     string  // its spans' Hook, settled at proc_start
+	// exportCut is what the export's time window cut of the process: "start",
+	// "end" or "both"; "" when nothing.
+	exportCut string
+	res       *unit.Execution // what it cost, from the probe; nil if not measured
 }
 
 // OpsAssembler groups the tap records of raw/unit/ by hook process and turns
@@ -168,6 +171,7 @@ func (a *OpsAssembler) Feed(model string, line []byte, rel string, offset int64)
 			return nil
 		}
 		delete(a.running[p.key.hostKey()], p.pid)
+		p.exportCut = r.SpoolEnd.ExportCut
 		end := endSpool
 		if r.SpoolEnd.Truncated {
 			end = endKilled
@@ -511,6 +515,13 @@ func (a *OpsAssembler) build(p *opsProc, end procEnd) []SpanRow {
 		root.Attrs["tap"], root.Attrs["tap_reason"] = TapTruncated, ReasonSessionCut
 	}
 	root.StatusCode, root.StatusMsg = rootStatus(root.Attrs, procEnded, end)
+	if reason := map[string]string{"start": ReasonWindowStart, "end": ReasonWindowEnd, "both": ReasonWindowBoth}[p.exportCut]; reason != "" {
+		root.Attrs["truncated"] = "true"
+		root.Attrs["tap"], root.Attrs["tap_reason"] = TapTruncated, reason
+		if !procEnded && root.StatusCode != "ERROR" {
+			root.StatusMsg = "its records stop where the export's time window ended"
+		}
+	}
 	if p.res != nil {
 		for k, v := range resAttrs(p.res) {
 			root.Attrs[k] = v

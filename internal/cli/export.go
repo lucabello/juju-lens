@@ -2,150 +2,133 @@ package cli
 
 import (
 	"fmt"
-	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
-	"github.com/lucabello/juju-lens/internal/export"
 	"github.com/lucabello/juju-lens/internal/recording"
 
 	"github.com/spf13/cobra"
 )
 
 type exportFlags struct {
-	format     string
-	out        string
-	parts      []string
-	model      string
-	units      []string
-	since      string
-	until      string
-	errorsOnly bool
+	output string
+	models []string
+	units  []string
+	since  string
+	until  string
+	noVals bool
 }
 
 func newExportCmd() *cobra.Command {
 	f := &exportFlags{}
 	cmd := &cobra.Command{
 		Use:   "export <recording>",
-		Short: "Write a recording's derived narrative as a folder of agent-oriented artifacts",
-		Long: `export distils a recording's derived narrative — hook runs and their
-failure state, the statuses/databags/config they changed — merged with
-every correlated log line, and writes it as a folder meant for an agent to
-read incrementally instead of ingesting all at once:
+		Short: "Pack a recording, or part of it, into one file to share or attach",
+		Long: `export writes a recording as one gzipped tar file: its manifest, everything
+under raw/, and recorder.log. It leaves out index.db, which is as big as raw/
+and is rebuilt from it the first time anything reads the recording.
 
-  SUMMARY.md            orientation: time range, units, hook-outcome counts
-  timeline.jsonl         events + logs merged, chronological, one JSON object
-                         per line — grep -C around a line for real context
-  events.jsonl           the same event lines, without the log volume
-  details/<span_id>.json full detail for one event: statuses set, databag/
-                         config diffs, failure explanation
-  report.md              the same data as one narrated document, for a human
-  AGENTS.md               legend naming whichever of the above is present
+To read the file, extract it and point juju-lens at the directory it makes:
 
---parts restricts which of those get written (default: all); it is
-independent of the scoping flags below, which restrict what content is in
-scope regardless of which files it lands in.
+  tar -xzf my-capture.tar.gz
+  juju-lens inspect summary my-capture
 
-Unlike the raw SQLite index, this carries the same hook/failure
-classification the TUI shows (was this unit actually broken, or did it
-retry and recover), so an agent debugging an issue doesn't have to
-re-derive it from raw RPC spans.
+Pack part of a recording with:
 
---format, if set, instead writes a single merged document to stdout (json
-or md) and skips the folder — a legacy/scripting path for piping into
-another tool.`,
+  --model   only these models' files (repeatable)
+  --unit    only these units, or applications: their unit probe and workload
+            logs, and the lines of the debug log and the RPC capture that
+            belong to them (repeatable)
+  --since, --until
+            only lines in this time window (RFC 3339), read from each
+            line's own timestamp
+  --without-values
+            leave out databags.json and config.json, the snapshots that hold
+            the values of relation data and configuration
+
+A hook that straddles the window is cut: inspect shows one that starts inside
+the window as still running, and doesn't list one that starts before it.
+Scoping chooses what to include; it doesn't redact. Status snapshots of a kept
+model are kept whole, and databags.json and config.json hold the values of
+relation data and configuration (--without-values leaves them out); logs hold
+whatever the charms wrote. Review the file before you post it publicly. The archive's manifest says it is partial.
+
+The recording must not be being written: stop a running recorder first.`,
+		Example: `  juju-lens export ./recordings/2026-11-11T17-54-31--expt
+  juju-lens export ./rec --model testing --unit grafana -o grafana.tar.gz
+  juju-lens export ./rec --since 2026-11-11T17:55:00Z --until 2026-11-11T17:57:00Z`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runExport(args[0], *f, cmd.OutOrStdout())
+			return runExport(args[0], *f, cmd)
 		},
 	}
-	cmd.Flags().StringVar(&f.format, "format", "", "write a single merged document to stdout instead of a folder: json|md")
-	cmd.Flags().StringVar(&f.out, "out", "", "folder to write the export into (default: <recording>/derived/export)")
-	cmd.Flags().StringSliceVar(&f.parts, "parts", nil,
-		"comma-separated subset of parts to write: summary,timeline,events,details,report (default: all)")
-	cmd.Flags().StringVar(&f.model, "model", "", "focus on a single model (required if the recording has more than one)")
-	cmd.Flags().StringArrayVar(&f.units, "unit", nil, "restrict to this unit or application (repeatable)")
-	cmd.Flags().StringVar(&f.since, "since", "", "RFC3339 lower time bound")
-	cmd.Flags().StringVar(&f.until, "until", "", "RFC3339 upper time bound")
-	cmd.Flags().BoolVar(&f.errorsOnly, "errors-only", false,
-		"only hook runs that ended errored/retried/rpc-warn, plus one same-unit neighbour on each side for context")
+	fl := cmd.Flags()
+	fl.StringVarP(&f.output, "output", "o", "", "file to write (default: <recording directory name>.tar.gz in the current directory)")
+	fl.StringArrayVar(&f.models, "model", nil, "only this model (repeatable)")
+	fl.StringArrayVar(&f.units, "unit", nil, "only this unit or application (repeatable)")
+	fl.StringVar(&f.since, "since", "", "only lines at or after this time (RFC 3339)")
+	fl.StringVar(&f.until, "until", "", "only lines at or before this time (RFC 3339)")
+	fl.BoolVar(&f.noVals, "without-values", false, "leave out the snapshots of relation data and configuration values (databags.json and config.json)")
 	return cmd
 }
 
-// runExport is factored out of RunE so it's directly testable without going
-// through cobra, matching runIndex/runStop's convention.
-func runExport(dir string, f exportFlags, out io.Writer) error {
-	ok, err := recording.NewLayout(dir).Exists()
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("no manifest.json under %q; is this a juju-lens recording?", dir)
-	}
-
-	opts := export.Options{Model: f.model, Units: f.units, ErrorsOnly: f.errorsOnly}
+func runExport(dir string, f exportFlags, cmd *cobra.Command) error {
+	opts := recording.PackOptions{Models: f.models, Units: f.units, WithoutValues: f.noVals}
+	var err error
 	if f.since != "" {
-		t, err := time.Parse(time.RFC3339, f.since)
-		if err != nil {
+		if opts.Since, err = time.Parse(time.RFC3339, f.since); err != nil {
 			return fmt.Errorf("--since: %w", err)
 		}
-		opts.Since = t
 	}
 	if f.until != "" {
-		t, err := time.Parse(time.RFC3339, f.until)
-		if err != nil {
+		if opts.Until, err = time.Parse(time.RFC3339, f.until); err != nil {
 			return fmt.Errorf("--until: %w", err)
 		}
-		opts.Until = t
 	}
-
-	result, err := export.Build(dir, opts)
-	if err != nil {
+	if !opts.Since.IsZero() && !opts.Until.IsZero() && opts.Until.Before(opts.Since) {
+		return fmt.Errorf("--until is before --since")
+	}
+	output := f.output
+	if output == "" {
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return err
+		}
+		output = filepath.Base(abs) + ".tar.gz"
+	}
+	// Check the recording before creating the file, so that a wrong path
+	// leaves nothing behind.
+	if ok, err := recording.NewLayout(dir).Exists(); err != nil {
 		return err
+	} else if !ok {
+		return fmt.Errorf("no manifest.json under %q; is this a juju-lens recording?", dir)
 	}
-
-	if f.format != "" {
-		switch f.format {
-		case "json":
-			return export.WriteJSON(out, result)
-		case "md", "markdown":
-			return export.WriteMarkdown(out, result)
-		default:
-			return fmt.Errorf("unknown --format %q (want json|md)", f.format)
+	for _, m := range f.models {
+		if !recording.HasModel(dir, m) {
+			return fmt.Errorf("no model %q in this recording (it has %s)", m, strings.Join(recording.Models(dir), ", "))
 		}
 	}
-
-	parts, err := parseParts(f.parts)
+	file, err := os.Create(output)
 	if err != nil {
 		return err
 	}
-	outDir := f.out
-	if outDir == "" {
-		outDir = recording.NewLayout(dir).ExportDir()
+	res, err := recording.Pack(dir, file, opts)
+	if cerr := file.Close(); err == nil {
+		err = cerr
 	}
-	if err := export.WriteFolder(outDir, result, parts); err != nil {
+	if err == nil && res.RawFiles == 0 && (len(f.models) > 0 || len(f.units) > 0 || !opts.Since.IsZero() || !opts.Until.IsZero()) {
+		err = fmt.Errorf("nothing in the recording matches --model, --unit, --since and --until")
+	}
+	if err != nil {
+		_ = os.Remove(output)
 		return err
 	}
-	fmt.Fprintf(out, "wrote export to %s\n", outDir)
+	info, err := os.Stat(output)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "wrote %s: %d files, %d bytes of raw data in %d bytes\n", output, res.Files, res.Bytes, info.Size())
 	return nil
-}
-
-// parseParts validates --parts against the known Part values. An empty list
-// means "all parts", handled the same way WriteFolder itself treats nil.
-func parseParts(names []string) ([]export.Part, error) {
-	if len(names) == 0 {
-		return nil, nil
-	}
-	valid := make(map[export.Part]bool, len(export.AllParts))
-	for _, p := range export.AllParts {
-		valid[p] = true
-	}
-	out := make([]export.Part, 0, len(names))
-	for _, n := range names {
-		p := export.Part(n)
-		if !valid[p] {
-			return nil, fmt.Errorf("unknown --parts value %q (want one of summary,timeline,events,details,report)", n)
-		}
-		out = append(out, p)
-	}
-	return out, nil
 }

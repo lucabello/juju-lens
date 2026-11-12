@@ -410,8 +410,8 @@ func TestMemoryView(t *testing.T) {
 		}
 	}
 	st := &m.mem
-	if !st.to.After(st.hookEnd.Add(10 * time.Second)) {
-		t.Errorf("readings end %v, hook %v: should run on past the hook", st.to, st.hookEnd)
+	if !st.To.After(st.HookEnd.Add(10 * time.Second)) {
+		t.Errorf("readings end %v, hook %v: should run on past the hook", st.To, st.HookEnd)
 	}
 	// A jump names the charm function that was running.
 	if !strings.Contains(view, "refresh_certs") && !strings.Contains(view, "forward_dashboards") && !strings.Contains(view, "compress") {
