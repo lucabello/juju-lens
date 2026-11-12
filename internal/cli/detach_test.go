@@ -310,8 +310,8 @@ func TestDetachTimeout(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "--detach-timeout 1s") || !strings.Contains(err.Error(), "attached to no agent process") {
 		t.Fatalf("want a no-targets timeout error, got %v", err)
 	}
-	if strings.Contains(err.Error(), "too old") {
-		t.Fatalf("a probe that reported status must not be called too old: %v", err)
+	if strings.Contains(err.Error(), "never reported") {
+		t.Fatalf("a probe that reported status must not be said to have stayed silent: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("timeout took %s", elapsed)
@@ -319,22 +319,22 @@ func TestDetachTimeout(t *testing.T) {
 	assertNothingLeft(t, dir)
 }
 
-// TestDetachTimeoutOldProbe covers AC10: a probe that never sends an
-// attach-status frame gets an upgrade hint, not the no-targets message.
-func TestDetachTimeoutOldProbe(t *testing.T) {
+// TestDetachTimeoutSilentProbe covers AC10: a probe that never sends an
+// attach-status frame gets its own message, not the no-targets one.
+func TestDetachTimeoutSilentProbe(t *testing.T) {
 	detachEnv(t, "old")
 	dir := filepath.Join(t.TempDir(), "rec")
 	_, err := runCLI(t, "record", "--detach", "--detach-timeout=1s", "--attach=host", "-o", dir, "ci-run")
 	if err == nil {
 		t.Fatal("want a timeout error")
 	}
-	for _, want := range []string{"--detach-timeout 1s", "too old", "upgrade juju-lens-probe"} {
+	for _, want := range []string{"--detach-timeout 1s", "never reported its attach status"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error missing %q:\n%v", want, err)
 		}
 	}
 	if strings.Contains(err.Error(), "attached to no agent process") {
-		t.Fatalf("old-probe error reused the no-targets message: %v", err)
+		t.Fatalf("silent-probe error reused the no-targets message: %v", err)
 	}
 	assertNothingLeft(t, dir)
 }

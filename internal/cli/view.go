@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/lucabello/juju-lens/internal/recording"
 	"github.com/lucabello/juju-lens/internal/viewer"
@@ -25,6 +26,11 @@ func newViewCmd() *cobra.Command {
 			}
 			if !ok {
 				return fmt.Errorf("no manifest.json under %q; is this a juju-lens recording?", dir)
+			}
+			// A recording packed by export has no index, and the viewer reads
+			// only the index.
+			if err := ensureIndex(dir, os.Stderr); err != nil {
+				return err
 			}
 			return viewer.Run(dir, follow)
 		},
