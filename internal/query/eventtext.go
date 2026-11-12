@@ -36,7 +36,7 @@ func writeEventSection(b *strings.Builder, ev *EventDetail) {
 	case recording.TapMissing:
 		fmt.Fprintf(b, "not instrumented: the tap recorded nothing of this hook%s\n", orReason(ev.TapReason))
 	case recording.TapTruncated:
-		fmt.Fprintf(b, "truncated: the tap's records stop before the process exited%s\n", orReason(ev.TapReason))
+		fmt.Fprintf(b, "truncated: the tap's records of this hook are incomplete%s\n", orReason(ev.TapReason))
 	}
 	if ev.Detail != "" {
 		fmt.Fprintf(b, "%s\n", ev.Detail)

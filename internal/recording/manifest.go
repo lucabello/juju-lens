@@ -106,6 +106,8 @@ type ExportScope struct {
 	Units  []string   `json:"units,omitempty"`
 	Since  *time.Time `json:"since,omitempty"`
 	Until  *time.Time `json:"until,omitempty"`
+	// WithoutValues: databags.json and config.json were left out.
+	WithoutValues bool `json:"without_values,omitempty"`
 }
 
 // New builds a manifest with the given tool and controller identity. Started

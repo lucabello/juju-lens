@@ -196,3 +196,97 @@ func TestExportScopedToAUnitReadsBack(t *testing.T) {
 		t.Error("--until before --since should fail")
 	}
 }
+
+// A time window that cuts a hook leaves it readable: one that began before the
+// window is listed with its first records missing, one the window ends in is
+// not shown as still running, and both say that the window cut them.
+func TestExportWindowCutsAreMarked(t *testing.T) {
+	src := opsRecording(t)
+	events := func(args ...string) map[string]inspect.EventRow {
+		t.Helper()
+		archive := filepath.Join(t.TempDir(), "w.tar.gz")
+		if _, err := runExportCmd(t, append([]string{src, "-o", archive}, args...)...); err != nil {
+			t.Fatal(err)
+		}
+		dst := t.TempDir()
+		untar(t, archive, dst)
+		ents, _ := os.ReadDir(dst)
+		dir := filepath.Join(dst, ents[0].Name())
+		out, _, err := runInspect(t, "events", dir, "--json", "--limit", "0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var l inspect.EventList
+		if err := json.Unmarshal([]byte(out), &l); err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]inspect.EventRow{}
+		for _, e := range l.Events {
+			m[e.SpanID] = e
+		}
+		return m
+	}
+	detail := func(args []string, span string) string {
+		t.Helper()
+		archive := filepath.Join(t.TempDir(), "d.tar.gz")
+		if _, err := runExportCmd(t, append([]string{src, "-o", archive}, args...)...); err != nil {
+			t.Fatal(err)
+		}
+		dst := t.TempDir()
+		untar(t, archive, dst)
+		ents, _ := os.ReadDir(dst)
+		out, _, err := runInspect(t, "event", filepath.Join(dst, ents[0].Name()), span, "--section", "statuses")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	// update-status of otelcol/0 ran 14:30:33.000 to 14:30:35.003.
+	since := []string{"--since", "2026-07-03T14:30:34Z"}
+	if _, ok := events(since...)["df695ee88b809b12"]; !ok {
+		t.Error("a hook that began before --since isn't listed")
+	}
+	if out := detail(since, "df695ee88b809b12"); !strings.Contains(out, "truncated") || !strings.Contains(out, "starts after it began") {
+		t.Errorf("a hook cut at its start isn't marked:\n%s", out)
+	}
+	// config-changed of otelcol/0 ran 14:30:52.000 to 14:30:53.317.
+	until := []string{"--until", "2026-07-03T14:30:53Z"}
+	if out := detail(until, "f158f3b1b957b81d"); !strings.Contains(out, "truncated") || !strings.Contains(out, "ends before it did") || strings.Contains(out, "RUNNING") {
+		t.Errorf("a hook cut at its end isn't marked, or reads as running:\n%s", out)
+	}
+	// A hook inside the window is as it was.
+	if out := detail([]string{"--since", "2026-07-03T14:30:00Z", "--until", "2026-07-03T15:00:00Z"}, "df695ee88b809b12"); strings.Contains(out, "truncated") {
+		t.Errorf("a hook the window doesn't cut is marked:\n%s", out)
+	}
+}
+
+// An archive without the value snapshots reads back: inspect needs neither.
+func TestExportWithoutValuesReadsBack(t *testing.T) {
+	src := opsRecording(t)
+	for _, f := range []string{"databags.json", "config.json"} {
+		p := filepath.Join(src, "raw", "status", "default", f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(`{"grafana/0":"secret-value"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archive := filepath.Join(t.TempDir(), "nv.tar.gz")
+	if _, err := runExportCmd(t, src, "--without-values", "-o", archive); err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	names := untar(t, archive, dst)
+	for _, n := range names {
+		if strings.HasSuffix(n, "databags.json") || strings.HasSuffix(n, "config.json") {
+			t.Errorf("%s in the archive", n)
+		}
+	}
+	ents, _ := os.ReadDir(dst)
+	out, _, err := runInspect(t, "summary", filepath.Join(dst, ents[0].Name()))
+	if err != nil || !strings.Contains(out, "6 events,") || !strings.Contains(out, "--without-values") {
+		t.Errorf("summary of the archive: %v\n%s", err, out)
+	}
+}

@@ -193,5 +193,8 @@ func scopeWords(p *recording.ExportScope) string {
 	if p.Until != nil {
 		parts = append(parts, "--until "+p.Until.UTC().Format(time.RFC3339Nano))
 	}
+	if p.WithoutValues {
+		parts = append(parts, "--without-values")
+	}
 	return strings.Join(parts, " ")
 }

@@ -57,6 +57,8 @@ func packFixture(t *testing.T) string {
 			`{"ts":"2026-11-11T10:05:00Z","msg":{}}`+"\n")
 	write("raw/status/m1/bootstrap.json", `{"model":"m1"}`)
 	write("raw/status/m1/status-log.json", `{"grafana/0":[{"status":"idle","since":"2026-11-11T10:01:00Z"},{"status":"idle","since":"2026-11-11T10:09:00Z"}],"loki/0":[{"status":"idle","since":"2026-11-11T10:05:00Z"}]}`)
+	write("raw/status/m1/databags.json", `{"grafana/0":"secret-value"}`)
+	write("raw/status/m1/config.json", `{"grafana":{"admin":"pw"}}`)
 	write("raw/status/m2/bootstrap.json", `{"model":"m2"}`)
 	write("recorder.log", "started\n")
 	return dir
@@ -102,8 +104,8 @@ func hasFile(files map[string]string, sub string) bool {
 
 func TestPackKeepsEverythingWithoutAScope(t *testing.T) {
 	files, res := pack(t, packFixture(t), PackOptions{})
-	if len(files) != 12 || res.Files != 12 {
-		t.Errorf("%d files (result %d), want the manifest, recorder.log and 10 under raw/: %v", len(files), res.Files, files)
+	if len(files) != 14 || res.Files != 14 {
+		t.Errorf("%d files (result %d), want the manifest, recorder.log and 12 under raw/: %v", len(files), res.Files, files)
 	}
 	if strings.Contains(files["manifest.json"], `"exported"`) {
 		t.Error("an unscoped export says it is partial")
@@ -215,5 +217,21 @@ func TestPackFindsMachineUnitsFromTheHello(t *testing.T) {
 	files, _ = pack(t, dir, PackOptions{Units: []string{"grafana"}})
 	if hasFile(files, "machine-0") {
 		t.Error("a machine that hosts no matching unit was kept")
+	}
+}
+
+func TestPackWithoutValuesLeavesOutDatabagsAndConfig(t *testing.T) {
+	files, _ := pack(t, packFixture(t), PackOptions{WithoutValues: true})
+	for n, body := range files {
+		if strings.HasSuffix(n, "databags.json") || strings.HasSuffix(n, "config.json") || strings.Contains(body, "secret-value") || strings.Contains(body, `"admin":"pw"`) {
+			t.Errorf("%s: values left in the archive", n)
+		}
+	}
+	if files["raw/status/m1/bootstrap.json"] == "" || files["raw/status/m1/status-log.json"] == "" || !hasFile(files, "raw/unit/m1/grafana-0") {
+		t.Errorf("everything else should stay: %v", files)
+	}
+	var m Manifest
+	if err := json.Unmarshal([]byte(files["manifest.json"]), &m); err != nil || m.Exported == nil || !m.Exported.WithoutValues {
+		t.Errorf("manifest says nothing: %v %+v", err, m.Exported)
 	}
 }

@@ -33,9 +33,9 @@ To share only what matters, scope the export to a model, a unit or application, 
 juju-lens export ./recordings/my-capture --unit grafana --since 2026-11-11T17:55:00Z --until 2026-11-11T17:58:00Z
 ```
 
-The archive is a recording of its own, and its manifest says that it is a part: `inspect summary` shows the scope. A hook that straddles the window is cut: `inspect` shows one that starts inside the window as still running, and doesn't list one that starts before it. If you packed one model of several, `inspect` needs no `--model` for it.
+The archive is a recording of its own, and its manifest says that it is a part: `inspect summary` shows the scope. A hook that straddles the window is cut: `inspect` shows it as truncated, with the reason, and a hook that began before `--since` is listed. A hook wholly outside the window is not. If you packed one model of several, `inspect` needs no `--model` for it.
 
-Scoping chooses what to include. It does not redact. The status snapshots of a model (`bootstrap.json`, `databags.json`, `config.json`) are kept whole and hold the values of relation data and configuration, and logs hold whatever the charms wrote to them. Review the files before you post the archive publicly. The [command line reference](../reference/cli.md#export) describes what each flag keeps.
+Scoping chooses what to include. It does not redact. The status snapshots of a model (`bootstrap.json`, `databags.json`, `config.json`) are kept whole and `databags.json` and `config.json` hold the values of relation data and configuration; pass `--without-values` to leave those two out. Logs hold whatever the charms wrote to them. Review the files before you post the archive publicly. The [command line reference](../reference/cli.md#export) describes what each flag keeps.
 
 ## Read a packed recording
 

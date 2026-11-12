@@ -21,10 +21,13 @@ type PackOptions struct {
 	Units  []string  // keep only these units or applications: their unit probe and workload logs, and the lines of the other sources that name them
 	Since  time.Time // keep only lines at or after this time
 	Until  time.Time // keep only lines at or before this time
+	// WithoutValues leaves out the status snapshots that hold values:
+	// raw/status/<model>/databags.json (relation data) and config.json.
+	WithoutValues bool
 }
 
 func (o PackOptions) scoped() bool {
-	return len(o.Models) > 0 || len(o.Units) > 0 || !o.Since.IsZero() || !o.Until.IsZero()
+	return o.WithoutValues || len(o.Models) > 0 || len(o.Units) > 0 || !o.Since.IsZero() || !o.Until.IsZero()
 }
 
 // PackResult says what Pack wrote.
@@ -106,6 +109,7 @@ func Pack(dir string, w io.Writer, opts PackOptions) (PackResult, error) {
 			t := opts.Until.UTC()
 			scope.Until = &t
 		}
+		scope.WithoutValues = opts.WithoutValues
 		m.Exported = scope
 		if len(opts.Models) > 0 {
 			// The archive holds only these models; say so, so that a reader
@@ -337,6 +341,9 @@ func (s *scoper) file(rel string) (keep bool, filter lineFilter, transform func(
 	timeOnly := !s.o.Since.IsZero() || !s.o.Until.IsZero()
 	switch kind {
 	case "status":
+		if s.o.WithoutValues && (p[3] == "databags.json" || p[3] == "config.json") {
+			return false, nil, nil
+		}
 		if p[3] == "status-log.json" && (len(s.units) > 0 || timeOnly) {
 			return true, nil, s.filterStatusLog
 		}
@@ -348,17 +355,7 @@ func (s *scoper) file(rel string) (keep bool, filter lineFilter, transform func(
 		if !timeOnly {
 			return true, nil, nil
 		}
-		return true, func(line []byte) (bool, bool) {
-			var r struct {
-				Kind string    `json:"kind"`
-				Ts   time.Time `json:"ts"`
-			}
-			if json.Unmarshal(line, &r) != nil || r.Ts.IsZero() {
-				return false, false
-			}
-			// What the probe is and what it covers stays, whatever the time.
-			return r.Kind == "hello" || r.Kind == "loader" || s.inWindow(r.Ts), true
-		}, nil
+		return true, nil, s.filterUnitFile
 	case "rpc":
 		if !timeOnly && len(s.units) == 0 {
 			return true, nil, nil
@@ -462,4 +459,128 @@ func HasModel(dir, model string) bool {
 		}
 	}
 	return false
+}
+
+// filterUnitFile keeps the records of a unit probe's file that are in the time
+// window. A hook process whose records the window cuts stays readable: the
+// proc_start record of one that began before the window is kept, and the
+// spool_end of one that ended after it is written in its place, with the cut
+// noted, so that inspect shows the hook as cut rather than as still running.
+func (s *scoper) filterUnitFile(data []byte) ([]byte, error) {
+	type procState struct {
+		kept       bool // some record of it is kept
+		cutStart   bool // records before the window were dropped
+		procStart  []byte
+		wrote      bool // a spool_end was written for it
+		host, unit string
+		pid        int
+		lastTs     time.Time
+	}
+	procs := map[string]*procState{}
+	var out bytes.Buffer
+	emit := func(line []byte) {
+		out.Write(line)
+		out.WriteByte('\n')
+	}
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		if len(line) == 0 {
+			continue
+		}
+		var r struct {
+			Kind string    `json:"kind"`
+			Ts   time.Time `json:"ts"`
+			Tap  *struct {
+				Host string          `json:"host"`
+				Unit string          `json:"unit"`
+				PID  int             `json:"pid"`
+				File string          `json:"file"`
+				Rec  json.RawMessage `json:"rec"`
+			} `json:"tap"`
+			SpoolEnd *struct {
+				Host string `json:"host"`
+				Unit string `json:"unit"`
+				PID  int    `json:"pid"`
+				File string `json:"file"`
+			} `json:"spool_end"`
+		}
+		if json.Unmarshal(line, &r) != nil || r.Ts.IsZero() {
+			continue
+		}
+		in := s.inWindow(r.Ts)
+		switch {
+		case r.Kind == "hello" || r.Kind == "loader":
+			emit(line)
+		case r.Kind == "tap" && r.Tap != nil:
+			p := procs[r.Tap.File]
+			if p == nil {
+				p = &procState{host: r.Tap.Host, unit: r.Tap.Unit, pid: r.Tap.PID}
+				procs[r.Tap.File] = p
+			}
+			if in {
+				if !p.kept && p.cutStart && p.procStart != nil {
+					emit(p.procStart)
+				}
+				p.kept, p.lastTs = true, r.Ts
+				emit(line)
+				continue
+			}
+			if !s.o.Since.IsZero() && r.Ts.Before(s.o.Since) {
+				p.cutStart = true
+				var k struct {
+					K string `json:"k"`
+				}
+				if json.Unmarshal(r.Tap.Rec, &k) == nil && k.K == "proc_start" {
+					p.procStart = append([]byte(nil), line...)
+				}
+			}
+		case r.Kind == "spool_end" && r.SpoolEnd != nil:
+			p := procs[r.SpoolEnd.File]
+			if p == nil || !p.kept {
+				continue
+			}
+			cut := ""
+			if p.cutStart {
+				cut = "start"
+			}
+			if !in {
+				if cut == "start" {
+					cut = "both"
+				} else {
+					cut = "end"
+				}
+			}
+			p.wrote = true
+			if cut == "" {
+				emit(line)
+				continue
+			}
+			rec := map[string]any{
+				"kind": "spool_end", "ts": r.Ts.UTC().Format(time.RFC3339Nano),
+				"spool_end": map[string]any{"host": r.SpoolEnd.Host, "unit": r.SpoolEnd.Unit, "pid": r.SpoolEnd.PID, "file": r.SpoolEnd.File, "export_cut": cut},
+			}
+			if in {
+				var whole map[string]json.RawMessage
+				if json.Unmarshal(line, &whole) == nil {
+					var inner map[string]json.RawMessage
+					if json.Unmarshal(whole["spool_end"], &inner) == nil {
+						inner["export_cut"], _ = json.Marshal(cut)
+						whole["spool_end"], _ = json.Marshal(inner)
+						b, _ := json.Marshal(whole)
+						emit(b)
+						continue
+					}
+				}
+			} else {
+				rec["ts"] = p.lastTs.UTC().Format(time.RFC3339Nano)
+			}
+			b, _ := json.Marshal(rec)
+			emit(b)
+		default:
+			if in {
+				emit(line)
+			}
+		}
+	}
+	return out.Bytes(), nil
 }

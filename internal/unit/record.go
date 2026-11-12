@@ -193,6 +193,10 @@ type SpoolEnd struct {
 	// Partial is the length of a last line that never got its newline;
 	// it isn't forwarded.
 	Partial int `json:"partial,omitempty"`
+	// ExportCut is set by `export` on a process whose records the export's
+	// time window cut: "start" (the records before the window are gone),
+	// "end" (those after it are), or "both".
+	ExportCut string `json:"export_cut,omitempty"`
 }
 
 // PebbleLog is one line of a workload service's output, as the container's

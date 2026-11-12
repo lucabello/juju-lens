@@ -18,6 +18,7 @@ type exportFlags struct {
 	units  []string
 	since  string
 	until  string
+	noVals bool
 }
 
 func newExportCmd() *cobra.Command {
@@ -43,13 +44,16 @@ Pack part of a recording with:
   --since, --until
             only lines in this time window (RFC 3339), read from each
             line's own timestamp
+  --without-values
+            leave out databags.json and config.json, the snapshots that hold
+            the values of relation data and configuration
 
 A hook that straddles the window is cut: inspect shows one that starts inside
 the window as still running, and doesn't list one that starts before it.
 Scoping chooses what to include; it doesn't redact. Status snapshots of a kept
-model are kept whole, and hold the values of relation data and configuration,
-and logs hold whatever the charms wrote: review the file before you post it
-publicly. The archive's manifest says it is partial.
+model are kept whole, and databags.json and config.json hold the values of
+relation data and configuration (--without-values leaves them out); logs hold
+whatever the charms wrote. Review the file before you post it publicly. The archive's manifest says it is partial.
 
 The recording must not be being written: stop a running recorder first.`,
 		Example: `  juju-lens export ./recordings/2026-11-11T17-54-31--expt
@@ -66,11 +70,12 @@ The recording must not be being written: stop a running recorder first.`,
 	fl.StringArrayVar(&f.units, "unit", nil, "only this unit or application (repeatable)")
 	fl.StringVar(&f.since, "since", "", "only lines at or after this time (RFC 3339)")
 	fl.StringVar(&f.until, "until", "", "only lines at or before this time (RFC 3339)")
+	fl.BoolVar(&f.noVals, "without-values", false, "leave out the snapshots of relation data and configuration values (databags.json and config.json)")
 	return cmd
 }
 
 func runExport(dir string, f exportFlags, cmd *cobra.Command) error {
-	opts := recording.PackOptions{Models: f.models, Units: f.units}
+	opts := recording.PackOptions{Models: f.models, Units: f.units, WithoutValues: f.noVals}
 	var err error
 	if f.since != "" {
 		if opts.Since, err = time.Parse(time.RFC3339, f.since); err != nil {
