@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart LR
-    A["ring buffer"] --> B["juju-lens-probe"]
+    A["ring buffer"] --> B["juju-lens probe"]
     B -->|"frames over stdout or SSH"| C["juju-lens record"]
     C --> D["raw/rpc/*.jsonl"]
     D --> E["indexer"]
@@ -35,7 +35,7 @@ While the probe runs, the recorder also collects:
 - `juju debug-log` for each model in scope, into `raw/juju/`.
 - Workload-container logs for Kubernetes models, into `raw/k8s/`.
 - The machine journal for machine models, into `raw/machine/`.
-- A `juju status` snapshot of each model at start, into `raw/status/`, so the viewer knows the state of the model before the first captured RPC.
+- A `juju status` snapshot of each model at start, and the `juju show-unit` and `juju config` snapshots with the values of relation data and configuration, into `raw/status/`, so the viewer knows the state of the model before the first captured RPC.
 
 See the [recording layout reference](../reference/recording-layout.md) for the full directory tree.
 
@@ -47,7 +47,7 @@ It pairs each request with its response by process, connection, and `request-id`
 
 From the spans, the indexer then works out which hook each RPC ran in and what state it changed. [From RPCs to hooks](rpcs-to-hooks.md) describes that step. Log lines go into a separate table, with their timestamp, source, unit, level, and text.
 
-`juju-lens view` opens `index.db` read-only and never reads `raw/`. Each pane is a SQL query against the tables listed in the [SQLite schema reference](../reference/sqlite-schema.md).
+`juju-lens view` opens `index.db` and never reads `raw/`; it builds the index first when there is none. Each pane is a SQL query against the tables listed in the [SQLite schema reference](../reference/sqlite-schema.md).
 
 Because everything in `index.db` is derived from `raw/`, the index can always be thrown away and rebuilt. A newer `juju-lens` with a different schema or better extraction can re-index an older recording, and a lost or damaged index loses no data. The raw files are plain JSON and text, so `grep` and `jq` also work on them directly. See [how to rebuild the index](../how-to/rebuild-the-index.md).
 

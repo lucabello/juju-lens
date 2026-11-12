@@ -37,7 +37,7 @@ Records a controller and its models into a new recording directory. `<name>` lab
 
 | Value | Captures | Needs |
 |---|---|---|
-| `unit` (default) | Runs the probe inside every unit in scope, plus logs and the status snapshot, with the workload containers' logs on Kubernetes. On Kubernetes models it runs in each unit's charm container; on machine models, once per machine, next to the machine agent, with `sudo`. Units added during the recording get a probe too, and a lost session is started again. It doesn't record relation data. | `juju ssh` to the units. Nothing installed beforehand. |
+| `unit` (default) | Runs the probe inside every unit in scope, plus logs and the status snapshot, with the workload containers' logs on Kubernetes. On Kubernetes models it runs in each unit's charm container; on machine models, once per machine, next to the machine agent, with `sudo`. Units added during the recording get a probe too, and a lost session is started again. The probe records no relation data of its own; the status snapshots taken when the recording starts, including `databags.json`, hold the values at that time. | `juju ssh` to the units. Nothing installed beforehand. |
 | `host` | Every Juju API RPC of the agents, read at their TLS boundary with eBPF, plus logs and the status snapshot. The probe runs on this host, as `juju-lens probe`, or on `--ssh-target`, to which `juju-lens` uploads it through `juju ssh` and runs it with `sudo`. | Root or `CAP_BPF` on the host where the agents run. |
 | `none` | Logs and the status snapshot only. No probe runs. | The `juju` client. |
 
@@ -68,7 +68,7 @@ dir=<absolute recording directory>
 pid=<recorder process ID>
 ```
 
-If the recorder exits or doesn't become ready within `--detach-timeout`, `record` stops it, removes `recorder.pid`, and exits 1 with the cause and the end of `recorder.log` on standard error. A probe that never reports its attach status is too old for `--detach`; the error says so, and upgrading `juju-lens-probe` on the target fixes it. With `--attach none`, the recorder is ready as soon as it has started its log sources. See [how to record a controller in CI](../how-to/record-in-ci.md).
+If the recorder exits or doesn't become ready within `--detach-timeout`, `record` stops it, removes `recorder.pid`, and exits 1 with the cause and the end of `recorder.log` on standard error. A probe that never reports its attach status could not start on the machine: read `recorder.log`. With `--attach none`, the recorder is ready as soon as it has started its log sources. See [how to record a model in CI](../how-to/record-in-ci.md).
 
 ## `watch`
 
@@ -132,7 +132,7 @@ Opens a recording in the viewer. See [viewer keybindings](viewer-keybindings.md)
 juju-lens export <recording> [flags]
 ```
 
-Packs a recording, or part of it, into one gzipped tar file: its `manifest.json`, everything under `raw/`, and `recorder.log`. It leaves out `index.db`, which is rebuilt from `raw/` the first time anything reads the recording. The files are under one directory named after the recording, so extracting the file gives a recording directory. A recorder must not be writing to the recording: stop it first. See [how to share a recording](../how-to/share-a-recording.md).
+Packs a recording, or part of it, into one gzipped tar file: its `manifest.json`, everything under `raw/`, and `recorder.log`. It leaves out `index.db`, which is rebuilt from `raw/`: `juju-lens inspect` and `juju-lens view` do it the first time they read the recording, and [`juju-lens index`](#index) does it on request. The files are under one directory named after the recording, so extracting the file gives a recording directory. A recorder must not be writing to the recording: stop it first. See [how to share a recording](../how-to/share-a-recording.md).
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -167,7 +167,7 @@ These flags pick events, and are shared by `events`, `costs`, `profile` and `dif
 | `--model` | the only model | The model to read. Required when the recording has more than one. |
 | `--unit` | all | Only this unit or application. Repeatable. |
 | `--name` | all | Only events whose name contains this, ignoring case, such as `config-changed`. Repeatable. |
-| `--fail` | all | Only events that ended this way: `none`, `errored`, `retried`, `interrupted`, or `problem` for any but `none`. Repeatable. |
+| `--fail` | all | Only events that ended this way: `none`, `errored`, `retried`, `interrupted`, `rpc-warn` (a hook that closed, with an RPC error in it), `lost-continue` (a hook that closed but whose closing marker is missing), or `problem` for any but `none`. `interrupted`, `rpc-warn` and `lost-continue` need the agents' RPCs (`--attach host`). Repeatable. |
 | `--since`, `--until` | none | RFC 3339 time bounds, which include events at the given time. |
 
 Where a flag is repeatable here or in the commands below (`--unit`, `--name`, `--fail`, `--grep`), repeated values are alternatives, and an event or line must match every flag you give.
@@ -181,7 +181,7 @@ The first command to run on a recording. It prints when the recording was taken 
 | `--model` | the only model | The model to read. Required when the recording has more than one. |
 | `--unit` | all | Only this unit or application. Repeatable. |
 | `--since`, `--until` | none | RFC 3339 time bounds. |
-| `--json` | `false` | Print `recording`, `model`, `started`, `events`, `log_lines`, `outcomes` (a count for each way an event ended), `units` (`unit`, `events`, `problems`) and `slowest`, and when set `controller`, `attach_mode`, `ended`, `costliest` and, for an exported part of a recording, `partial` (`models`, `units`, `since`, `until`, each only when it was given). `slowest` and `costliest` hold events as `inspect events` prints them in `--json`. |
+| `--json` | `false` | Print `recording`, `model`, `started`, `events`, `log_lines`, `outcomes` (a count for each way an event ended), `units` (`unit`, `events`, `problems`) and `slowest`, and when set `controller`, `attach_mode`, `ended`, `costliest` and, for an exported part of a recording, `partial` (`models`, `units`, `since`, `until`, `without_values`, each only when it was given). `slowest` and `costliest` hold events as `inspect events` prints them in `--json`. |
 
 ### `inspect events`
 
@@ -326,7 +326,7 @@ Prints or installs the instructions for AI agents that are built into the binary
 juju-lens synth <scenario> [flags]
 ```
 
-Writes a recording that imitates a Juju controller, without needing one. The output is identical on every run for the same flags. The scenarios are:
+Writes a recording that imitates a Juju controller, without needing one. Running it again with the same flags gives the same spans and logs; only the times in `manifest.json` change. The scenarios are:
 
 | Scenario | Recording |
 |---|---|

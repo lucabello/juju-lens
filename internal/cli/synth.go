@@ -26,8 +26,8 @@ func newSynthCmd() *cobra.Command {
 		Use:   "synth <scenario>",
 		Short: "Generate a synthetic recording to try the viewer and inspect without a controller",
 		Long: `synth writes a recording directory whose spans mimic what a real
-Juju controller would emit for a given scenario. The recording is
-byte-for-byte reproducible when --start is fixed.
+Juju controller would emit for a given scenario. Its spans and logs are
+the same on every run when --start is fixed; the times in manifest.json are not.
 
 Available scenarios:
   trivial   two applications (grafana, prometheus) forming one relation.

@@ -1,6 +1,6 @@
 # From RPCs to hooks
 
-A recording holds thousands of RPCs, but a charm author thinks in hooks: `install`, `config-changed`, `ingress-relation-joined`. This page describes how `juju-lens` turns spans, the single RPCs described in [from wire to viewer](from-wire-to-viewer.md), into the hooks, state changes, and log lines the viewer shows. The same rules apply to every recording, captured or synthetic; `juju-lens inspect` uses them too.
+A recording holds thousands of RPCs, but a charm author thinks in hooks: `install`, `config-changed`, `ingress-relation-joined`. This page describes how `juju-lens` turns spans, the single RPCs described in [from wire to viewer](from-wire-to-viewer.md), into the hooks, state changes, and log lines the viewer shows. This is how a recording with the agents' RPCs (`--attach host`) is read, and `juju-lens inspect` uses the same rules. A recording made with `--attach unit` alone has no RPCs: each hook process is a hook run, and [how a hook run ended](#how-a-hook-run-ended) applies only in part.
 
 ## Finding hooks
 
@@ -52,7 +52,7 @@ The Events pane lists, by default:
 
 - **Hook runs**, one row each, at the time the hook started. The row shows the hook name, its duration, and whether it wrote relation data. With unit capture, a hook the tap recorded nothing of is marked `not instrumented`, and one whose records stop early is marked `truncated`; see [hooks the tap missed](#hooks-the-tap-missed).
 - **Status changes**, one row each, at the time of the RPC that made the change, with the hook that caused it.
-- **Settled units**, a row each time a unit's agent goes `idle` and stays there for at least three seconds. This is when a unit's status, such as `active / idle`, can be read as the result of the hooks before it.
+- **Settled units**, a row each time a unit's agent goes `idle` and stays there for at least three seconds. This is when a unit's status, such as `active / idle`, can be read as the result of the hooks before it. They come from the agents' status RPCs, so a recording without them has none.
 
 Verbose mode (`.`) also shows the individual RPCs that the default view folds into hook rows: each status RPC, relation scope changes (`EnterScope`, `LeaveScope`), leadership claims, secret operations, and actions, plus the repeated status changes described above.
 
@@ -69,6 +69,8 @@ An exception shows on the innermost span it was raised in, usually an observer o
 Log lines aren't tied to RPCs when they're recorded, so the Logs pane doesn't try to attribute them. It merges events and log lines from every source into one stream ordered by time and scrolls to the selected event, so the lines around it are the ones written while it happened. The exception is a log line that carries the event's span ID, which the pane marks with `»`. This only happens when tracing is enabled in Juju and the log source writes span IDs.
 
 ## How a hook run ended
+
+With `--attach unit` alone, `errored` means the last process of the hook failed or was killed, `retried` means a failed process was followed by one that succeeded, and `interrupted`, `rpc-warn` and `lost-continue` do not occur. The rest of this section is how a recording with the agents' RPCs is read.
 
 Whether a hook run closed tells you very little on its own. A hook that the agent retried, a hook that the unit abandoned when it was removed, and a hook whose closing marker the probe dropped can all look the same. `juju-lens` uses the agent's own markers to tell them apart, checking each rule in turn:
 

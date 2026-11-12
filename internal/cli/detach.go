@@ -236,7 +236,7 @@ func runDetached(cmd *cobra.Command, name string, f recordFlags) error {
 		var why []string
 		switch {
 		case hostMissing && !sawStatus.Load():
-			why = append(why, "the probe never reported its attach status, so it may be too old to support --detach; upgrade juju-lens-probe on the target machines (plain `record` still works with it)")
+			why = append(why, "the probe never reported its attach status; it could not start on the target machine")
 		case hostMissing:
 			why = append(why, "the probe attached to no agent process")
 		}

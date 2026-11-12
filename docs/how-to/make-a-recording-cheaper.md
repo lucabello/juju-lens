@@ -38,7 +38,7 @@ juju-lens record my-capture --model cos --max-duration 30m --max-size 500000000
 
 ## Upload the packed recording
 
-The index is up to as large as the raw data, and compresses worse: equal in the deploys, 60% to 75% in a settled model, where `raw/` compressed to 1.1 MB and `index.db` to 1.7 MB. `juju-lens export` packs a recording without its index, which is rebuilt where you read it:
+The index is up to as large as the raw data, and compresses worse: equal in the deploys, 60% to 77% in a settled model, where `raw/` compressed to 1.1 MB and `index.db` to 1.7 MB. `juju-lens export` packs a recording without its index, which is rebuilt where you read it, by `inspect`, `view` or `index`:
 
 ```bash
 juju-lens export ./recording --output recording.tar.gz

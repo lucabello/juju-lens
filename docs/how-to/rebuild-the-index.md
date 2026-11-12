@@ -4,6 +4,7 @@ Use this guide to regenerate `index.db` from a recording's raw data. Rebuild it 
 
 - A new version of `juju-lens` changed the index schema or how it extracts hooks and state.
 - `index.db` is missing or damaged.
+- You extracted an archive made by [`juju-lens export`](share-a-recording.md), which leaves the index out. `inspect` and `view` build it on their own; `index` does it on request, and takes `--rename`.
 - The recorder was stopped with [`stop --force`](stop-a-recording.md) and didn't finish indexing.
 
 Rebuilding only reads `raw/`, so it's safe to repeat. See [from wire to viewer](../explanation/from-wire-to-viewer.md#the-index) for why this works.

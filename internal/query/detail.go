@@ -359,9 +359,9 @@ func eventKindLabel(k narrative.EventKind) string {
 func failExplanation(ev narrative.Event, sp recording.SpanRow) string {
 	switch ev.Fail {
 	case narrative.FailErrored:
-		return "hook in error state — it errored and the uniter is still retrying it; the unit is in error state"
+		return "hook errored — its last attempt failed, and no later attempt completed in the recording"
 	case narrative.FailRetried:
-		return "hook retried — it errored, the uniter retried it, and it then completed successfully"
+		return "hook retried — an attempt failed and a later one completed successfully"
 	case narrative.FailInterrupted:
 		return "hook interrupted — another hook opened before this one reached done; it was genuinely abandoned mid-run"
 	case narrative.FailLostContinue:

@@ -56,7 +56,7 @@ Bars are blue for events and observers, orange for charm functions, green for op
 | `→`/`l` | Unfold. |
 | `Enter`, `Space` | Fold or unfold the selected row. |
 | `1`–`9` | Open that many levels of the whole trace: `1` the process alone, `2` its direct children, and so on. Deeper rows are folded. |
-| `+`, `-` | Open one more level, or close one, under the selected row only, so you can open one branch deeper while the rest stays as it is. `-` folds the deepest open level under the row, or, on a row with nothing open under it, folds the row it is under and selects that; `+` unfolds the shallowest folded level. |
+| `+` or `=`, `-` | Open one more level, or close one, under the selected row only, so you can open one branch deeper while the rest stays as it is. `-` folds the deepest open level under the row, or, on a row with nothing open under it, folds the row it is under and selects that; `+` unfolds the shallowest folded level. |
 | `.` | Show everything: all code however short or deep, including ops internals, imports and short calls, and the CPU time in the details of a row. Again, back to the default. |
 | `Tab` | For a hook Juju ran more than once, the next attempt. |
 | `Esc`, `q` | Close the inspector. |

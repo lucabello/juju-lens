@@ -39,7 +39,7 @@ juju-lens record my-capture --model cos --attach none
 
 ## Record the Juju API traffic
 
-A unit recording doesn't contain the values of relation data: the probe records which keys a hook tool touched, never the values. It also lacks the agent's status and the markers that show which hook the agent runs next, because those are on Juju's side. To record them, attach to the agents' host with `--attach host`, which needs root or `CAP_BPF` and Linux 5.8 or newer, on the host where the agents run. It attaches read-only eBPF probes to the Juju agents and doesn't change any Juju configuration. If the agents run on the host you're on, for example a local LXD or MicroK8s controller, run:
+The unit probe doesn't record the values of relation data: it records which keys a hook tool touched, never the values. The status snapshot taken when the recording starts, `databags.json`, does hold the values at that time. It also lacks the agent's status and the markers that show which hook the agent runs next, because those are on Juju's side. To record them, attach to the agents' host with `--attach host`, which needs root or `CAP_BPF` and Linux 5.8 or newer, on the host where the agents run. It attaches read-only eBPF probes to the Juju agents and doesn't change any Juju configuration. If the agents run on the host you're on, for example a local LXD or MicroK8s controller, run:
 
 ```bash
 sudo juju-lens record my-capture --attach host

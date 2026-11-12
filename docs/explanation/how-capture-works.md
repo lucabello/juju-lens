@@ -10,14 +10,14 @@ With `--attach host`, `juju-lens` reads the plaintext at those two points. It do
 
 eBPF is a Linux kernel feature for running small, verified programs inside the kernel in response to events. The kernel checks each program before loading it, so a program can't crash the kernel or loop forever, and it can't write to the memory of the process it observes.
 
-A *uprobe* is one kind of event an eBPF program can attach to: "this process is about to execute the instruction at this address". `juju-lens-probe` places uprobes on two functions inside the agent binary:
+A *uprobe* is one kind of event an eBPF program can attach to: "this process is about to execute the instruction at this address". `juju-lens probe` places uprobes on two functions inside the agent binary:
 
 - `crypto/tls.(*Conn).Write`, on entry. The buffer argument holds the plaintext about to be encrypted.
 - `crypto/tls.(*Conn).Read`, on entry and on return. The entry probe remembers where the buffer is, and the return probe copies the bytes that were decrypted into it.
 
-The usual way to hook a function's return is a *uretprobe*, which works by rewriting the return address on the stack. That breaks the Go runtime, which moves goroutine stacks around. Instead, `juju-lens-probe` finds every `RET` instruction in `Read` and attaches an ordinary uprobe to each one.
+The usual way to hook a function's return is a *uretprobe*, which works by rewriting the return address on the stack. That breaks the Go runtime, which moves goroutine stacks around. Instead, `juju-lens probe` finds every `RET` instruction in `Read` and attaches an ordinary uprobe to each one.
 
-To place a probe, `juju-lens-probe` needs the address of each function. Production `jujud` binaries are stripped of debug symbols, so the usual symbol table doesn't list them. Every Go binary also carries `.gopclntab`, a table the Go runtime needs for stack traces and garbage collection, which stripping leaves in place, and `juju-lens-probe` reads the addresses from there. [`gojue/ecapture`](https://github.com/gojue/ecapture) uses the same technique.
+To place a probe, `juju-lens probe` needs the address of each function. Production `jujud` binaries are stripped of debug symbols, so the usual symbol table doesn't list them. Every Go binary also carries `.gopclntab`, a table the Go runtime needs for stack traces and garbage collection, which stripping leaves in place, and `juju-lens probe` reads the addresses from there. [`gojue/ecapture`](https://github.com/gojue/ecapture) uses the same technique.
 
 Each time a probe fires, its eBPF program copies the buffer into a ring buffer shared with userspace. The agent isn't paused or reconfigured, and nothing in it changes. Probes need Linux 5.8 or newer, and `CAP_BPF` or root on the host where the agent runs.
 

@@ -12,7 +12,7 @@ juju-lens stop ./recordings/my-capture
 
 `stop` reads the recorder's process ID from `recorder.pid` in that directory and sends it `SIGTERM`, the same signal as `Ctrl-C`. The recorder detaches from the agents, writes the manifest, finishes building the index, and removes `recorder.pid`. `stop` waits up to 30 seconds for it to exit. Use `--timeout` to change that.
 
-If there's no `recorder.pid`, the recorder isn't running.
+If there's no `recorder.pid`, the recorder isn't running, and `stop` exits 1 with `no recorder is running`.
 
 ## Force the recorder to stop
 
