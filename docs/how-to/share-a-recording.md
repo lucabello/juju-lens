@@ -33,7 +33,7 @@ To share only what matters, scope the export to a model, a unit or application, 
 juju-lens export ./recordings/my-capture --unit grafana --since 2026-11-11T17:55:00Z --until 2026-11-11T17:58:00Z
 ```
 
-The archive is a recording of its own, and its manifest says that it is a part: `inspect summary` shows the scope. A hook that straddles the window is cut: `inspect` shows it as truncated, with the reason, and a hook that began before `--since` is listed. A hook wholly outside the window is not. If you packed one model of several, `inspect` needs no `--model` for it.
+The archive is a recording of its own, and its manifest says that it is a part: `inspect summary` shows the scope. A hook that straddles the window is cut: `inspect event` marks it as truncated, with the reason, and a hook that began before `--since` is listed. A hook wholly outside the window is not. If you packed one model of several, `inspect` needs no `--model` for it.
 
 Scoping chooses what to include. It does not redact. The status snapshots of a model (`bootstrap.json`, `databags.json`, `config.json`) are kept whole and `databags.json` and `config.json` hold the values of relation data and configuration; pass `--without-values` to leave those two out. Logs hold whatever the charms wrote to them. Review the files before you post the archive publicly. The [command line reference](../reference/cli.md#export) describes what each flag keeps.
 
@@ -46,7 +46,7 @@ tar -xzf my-capture.tar.gz
 juju-lens inspect summary my-capture
 ```
 
-The first command that reads the recording builds the index, and says so on standard error. See [how to ask a recording questions](ask-a-recording-questions.md).
+The first `inspect` command builds the index, and says so on standard error. To open the recording in the viewer, `juju-lens view` does the same. See [how to ask a recording questions](ask-a-recording-questions.md).
 
 ## Upload it from CI
 

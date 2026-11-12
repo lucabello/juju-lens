@@ -28,7 +28,8 @@ func newExportCmd() *cobra.Command {
 		Short: "Pack a recording, or part of it, into one file to share or attach",
 		Long: `export writes a recording as one gzipped tar file: its manifest, everything
 under raw/, and recorder.log. It leaves out index.db, which is as big as raw/
-and is rebuilt from it the first time anything reads the recording.
+and is rebuilt from it: 'juju-lens inspect' and 'juju-lens view' do it the first
+time they read the recording, and 'juju-lens index' does it on request.
 
 To read the file, extract it and point juju-lens at the directory it makes:
 
@@ -48,12 +49,13 @@ Pack part of a recording with:
             leave out databags.json and config.json, the snapshots that hold
             the values of relation data and configuration
 
-A hook that straddles the window is cut: inspect shows one that starts inside
-the window as still running, and doesn't list one that starts before it.
+A hook that straddles the window is cut: inspect lists it and marks it
+truncated, with the reason. A hook wholly outside the window is not listed.
 Scoping chooses what to include; it doesn't redact. Status snapshots of a kept
 model are kept whole, and databags.json and config.json hold the values of
 relation data and configuration (--without-values leaves them out); logs hold
-whatever the charms wrote. Review the file before you post it publicly. The archive's manifest says it is partial.
+whatever the charms wrote. Review the file before you post it publicly.
+The archive's manifest says it is partial.
 
 The recording must not be being written: stop a running recorder first.`,
 		Example: `  juju-lens export ./recordings/2026-11-11T17-54-31--expt

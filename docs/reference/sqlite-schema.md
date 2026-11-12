@@ -1,6 +1,6 @@
 # SQLite index schema
 
-The tables in `index.db`, as of schema version 7, apart from the internal `meta` table. [From wire to viewer](../explanation/from-wire-to-viewer.md#the-index) describes how they're filled.
+The tables in `index.db`, as of schema version 8, apart from the internal `meta` table. [From wire to viewer](../explanation/from-wire-to-viewer.md#the-index) describes how they're filled.
 
 ## `models`
 
@@ -66,7 +66,7 @@ A process with `tap` set to `truncated` has one of these `tap_reason` values:
 
 #### Hooks the tap missed
 
-When the recording is indexed, each hook or action that ran on a unit a unit probe covered, but that the tap recorded nothing of, has a `root` span with no children. Its `attrs_json` has `kind` `root`, `exec` (`hook` or `action`; `juju exec` is the action `juju-exec`), `hook_kind` for a hook, `tap` set to `missing`, `tap_reason` when the reason is known, and `seen_by`. With `seen_by` `proc`, the unit probe's `/proc` poll found the process: the span starts when the process did, ends up to `res_end_slack_ms` after it, and has `env`, `pid`, `command` and the [resource attributes](#resource-attributes) with `res_source` `proc`, but no `rc`; the probe writes it as the process ends. Otherwise `seen_by` is `status-log` when the unit's [status log](recording-layout.md#raw-data) lists it, `rpc` when a `run-hook` marker brackets it, or both, comma-separated, and the span is added when the recording is indexed: it starts when the status log entry or the marker does, and ends at the unit's next status log entry or at the marker's `continue`. `status_code` is `ERROR` when the status log says the hook failed. `raw_file` is the status log, or the RPC file of the marker.
+When the recording is indexed, each hook or action that ran on a unit a unit probe covered, but that the tap recorded nothing of, has a `root` span with no children. Its `attrs_json` has `kind` `root`, `exec` (`hook` or `action`; `juju exec` is the action `juju-exec`), `hook_kind` for a hook, `tap` set to `missing`, `tap_reason` when the reason is known, and `seen_by`. With `seen_by` `proc`, the unit probe's `/proc` poll found the process: the span starts when the process did, ends up to `res_end_slack_ms` after it, and has `env`, `pid`, `command` and the [resource attributes](#resource-attributes) with `res_source` `proc`, but no `rc`; the probe writes it as the process ends. Otherwise `seen_by` is `status-log` when the unit's [status log](recording-layout.md#raw-data) lists it, `rpc` when a `run-hook` marker brackets it, or both, comma-separated, and the span is added when the recording is indexed: it starts when the status log entry or the marker does, and ends at the unit's next status log entry or at the marker's `continue`. `status` is `ERROR` when the status log says the hook failed. `raw_file` is the status log, or the RPC file of the marker.
 
 | `tap_reason` | Meaning |
 |---|---|
@@ -83,6 +83,33 @@ When the recording is indexed, each hook or action that ran on a unit a unit pro
 | `the tap had been removed` | The hook ran after the probe removed the tap as the recording ended. |
 
 Without a `tap_reason`, the tap was in place and the reason is unknown.
+
+#### Resource attributes
+
+What one execution cost, from the unit probe's [execution record](recording-layout.md#execution-records), as attributes of its `root` span. Times are in milliseconds, sizes in bytes, all as strings.
+
+| Attribute | Meaning |
+|---|---|
+| `res_source` | `tap`: the span's start and end are the tap's `proc_start` and `proc_end`. `proc`: only the `/proc` poll saw the process; the start is the process's start time, and the end up to `res_end_slack_ms` late. |
+| `res_proc_start` | When the process started, from `/proc`, as RFC 3339. |
+| `res_end_slack_ms` | How late the end can be, when it came from a poll. |
+| `res_overlapped` | `true` when another execution ran under the same agent at the same time; the `res_cgroup_*` figures cover both, and `res_cpu_*` is 0. |
+| `res_truncated` | `true` when the tap recorded the process and it exited without a `proc_end`. |
+| `res_cpu_ms`, `res_cpu_user_ms`, `res_cpu_sys_ms` | CPU time of the process and everything it started, exact. |
+| `res_peak_rss_bytes`, `res_max_procs` | The largest total resident memory of the process tree, and the most processes alive at once, as polled. |
+| `res_cgroup` | The cgroup the next figures are for: `charm` (the charm container) on Kubernetes, `agent` (the machine agent's service, shared by every unit on the machine) on machines. |
+| `res_cgroup_cpu_ms`, `res_cgroup_cpu_user_ms`, `res_cgroup_cpu_sys_ms`, `res_cgroup_throttled_ms` | CPU time used in the cgroup, and time it was throttled by its CPU limit, over the window. Includes the agent's own work for the hook; excludes the probe's. |
+| `res_cgroup_mem_base_bytes`, `res_cgroup_mem_peak_bytes`, `res_cgroup_mem_max_bytes`, `res_cgroup_mem_samples` | Memory at the start of the window, the peak during it, the limit (absent when unlimited), and how many `memory.current` readings were taken. |
+| `res_cgroup_mem_peak_source`, `res_cgroup_mem_peak_exact` | How `res_cgroup_mem_peak_bytes` was found. `reset`: the cgroup's `memory.peak`, reset as the probe noticed the execution (Linux 6.12 and later, where the probe can write the cgroup filesystem: machines, not Kubernetes, which mounts it read-only). `high-water`: the cgroup's lifetime `memory.peak` rose during the window, so its new value is the peak. `polled`: the largest `memory.current` reading, about 20 a second, which misses a shorter peak. `res_cgroup_mem_peak_exact` is `false` only for `polled`. Absent in recordings made before. |
+| `res_cgroup_io_read_bytes`, `res_cgroup_io_write_bytes` | Bytes read and written. |
+| `res_cgroup_cpu_stall_ms`, `res_cgroup_mem_stall_ms`, `res_cgroup_io_stall_ms` | Pressure stall time (the `some` totals). |
+| `res_cgroup_window_start`, `res_cgroup_window_end` | The counter readings the figures are taken between, as RFC 3339: when the probe noticed the process, up to 100 ms after it started, and the first after it ended. |
+| `res_cgroup_error` | Why the cgroup couldn't be read. |
+| `res_workloads` | JSON: the same figures for each workload container, as in the execution record's `workloads`, with `mem_peak_source` `high-water` or `polled` (from the burst readings, 10 a second). Kubernetes only. |
+| `res_processes`, `res_processes_truncated` | JSON: the processes seen in the tree, as in the execution record's `processes`, and how many more there were. |
+| `res_probe_cpu_ms` | The probe's own CPU time during the execution. |
+| `res_linger_ms` | The execution record's `linger_ms`: how long after the execution, or after the last Pebble change it caused was ready, the probe kept sampling workloads densely. |
+
 ## Profiles
 
 With `record --attach unit`, unless it ran with `--profile=false`, the tap samples each hook process's Python stacks every 10 milliseconds; see [stack samples](recording-layout.md#stack-samples). Four tables hold them, keyed by the process's `root` [ops span](#ops-spans). Each stack belongs to the ops span it ran in: the innermost of the observer, event, deferred-events backlog, charm init, or the process itself, `root`, for what ran before ops started, such as importing the charm.
@@ -146,32 +173,6 @@ JOIN profile_frames f ON f.root_span_id = p.root_span_id
                      AND f.frame_id = json_extract(st.frames_json, '$[0]')
 WHERE p.rss_bytes = (SELECT max(rss_bytes) FROM profile_samples WHERE root_span_id = p.root_span_id);
 ```
-
-### Resource attributes
-
-What one execution cost, from the unit probe's [execution record](recording-layout.md#execution-records), as attributes of its `root` span. Times are in milliseconds, sizes in bytes, all as strings.
-
-| Attribute | Meaning |
-|---|---|
-| `res_source` | `tap`: the span's start and end are the tap's `proc_start` and `proc_end`. `proc`: only the `/proc` poll saw the process; the start is the process's start time, and the end up to `res_end_slack_ms` late. |
-| `res_proc_start` | When the process started, from `/proc`, as RFC 3339. |
-| `res_end_slack_ms` | How late the end can be, when it came from a poll. |
-| `res_overlapped` | `true` when another execution ran under the same agent at the same time; the `res_cgroup_*` figures cover both, and `res_cpu_*` is 0. |
-| `res_truncated` | `true` when the tap recorded the process and it exited without a `proc_end`. |
-| `res_cpu_ms`, `res_cpu_user_ms`, `res_cpu_sys_ms` | CPU time of the process and everything it started, exact. |
-| `res_peak_rss_bytes`, `res_max_procs` | The largest total resident memory of the process tree, and the most processes alive at once, as polled. |
-| `res_cgroup` | The cgroup the next figures are for: `charm` (the charm container) on Kubernetes, `agent` (the machine agent's service, shared by every unit on the machine) on machines. |
-| `res_cgroup_cpu_ms`, `res_cgroup_cpu_user_ms`, `res_cgroup_cpu_sys_ms`, `res_cgroup_throttled_ms` | CPU time used in the cgroup, and time it was throttled by its CPU limit, over the window. Includes the agent's own work for the hook; excludes the probe's. |
-| `res_cgroup_mem_base_bytes`, `res_cgroup_mem_peak_bytes`, `res_cgroup_mem_max_bytes`, `res_cgroup_mem_samples` | Memory at the start of the window, the peak during it, the limit (absent when unlimited), and how many `memory.current` readings were taken. |
-| `res_cgroup_mem_peak_source`, `res_cgroup_mem_peak_exact` | How `res_cgroup_mem_peak_bytes` was found. `reset`: the cgroup's `memory.peak`, reset as the probe noticed the execution (Linux 6.12 and later, where the probe can write the cgroup filesystem: machines, not Kubernetes, which mounts it read-only). `high-water`: the cgroup's lifetime `memory.peak` rose during the window, so its new value is the peak. `polled`: the largest `memory.current` reading, about 20 a second, which misses a shorter peak. `res_cgroup_mem_peak_exact` is `false` only for `polled`. Absent in recordings made before. |
-| `res_cgroup_io_read_bytes`, `res_cgroup_io_write_bytes` | Bytes read and written. |
-| `res_cgroup_cpu_stall_ms`, `res_cgroup_mem_stall_ms`, `res_cgroup_io_stall_ms` | Pressure stall time (the `some` totals). |
-| `res_cgroup_window_start`, `res_cgroup_window_end` | The counter readings the figures are taken between, as RFC 3339: when the probe noticed the process, up to 100 ms after it started, and the first after it ended. |
-| `res_cgroup_error` | Why the cgroup couldn't be read. |
-| `res_workloads` | JSON: the same figures for each workload container, as in the execution record's `workloads`, with `mem_peak_source` `high-water` or `polled` (from the burst readings, 10 a second). Kubernetes only. |
-| `res_processes`, `res_processes_truncated` | JSON: the processes seen in the tree, as in the execution record's `processes`, and how many more there were. |
-| `res_probe_cpu_ms` | The probe's own CPU time during the execution. |
-| `res_linger_ms` | The execution record's `linger_ms`: how long after the execution, or after the last Pebble change it caused was ready, the probe kept sampling workloads densely. |
 
 ## `snapshots`
 

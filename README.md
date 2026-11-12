@@ -28,7 +28,7 @@ What recording needs depends on what you capture, chosen with `record --attach`:
 
 | `--attach` | Captures | Needs |
 |---|---|---|
-| `unit` (default) | Inside each charm: events, observers, hook tool and Pebble calls, each hook's CPU and memory, and Python stack samples. Writes a module into each charm's venv while it runs, and removes it afterwards. Doesn't record relation data. | A Juju client that can `juju ssh` into the units; on machine models, passwordless `sudo` on the machines. Nothing installed on the units beforehand: `juju-lens` uploads its probe, for the units' architecture (`amd64` or `arm64`). Workload-container logs on Kubernetes come through Pebble, so no `kubectl` is needed. |
+| `unit` (default) | Inside each charm: events, observers, hook tool and Pebble calls, each hook's CPU and memory, and Python stack samples. Writes a module into each charm's venv while it runs, and removes it afterwards. The probe records no relation data of its own. | A Juju client that can `juju ssh` into the units; on machine models, passwordless `sudo` on the machines. Nothing installed on the units beforehand: `juju-lens` uploads its probe, for the units' architecture (`amd64` or `arm64`). Workload-container logs on Kubernetes come through Pebble, so no `kubectl` is needed. |
 | `host` | The agents' Juju API calls: relation data, agent status and the `run-hook` markers, for any charm. | Linux 5.8 or newer, and root or `CAP_BPF`, on the host where the Juju agents run. |
 | `host,unit` | Both, joined hook by hook. | Both of the above. |
 | `none` | Logs and the model status only. | The Juju client. |
@@ -61,11 +61,11 @@ sudo juju-lens record my-capture --model <model> --attach host,unit
 
 ## What recording costs
 
-On a Kubernetes model of six charms, recording from inside the units added about 9 to 15 MB of memory per unit, a `juju ssh` session per unit, and about 15% more controller CPU while the model deployed; deploy times and configuration changes showed no difference beyond run-to-run variation. A recording of a 12-minute deploy took 66 to 72 MB on disk. See [what it costs](docs/explanation/how-unit-capture-works.md#what-it-costs) for the figures and what they were measured on, and [how to make a recording cheaper](docs/how-to/make-a-recording-cheaper.md).
+On a Kubernetes model of six charms, recording from inside the units added about 9 to 15 MB of memory per unit, a `juju ssh` session per unit, and about 15% more controller CPU while the model deployed; deploy times and configuration changes showed no difference beyond run-to-run variation. A recording of a 12-minute deploy took 67 to 72 MB on disk. See [what it costs](docs/explanation/how-unit-capture-works.md#what-it-costs) for the figures and what they were measured on, and [how to make a recording cheaper](docs/how-to/make-a-recording-cheaper.md).
 
 ## Limitations
 
-- The default `--attach unit` records events, observers and stacks only for charms built on ops; other charms, and `juju exec`, get each execution's duration and cost only. It doesn't see Juju's side, such as the agent's `run-hook` markers, its status, and relation data: databag values are never recorded in a unit record. Add `host` for those. On Kubernetes, the first hooks after a refresh run before the module is back in the new pod.
+- The default `--attach unit` records events, observers and stacks only for charms built on ops; other charms, and `juju exec`, get each execution's duration and cost only. It doesn't see Juju's side, such as the agent's `run-hook` markers, its status, and relation data: a unit record holds no databag values from the hooks, only those in the status snapshot taken at the start. Add `host` for those. On Kubernetes, the first hooks after a refresh run before the module is back in the new pod.
 - With `--attach host`, Kubernetes controllers can only be recorded from the host they run on, such as a local MicroK8s, and machine controllers remotely over `juju ssh`, to which `juju-lens` uploads the probe, with `sudo` on the controller machine. To record the charms of a model on a remote Kubernetes cluster, use `--attach unit`.
 
 ## Develop

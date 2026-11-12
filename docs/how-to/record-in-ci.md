@@ -36,7 +36,7 @@ To record the Juju API traffic as well, add `host`, and run the command with `su
 sudo juju-lens record --detach ci-run --model testing --attach host,unit -o ./recording
 ```
 
-For a machine controller, `--attach host --ssh-target controller/0` runs the host probe there. If the error says the probe may be too old to support `--detach`, the probe never reported its attach status. To use `record --detach` with `--ssh-target`, upgrade `juju-lens-probe` on the controller machines. Older probes cause `--detach` to fail after `--detach-timeout`. Plain `record` is unaffected.
+For a machine controller, `--attach host --ssh-target controller/0` runs the host probe there. If the command fails after `--detach-timeout` because the probe never reported its attach status, read `recorder.log`: the probe could not start on the machine.
 
 In all these cases no recorder is left running and no `recorder.pid` is left behind.
 
@@ -71,6 +71,6 @@ Pack the recording with `juju-lens export` and upload the file as a job artifact
 juju-lens export ./recording --output recording.tar.gz
 ```
 
-It holds `recorder.log`, which you need to debug a recording that ended unexpectedly, and leaves out the index, which is as large as the raw data and is rebuilt where the recording is read. See [how to share a recording](share-a-recording.md) and [what a recording costs](../explanation/how-unit-capture-works.md#what-it-costs).
+It holds `recorder.log`, which you need to debug a recording that ended unexpectedly, and leaves out the index, which is as large as the raw data and is rebuilt where the recording is read, by `inspect`, `view` or `index`. See [how to share a recording](share-a-recording.md) and [what a recording costs](../explanation/how-unit-capture-works.md#what-it-costs).
 
 For every flag, see the [command line reference](../reference/cli.md#record).

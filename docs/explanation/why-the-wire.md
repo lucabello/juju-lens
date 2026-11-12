@@ -30,4 +30,4 @@ Juju has a stream of model changes for clients, the `AllWatcher`. It isn't usabl
 - Juju 4.x removed it. Its facades return "not implemented", and the planned replacement doesn't exist yet.
 - On Juju 3.6 it doesn't include relation databag contents. Databags are only available through the `Uniter` facade, which authenticates unit agents, not clients. `juju show-unit` can read a databag once, but there's no stream of changes.
 
-`juju-lens` does use the Juju API, through the `juju` client, for things that work on both versions: `juju status` at the start of a recording, to know the initial state of the model, and `juju debug-log`, for logs. Unit capture also uses `juju ssh` to reach the units, and `juju show-status-log` when the recording stops, to find hooks its module missed.
+`juju-lens` does use the Juju API, through the `juju` client, for things that work on both versions: `juju status`, `juju show-unit` and `juju config` at the start of a recording, to know the initial state of the model, and `juju debug-log`, for logs. Unit capture also uses `juju ssh` to reach the units, and `juju show-status-log` when the recording stops, to find hooks its module missed.

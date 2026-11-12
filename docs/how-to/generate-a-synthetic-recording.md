@@ -10,7 +10,7 @@ Generate a recording from the `trivial` scenario:
 juju-lens synth trivial --output /tmp/rec-trivial
 ```
 
-The `trivial` scenario deploys `grafana` and `prometheus`, relates them, sets a workload status on each unit, and sets an application status from the leader. Running the command again produces identical files, unless you change `--start` or `--model`.
+The `trivial` scenario deploys `grafana` and `prometheus`, relates them, sets a workload status on each unit, and sets an application status from the leader. Running the command again gives the same spans and logs, unless you change `--start` or `--model`; only the times in `manifest.json` change.
 
 Open the result like any other recording:
 

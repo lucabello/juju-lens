@@ -7,6 +7,7 @@ recordings/2026-07-03T14-30-12--my-capture/
 ├── manifest.json
 ├── recorder.pid
 ├── recorder.log
+├── record.log
 ├── index.db
 ├── raw/
 │   ├── rpc/<model>/calls-<hour>.jsonl
@@ -25,10 +26,11 @@ recordings/2026-07-03T14-30-12--my-capture/
 
 | Path | Contents |
 |---|---|
-| `manifest.json` | The `juju-lens` version that wrote the recording; the controller's name, UUID, and version; the models recorded; the attach mode and targets; start and end times; why the recording ended; and the status of each data source. In an archive made by [`export`](../how-to/share-a-recording.md) with a scope, an `exported` object with the models, units and time bounds it was packed with, and only the models it holds. |
+| `manifest.json` | The `juju-lens` version that wrote the recording; the controller's name, UUID, and version; the models recorded; the attach mode and targets; start and end times; why the recording ended; and the status of each data source. In an archive made by [`export`](../how-to/share-a-recording.md) with a scope, an `exported` object with the models, units and time bounds it was packed with, and only the models it holds, and `without_values` when `--without-values` was used. |
 | `recorder.pid` | The process ID of the running recorder, used by [`juju-lens stop`](../how-to/stop-a-recording.md). Removed when the recorder exits normally. |
+| `record.log` | The recorder's output when [`watch`](../how-to/watch-a-live-model.md) started it. [`export`](../how-to/share-a-recording.md) doesn't pack it. |
 | `recorder.log` | The recorder's output, including the probe's. Written only by recorders started with [`record --detach`](../how-to/record-in-ci.md). Appended to, never rotated. |
-| `index.db` | A SQLite database in WAL mode, built from `raw/`. The viewer and `juju-lens inspect` read only this file. See the [SQLite index schema](sqlite-schema.md). |
+| `index.db` | A SQLite database in WAL mode, or with a rollback journal on a filesystem that cannot do WAL, built from `raw/`. The viewer and `juju-lens inspect` read only this file. See the [SQLite index schema](sqlite-schema.md). |
 
 ## Raw data
 

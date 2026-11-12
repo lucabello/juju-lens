@@ -70,7 +70,9 @@ name and is stored in manifest.json.
          on a remote cluster and without root. Records the charm's side of
          each hook: ops events, observers, hook tool and Pebble calls, CPU
          and memory, and Python stacks sampled every 10 ms (--profile=false
-         turns the stacks off). Databag values are not recorded. This is
+         turns the stacks off). The probe records no relation
+         data of its own; the status snapshots taken when the recording starts
+         hold values. This is
          the default.
   host   run the probe where the Juju agents run, and capture every Juju
          API RPC at their crypto/tls boundary with read-only eBPF uprobes. The
@@ -87,7 +89,7 @@ that matches each machine's architecture.
 
 What unit capture costs, measured on a Kubernetes cos-lite deployment: about
 9% more CPU in the model's pods, 9 to 15 MB of memory per unit, one 'juju
-ssh' session per unit (a juju client of about 110 MB each on the machine
+ssh' session per unit (a juju client of about 110 MiB each on the machine
 running juju-lens), and about 15% more controller CPU while deploying.
 --profile=false makes the recording of a settled model about a quarter
 smaller. See docs/explanation/how-unit-capture-works.md.
