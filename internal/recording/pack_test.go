@@ -28,6 +28,7 @@ func packFixture(t *testing.T) string {
 		}
 	}
 	m := New("juju-lens", "test", "", "ctl")
+	m.Models = []ModelInfo{{Name: "m1"}, {Name: "m2"}}
 	if err := m.Save(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +123,12 @@ func TestPackScopesByModel(t *testing.T) {
 	var m Manifest
 	if err := json.Unmarshal([]byte(files["manifest.json"]), &m); err != nil || m.Exported == nil || len(m.Exported.Models) != 1 || m.Exported.Models[0] != "m2" {
 		t.Errorf("manifest %v: %+v", err, m.Exported)
+	}
+	if len(m.Models) != 1 || m.Models[0].Name != "m2" {
+		t.Errorf("the manifest lists %+v: it should list only the model that is in the archive", m.Models)
+	}
+	if m.Exported.Since != nil || m.Exported.Until != nil {
+		t.Errorf("unset bounds are set in the scope: %+v", m.Exported)
 	}
 }
 

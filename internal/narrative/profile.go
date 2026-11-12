@@ -3,6 +3,7 @@ package narrative
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,6 +94,7 @@ func NewProfile(profs []recording.OpsProfile, spans map[string]bool) *Profile {
 	for _, pr := range profs {
 		remap := make([]int, len(pr.Frames))
 		for i, f := range pr.Frames {
+			f.File = sameFile(f.File)
 			j, ok := ids[f]
 			if !ok {
 				j = len(p.Frames)
@@ -117,6 +119,14 @@ func NewProfile(profs []recording.OpsProfile, spans map[string]bool) *Profile {
 	}
 	return p
 }
+
+// unitDir matches the part of a charm file's path that names the unit,
+// "/var/lib/juju/agents/unit-grafana-0/charm/src/charm.py".
+var unitDir = regexp.MustCompile(`/unit-[^/]+/charm/`)
+
+// sameFile gives the same function of the same charm in different units one
+// path, so that a profile over several units has one row for it.
+func sameFile(path string) string { return unitDir.ReplaceAllString(path, "/unit-*/charm/") }
 
 // Total is what every stack adds up to.
 func (p *Profile) Total() Value {

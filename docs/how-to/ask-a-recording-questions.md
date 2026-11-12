@@ -1,6 +1,6 @@
 # How to ask a recording questions
 
-Use this guide to find a hook of a recording that went wrong or cost a lot, and read the code and logs behind it, with `juju-lens inspect`. It answers in short text, so that you, or an AI agent with a shell, can ask for what you need. `inspect events` lists every kind of event, which are mostly hooks.
+Use this guide to find a hook of a recording that went wrong or cost a lot, and read the code and logs behind it, with `juju-lens inspect`. It answers in short text, so that you, or an AI agent with a shell, can ask for what you need. `inspect events` lists every kind of event, most of them hooks.
 
 To let an AI agent do this, install the skill that comes with `juju-lens` into the directory your agent reads skills from, for example `juju-lens skills install --dir ~/.claude/skills`. It describes this path and what the numbers mean, and matches the commands of the binary that installs it.
 
@@ -11,7 +11,7 @@ To let an AI agent do this, install the skill that comes with `juju-lens` into t
 - The recording doesn't need an index. `inspect` builds it the first time and says so; it can take a while for a large recording.
 - `jq`, for the last step.
 
-The examples use a recording of an `opentelemetry-collector-k8s` unit, at `./rec`. Your span IDs will differ. To try the commands without a controller, [generate a synthetic recording](generate-a-synthetic-recording.md) and use its path instead of `./rec`.
+The examples use a recording of an `opentelemetry-collector-k8s` unit, at `./rec`. Your span IDs will differ. To try the commands without a controller, [generate a synthetic recording](generate-a-synthetic-recording.md) with `juju-lens synth ops --output ./rec` and use its path; only the `ops` scenario has stack samples, and its span IDs differ from the ones shown here.
 
 ## Start with the summary
 
@@ -176,7 +176,7 @@ A      B      CHANGE  FUNCTION
 
 ## If a command finds nothing
 
-A recording with several models needs `--model`. A recording made with `--attach host` alone, or with `--profile=false`, has events but no stack samples, so `profile` stops with an error that says so; `memory` and `trace` need a hook recorded with `--attach unit` and stop the same way. `logs` prints `no log lines match` when the recording holds none.
+A recording with several models needs `--model`. A recording made with `--attach host` alone, or with `--profile=false`, has events but no stack samples, so `profile` stops with an error that says so and `costs` lists nothing; `memory` and `trace` need a hook recorded with `--attach unit` and stop the same way. `logs` prints `no log lines match` when the recording holds none.
 
 ## Use JSON
 

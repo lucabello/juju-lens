@@ -24,7 +24,7 @@ func newSynthCmd() *cobra.Command {
 	f := &synthFlags{}
 	cmd := &cobra.Command{
 		Use:   "synth <scenario>",
-		Short: "Generate a synthetic recording for viewer development",
+		Short: "Generate a synthetic recording to try the viewer and inspect without a controller",
 		Long: `synth writes a recording directory whose spans mimic what a real
 Juju controller would emit for a given scenario. The recording is
 byte-for-byte reproducible when --start is fixed.

@@ -16,7 +16,7 @@
 - [Stop a running recording](how-to/stop-a-recording.md)
 - [Rebuild a recording's index](how-to/rebuild-the-index.md)
 - [Share a recording](how-to/share-a-recording.md): pack it into one file, and read it elsewhere
-- [Ask a recording questions](how-to/ask-a-recording-questions.md): find a hook that went wrong or cost a lot, and its code, logs and state, with `juju-lens inspect`
+- [Ask a recording questions](how-to/ask-a-recording-questions.md): find a hook that went wrong or cost a lot, and its code and logs, with `juju-lens inspect`
 - [Generate a synthetic recording](how-to/generate-a-synthetic-recording.md), without a Juju controller
 
 ## Reference

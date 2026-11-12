@@ -97,7 +97,27 @@ func Pack(dir string, w io.Writer, opts PackOptions) (PackResult, error) {
 		if err := json.Unmarshal(mdata, &m); err != nil {
 			return res, fmt.Errorf("reading manifest: %w", err)
 		}
-		m.Exported = &ExportScope{Models: opts.Models, Units: opts.Units, Since: opts.Since.UTC(), Until: opts.Until.UTC()}
+		scope := &ExportScope{Models: opts.Models, Units: opts.Units}
+		if !opts.Since.IsZero() {
+			t := opts.Since.UTC()
+			scope.Since = &t
+		}
+		if !opts.Until.IsZero() {
+			t := opts.Until.UTC()
+			scope.Until = &t
+		}
+		m.Exported = scope
+		if len(opts.Models) > 0 {
+			// The archive holds only these models; say so, so that a reader
+			// needs no --model for a single one.
+			var kept []ModelInfo
+			for _, mi := range m.Models {
+				if sc.models[sanitizeSegment(mi.Name)] {
+					kept = append(kept, mi)
+				}
+			}
+			m.Models = kept
+		}
 		if mdata, err = json.MarshalIndent(m, "", "  "); err != nil {
 			return res, err
 		}

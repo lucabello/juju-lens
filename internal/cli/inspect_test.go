@@ -716,3 +716,21 @@ func TestInspectFoldedStacks(t *testing.T) {
 		}
 	}
 }
+
+// An empty scope says so, and the next commands keep the scope; a list with
+// nothing in it is empty in JSON, not null.
+func TestInspectEmptyScopes(t *testing.T) {
+	dir := opsRecording(t)
+	out, _, err := runInspect(t, "summary", dir, "--unit", "nosuch")
+	if err != nil || !strings.Contains(out, "scope: --unit nosuch") || !strings.Contains(out, "0 events,") || !strings.Contains(out, "events "+dir+" --unit nosuch --fail problem") {
+		t.Errorf("summary of nothing: %v\n%s", err, out)
+	}
+	jout, _, err := runInspect(t, "costs", dir, "--unit", "nosuch", "--json")
+	if err != nil || !strings.Contains(jout, `"costs": []`) {
+		t.Errorf("costs of nothing in JSON: %v\n%s", err, jout)
+	}
+	stacks, _, err := runInspect(t, "profile", dir, "stacks", "--limit", "2")
+	if err != nil || !strings.Contains(stacks, "showing 2 of ") {
+		t.Errorf("stacks view doesn't say how many it left out: %v\n%s", err, stacks)
+	}
+}

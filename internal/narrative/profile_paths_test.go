@@ -1,6 +1,10 @@
 package narrative
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/lucabello/juju-lens/internal/recording"
+)
 
 // A hook run as ./src/charm.py has the charm's own files under relative
 // paths. They are the charm's code, as the absolute ones are, or a charm
@@ -28,5 +32,24 @@ func TestCharmFilesByPath(t *testing.T) {
 		if got := ShortPath(tc.path); got != tc.short {
 			t.Errorf("ShortPath(%q) = %q, want %q", tc.path, got, tc.short)
 		}
+	}
+}
+
+// The same function of the same charm in two units is one function of a
+// profile over both, though the units' directories differ.
+func TestProfileMergesTheSameCharmFileOfDifferentUnits(t *testing.T) {
+	mk := func(unit string) recording.OpsProfile {
+		return recording.OpsProfile{
+			RootSpanID: unit,
+			Frames:     []recording.ProfileFrame{{File: "/var/lib/juju/agents/unit-" + unit + "/charm/src/charm.py", Func: "_configure", Line: 10}},
+			Stacks:     []recording.ProfileStack{{SpanID: unit, Frames: []int{0}, Samples: 1, WallNs: 5}},
+		}
+	}
+	p := NewProfile([]recording.OpsProfile{mk("grafana-0"), mk("grafana-1")}, nil)
+	if len(p.Frames) != 1 || len(p.Stacks) != 2 {
+		t.Fatalf("%d frames for the same function in two units, want 1: %+v", len(p.Frames), p.Frames)
+	}
+	if !IsCharmFile(p.Frames[0].File) {
+		t.Errorf("%q should still be the charm's code", p.Frames[0].File)
 	}
 }

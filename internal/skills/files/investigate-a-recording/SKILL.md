@@ -25,9 +25,9 @@ Every list is bounded, says how much it left out (`--skip`, `--limit`), and ends
 
 ## What the numbers mean
 
-- In `profile`, the rows `(importing Python modules)` and `(Python runtime and libraries)` stand for code the detail level hides; they are not functions of the charm, so skip them when ranking. `costs` and `events` already leave the import phase out.
+- In `profile`, the rows `(importing Python modules)`, `(Python runtime and libraries)` and `(ops framework)`, and frames named `importing <module>`, stand for code that isn't the charm's own; they are not functions of the charm, so skip them when ranking. `costs` and `events` already leave the import phase out.
 - CPU and memory of a hook count charm init and the observers, with what they called. The time Python spends importing modules before ops starts is not in them; the profile shows it as `(importing Python modules)`.
-- A hook's CPU includes the processes the hook started that were sampled too. Ranking by the main process alone can give another hook first.
+- Each sampled process's CPU is its main thread's. `events`, `costs` and `profile` add up every sampled process of a hook, subprocesses included, so a hook with a busy subprocess ranks higher than its main process alone would put it.
 - Memory taken is the growth of resident memory between two samples (10 ms apart), summed: it says where memory was taken, not where it was held. A function that frees later still counts.
 - Wall time includes waiting, for example on Pebble or hook tools; CPU does not. A function with much wall time and little CPU was waiting.
 - Sizes use 1024-based units labelled `KB`, `MB`.

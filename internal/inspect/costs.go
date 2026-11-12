@@ -145,7 +145,10 @@ func SumCosts(src *query.Source, q CostsQuery) (CostList, error) {
 		return rows[i].Name < rows[j].Name
 	})
 	lo, hi := q.bounds(len(rows))
-	list.Total, list.Skip, list.Costs = len(rows), lo, rows[lo:hi]
+	list.Total, list.Skip = len(rows), lo
+	if hi > lo {
+		list.Costs = rows[lo:hi]
+	}
 	return list, nil
 }
 

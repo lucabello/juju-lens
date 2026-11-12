@@ -39,14 +39,17 @@ Pack part of a recording with:
   --model   only these models' files (repeatable)
   --unit    only these units, or applications: their unit probe and workload
             logs, and the lines of the debug log and the RPC capture that
-            name them (repeatable)
+            belong to them (repeatable)
   --since, --until
             only lines in this time window (RFC 3339), read from each
             line's own timestamp
 
-A hook that straddles the window is cut, and inspect marks it as cut. Status
-snapshots of a kept model are kept whole. The archive's manifest says it is
-partial.
+A hook that straddles the window is cut: inspect shows one that starts inside
+the window as still running, and doesn't list one that starts before it.
+Scoping chooses what to include; it doesn't redact. Status snapshots of a kept
+model are kept whole, and hold the values of relation data and configuration,
+and logs hold whatever the charms wrote: review the file before you post it
+publicly. The archive's manifest says it is partial.
 
 The recording must not be being written: stop a running recorder first.`,
 		Example: `  juju-lens export ./recordings/2026-11-11T17-54-31--expt

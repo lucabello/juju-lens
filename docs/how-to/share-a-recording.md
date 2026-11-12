@@ -15,13 +15,15 @@ Pass the recording directory:
 juju-lens export ./recordings/<timestamp>--my-capture
 ```
 
+Replace `<timestamp>` with the one in the directory's name.
+
 `export` writes `<timestamp>--my-capture.tar.gz` in the current directory and says how many files it packed. Use `--output` to choose the file:
 
 ```bash
 juju-lens export ./recordings/my-capture --output my-capture.tar.gz
 ```
 
-The file holds `manifest.json`, everything under `raw/`, and `recorder.log`. It leaves out `index.db`, which is as large as `raw/` and is rebuilt from it. A recording of five charms over nine minutes was 19 MB of raw data and packed to 2.1 MB.
+The file holds `manifest.json`, everything under `raw/`, and `recorder.log`. It leaves out `index.db`, which is as large as `raw/` and is rebuilt from it. For example, a nine-minute recording of five charms made with `--attach unit` was 19 MB of raw data and packed to 2.1 MB.
 
 ## Pack part of a recording
 
@@ -31,7 +33,9 @@ To share only what matters, scope the export to a model, a unit or application, 
 juju-lens export ./recordings/my-capture --unit grafana --since 2026-11-11T17:55:00Z --until 2026-11-11T17:58:00Z
 ```
 
-The archive is a recording of its own, and its manifest says that it is a part: `inspect summary` shows the scope. A hook that straddles the window is cut. The [command line reference](../reference/cli.md#export) describes what each flag keeps.
+The archive is a recording of its own, and its manifest says that it is a part: `inspect summary` shows the scope. A hook that straddles the window is cut: `inspect` shows one that starts inside the window as still running, and doesn't list one that starts before it. If you packed one model of several, `inspect` needs no `--model` for it.
+
+Scoping chooses what to include. It does not redact. The status snapshots of a model (`bootstrap.json`, `databags.json`, `config.json`) are kept whole and hold the values of relation data and configuration, and logs hold whatever the charms wrote to them. Review the files before you post the archive publicly. The [command line reference](../reference/cli.md#export) describes what each flag keeps.
 
 ## Read a packed recording
 

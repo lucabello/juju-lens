@@ -35,7 +35,8 @@ type Summary struct {
 	Slowest    []EventRow             `json:"slowest"`
 	Costliest  []EventRow             `json:"costliest,omitempty"` // profiled hooks with the most CPU
 
-	rec string
+	rec   string
+	scope string // the scope flags, for the next commands
 }
 
 // Summarize describes the events sc picks in src.
@@ -51,7 +52,7 @@ func Summarize(src *query.Source, rec string, sc Scope) (*Summary, error) {
 	s := &Summary{
 		Recording: src.Recording.Dir, Model: src.Model.Name, Controller: src.Recording.Controller,
 		AttachMode: src.Recording.AttachMode, Partial: src.Recording.Exported, Started: src.Recording.Started, Ended: src.Recording.Ended,
-		Events: len(events), LogLines: len(logs), Outcomes: map[string]int{}, Slowest: []EventRow{}, rec: rec,
+		Events: len(events), LogLines: len(logs), Outcomes: map[string]int{}, Slowest: []EventRow{}, rec: rec, scope: sc.flags(),
 	}
 	by := map[string]*UnitSummary{}
 	for _, ev := range events {
@@ -111,7 +112,10 @@ func (s *Summary) WriteText(w io.Writer) {
 	if p := s.Partial; p != nil {
 		fmt.Fprintf(w, "a part of the recording, exported with %s\n", scopeWords(p))
 	}
-	fmt.Fprintf(w, "%d events, %d log lines; ended: %s\n", s.Events, s.LogLines, outcomeWords(s.Outcomes))
+	if s.scope != "" {
+		fmt.Fprintf(w, "scope:%s\n", s.scope)
+	}
+	fmt.Fprintf(w, "%d %s, %d log lines; ended: %s\n", s.Events, plural(s.Events, "event", "events"), s.LogLines, outcomeWords(s.Outcomes))
 
 	if len(s.Units) > 0 {
 		fmt.Fprintln(w, "\nunits:")
@@ -135,9 +139,9 @@ func (s *Summary) WriteText(w io.Writer) {
 			fmt.Fprintf(w, "  %s  %-14s %-30s %s  span %s\n", r.TS.UTC().Format("15:04:05.000"), dash(r.Unit), r.Name, cpuCell(r.HookCost), r.SpanID)
 		}
 	}
-	fmt.Fprintf(w, "\nnext: juju-lens inspect events %s --fail problem\n", s.rec)
+	fmt.Fprintf(w, "\nnext: juju-lens inspect events %s%s --fail problem\n", s.rec, s.scope)
 	if len(s.Costliest) > 0 {
-		fmt.Fprintf(w, "      juju-lens inspect costs %s\n", s.rec)
+		fmt.Fprintf(w, "      juju-lens inspect costs %s%s\n", s.rec, s.scope)
 	}
 	fmt.Fprintf(w, "      juju-lens inspect logs %s --level error,warning\n", s.rec)
 }
@@ -183,11 +187,11 @@ func scopeWords(p *recording.ExportScope) string {
 	for _, u := range p.Units {
 		parts = append(parts, "--unit "+u)
 	}
-	if !p.Since.IsZero() {
-		parts = append(parts, "--since "+p.Since.UTC().Format("2006-01-02T15:04:05Z"))
+	if p.Since != nil {
+		parts = append(parts, "--since "+p.Since.UTC().Format(time.RFC3339Nano))
 	}
-	if !p.Until.IsZero() {
-		parts = append(parts, "--until "+p.Until.UTC().Format("2006-01-02T15:04:05Z"))
+	if p.Until != nil {
+		parts = append(parts, "--until "+p.Until.UTC().Format(time.RFC3339Nano))
 	}
 	return strings.Join(parts, " ")
 }

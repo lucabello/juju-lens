@@ -517,7 +517,7 @@ func (v *ProfileView) WriteText(w io.Writer) error {
 		for _, r := range rows {
 			fmt.Fprintf(w, "%s  %.0f%%  [%s %s]\n  %s\n", m.Format(r.Value), r.Pct, r.Span, r.SpanID, strings.Join(r.Frames, ";"))
 		}
-		fmt.Fprintf(w, "\nstacks run outermost frame first, joined with ';'; each is in the span in brackets, whose id --span takes\n")
+		fmt.Fprintf(w, "\nshowing %d of %d stacks (--limit); stacks run outermost frame first, joined with ';'; each is in the span in brackets, whose id --span takes\n", len(rows), len(v.p.TopStacks(v.m(), 1<<30)))
 	}
 	v.footer(w)
 	return nil

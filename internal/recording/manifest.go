@@ -102,10 +102,10 @@ type Manifest struct {
 
 // ExportScope says which part of a recording an archive holds.
 type ExportScope struct {
-	Models []string  `json:"models,omitempty"`
-	Units  []string  `json:"units,omitempty"`
-	Since  time.Time `json:"since,omitempty"`
-	Until  time.Time `json:"until,omitempty"`
+	Models []string   `json:"models,omitempty"`
+	Units  []string   `json:"units,omitempty"`
+	Since  *time.Time `json:"since,omitempty"`
+	Until  *time.Time `json:"until,omitempty"`
 }
 
 // New builds a manifest with the given tool and controller identity. Started
